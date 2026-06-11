@@ -108,14 +108,15 @@ MailMate has two major runtime pieces:
    - Owns the real application.
    - Receives messages from Thunderbird through native messaging.
    - Normalizes message metadata and content snippets.
+   - Runs two pipelines: classify/understand (P1), then plan/guard (P2).
    - Runs policy checks.
    - Runs rule evaluation.
    - Calls AI providers through provider traits.
    - Constructs prompts.
    - Validates structured model output.
    - Plans actions.
-   - Records events.
-   - Stores rules, versions, evidence, outcomes, conflicts, and proposals.
+   - Captures per-task feedback (corrections + reasons) and audit entries.
+   - Stores rules, versions, evidence, conflicts, and proposals.
    - Explains decisions.
    - Powers the learning loop.
 
@@ -271,6 +272,10 @@ mailmate/
         datasets.rs
         export.rs
         lora.rs
+        trainer.rs
+        trainers/
+          mod.rs
+          external.rs
         evaluation.rs
         privacy.rs
 
@@ -439,6 +444,7 @@ Append-only timeline for cross-cutting provenance that is *not* task feedback.
 | `event_type` | TEXT | `action_applied`, `action_blocked_by_policy`, `provider_response_rejected`, rule lifecycle transitions, etc. |
 | `message_id` | TEXT NULL | Related message |
 | `thread_id` | TEXT NULL | Related thread |
+| `rule_kind` | TEXT NULL | `classification` or `action` when a rule is referenced |
 | `rule_id` | TEXT NULL | Related rule |
 | `rule_version_id` | TEXT NULL | Related rule version |
 | `proposal_id` | TEXT NULL | Related proposal |
@@ -511,6 +517,7 @@ Connects rules/proposals to observed events.
 | Column | Type | Notes |
 |---|---:|---|
 | `id` | TEXT PRIMARY KEY | `evid_...` |
+| `rule_kind` | TEXT NULL | `classification` or `action` (disambiguates `rule_id` across the two rule tables) |
 | `rule_id` | TEXT NULL | Rule supported by evidence |
 | `proposal_id` | TEXT NULL | Proposal supported by evidence |
 | `source_kind` | TEXT | Which feedback table the evidence row lives in (`filing`, `classification`, …) |
@@ -538,6 +545,7 @@ Records conflict detection output.
 | Column | Type | Notes |
 |---|---:|---|
 | `id` | TEXT PRIMARY KEY | `conf_...` |
+| `rule_kind` | TEXT | `classification` or `action` — conflicts are same-kind-only (the two effect spaces are disjoint), and this disambiguates which rule table the IDs reference |
 | `rule_a_id` | TEXT | First rule |
 | `rule_b_id` | TEXT | Second rule |
 | `conflict_kind` | TEXT | `contradictory_effect`, `overlap`, `unsafe_escalation` |
@@ -736,6 +744,7 @@ feedback row). Sole owner of shadow performance data.
 | Column | Type | Notes |
 |---|---:|---|
 | `id` | TEXT PRIMARY KEY | `shad_...` |
+| `rule_kind` | TEXT | `classification` or `action` (disambiguates the rule FKs) |
 | `rule_id` | TEXT | Rule fired |
 | `rule_version_id` | TEXT | Exact version |
 | `message_id` | TEXT | Message evaluated |
@@ -883,10 +892,18 @@ pub trait PolicyGuard: Send + Sync {
 ```rust
 #[async_trait]
 pub trait LearningEngine: Send + Sync {
-    async fn record_event(
+    /// Capture a task-shaped correction (AI proposal + human correction + reason)
+    /// into its per-task feedback table — the single owner of that fact.
+    async fn record_feedback(
         &self,
-        event: LearningEvent,
-    ) -> Result<EventId, LearningError>;
+        feedback: TaskFeedback,
+    ) -> Result<FeedbackId, LearningError>;
+
+    /// Record a cross-cutting provenance fact with no other home.
+    async fn record_audit(
+        &self,
+        entry: AuditEntry,
+    ) -> Result<AuditId, LearningError>;
 
     async fn collect_evidence(
         &self,
@@ -897,13 +914,11 @@ pub trait LearningEngine: Send + Sync {
         &self,
         trigger: ProposalTrigger,
     ) -> Result<Vec<AgentProposal>, LearningError>;
-
-    async fn record_outcome(
-        &self,
-        outcome: RuleOutcome,
-    ) -> Result<(), LearningError>;
 }
 ```
+
+There is no `record_outcome`: rule performance (`RuleOutcome`) is a *view* derived
+from the feedback tables and `shadow_outcomes`, so it is queried, never written.
 
 ### Action planner trait
 
@@ -920,19 +935,30 @@ pub trait ActionPlanner: Send + Sync {
 ### Storage repository traits
 
 ```rust
+/// One repository per rule kind (classification vs. action) over a shared
+/// generic — two tables, one mechanism.
 #[async_trait]
-pub trait RuleRepository: Send + Sync {
-    async fn get_active_rules(&self, scope: RuleScope) -> Result<Vec<Rule>, StorageError>;
-    async fn get_shadow_rules(&self, scope: RuleScope) -> Result<Vec<Rule>, StorageError>;
-    async fn save_rule_draft(&self, draft: RuleDraft) -> Result<RuleId, StorageError>;
-    async fn create_rule_version(&self, version: NewRuleVersion) -> Result<RuleVersionId, StorageError>;
+pub trait RuleRepository<R: RuleKind>: Send + Sync {
+    async fn get_active_rules(&self, scope: RuleScope) -> Result<Vec<R::Rule>, StorageError>;
+    async fn get_shadow_rules(&self, scope: RuleScope) -> Result<Vec<R::Rule>, StorageError>;
+    async fn save_rule_draft(&self, draft: R::Draft) -> Result<RuleId, StorageError>;
+    async fn create_rule_version(&self, version: R::NewVersion) -> Result<RuleVersionId, StorageError>;
     async fn update_rule_status(&self, rule_id: RuleId, status: RuleStatus) -> Result<(), StorageError>;
 }
 
+/// Append-only audit timeline (cross-cutting provenance only — never corrections).
 #[async_trait]
-pub trait EventRepository: Send + Sync {
-    async fn append(&self, event: LearningEvent) -> Result<EventId, StorageError>;
-    async fn query(&self, query: EventQuery) -> Result<Vec<LearningEvent>, StorageError>;
+pub trait AuditRepository: Send + Sync {
+    async fn append(&self, entry: AuditEntry) -> Result<AuditId, StorageError>;
+    async fn query(&self, query: AuditQuery) -> Result<Vec<AuditEntry>, StorageError>;
+}
+
+/// One typed repository per task-feedback table (classification, filing, draft,
+/// summary, task extraction, rule proposal) — each the sole writer of its fact.
+#[async_trait]
+pub trait FeedbackRepository<F: TaskFeedbackKind>: Send + Sync {
+    async fn append(&self, row: F::Row) -> Result<FeedbackId, StorageError>;
+    async fn query(&self, query: F::Query) -> Result<Vec<F::Row>, StorageError>;
 }
 ```
 
@@ -1001,6 +1027,7 @@ are surfaced as suggestions the user confirms.
 ```json
 {
   "protocol_version": "1.0",
+  "kind": "response",
   "request_id": "req_01HZY...",
   "status": "error",
   "error": {
@@ -1018,6 +1045,7 @@ are surfaced as suggestions the user confirms.
 ```json
 {
   "protocol_version": "1.0",
+  "kind": "request",
   "request_id": "req_classify_001",
   "type": "classify_message",
   "payload": {
@@ -1052,6 +1080,7 @@ are surfaced as suggestions the user confirms.
 ```json
 {
   "protocol_version": "1.0",
+  "kind": "response",
   "request_id": "req_classify_001",
   "status": "ok",
   "payload": {
@@ -1065,7 +1094,7 @@ are surfaced as suggestions the user confirms.
     "suggested_actions": [
       {
         "action_id": "act_001",
-        "kind": "tag_message",
+        "kind": "tag",
         "tag": "needs-review",
         "policy_outcome": "allowed"
       }
@@ -1074,7 +1103,7 @@ are surfaced as suggestions the user confirms.
     "explanation": {
       "summary": "Tagged as needs-review because a human-approved invoice rule matched.",
       "fired_rules": ["rule_invoice_review"],
-      "policy_checks": ["never_auto_delete_mail", "financial_move_requires_review"],
+      "policy_checks": ["never_auto_delete_mail", "financial_security_legal_move_requires_review"],
       "provider_suggestion_used": true
     }
   }
@@ -1086,6 +1115,7 @@ are surfaced as suggestions the user confirms.
 ```json
 {
   "protocol_version": "1.0",
+  "kind": "request",
   "request_id": "req_event_001",
   "type": "record_user_action",
   "payload": {
@@ -1099,11 +1129,19 @@ are surfaced as suggestions the user confirms.
 }
 ```
 
+`record_user_action` is the wire carrier for `UserCorrection`s and observed user
+behavior. The host routes each `event_type` to its single owner: corrections of an AI
+suggestion land in the matching per-task feedback table (a manual move →
+`filing_feedback`, spam/not-spam → `classification_feedback`, including the prompted
+reason when the user supplies one); pure provenance facts land in `audit_log`. Nothing
+is written to two places.
+
 ### `draft_reply` request
 
 ```json
 {
   "protocol_version": "1.0",
+  "kind": "request",
   "request_id": "req_draft_001",
   "type": "draft_reply",
   "payload": {
@@ -1120,6 +1158,7 @@ are surfaced as suggestions the user confirms.
 ```json
 {
   "protocol_version": "1.0",
+  "kind": "response",
   "request_id": "req_draft_001",
   "status": "ok",
   "payload": {
@@ -1139,6 +1178,7 @@ are surfaced as suggestions the user confirms.
 ```json
 {
   "protocol_version": "1.0",
+  "kind": "request",
   "request_id": "req_rule_review_001",
   "type": "review_rule_proposal",
   "payload": {
@@ -1222,7 +1262,7 @@ code. (This closes the former Open Question on rule condition language.)
     ]
   },
   "effect": {
-    "tag_message": ["receipt"],
+    "tag": ["receipt"],
     "priority": "normal"
   }
 }
@@ -1485,7 +1525,7 @@ pub struct GuardedActionPlan {
 
 ### Policy examples
 
-- `tag_message("receipt")` for a low-risk receipt classification: **allowed**.
+- `Tag("receipt")` for a low-risk receipt classification: **allowed**.
 - `Move("Receipts")` for an ordinary software receipt with an explicit human rule: **allowed**.
 - `Move("Archive")` for a bank security alert without explicit allowance: **requires_review**.
 - `delete_message`: **blocked**.
@@ -1502,10 +1542,11 @@ The learning loop turns user behavior into explicit, reviewable rules.
 User action or system decision
         |
         v
-Learning event appended
+Per-task feedback row captured (proposal + correction + reason)
+or audit entry appended
         |
         v
-Evidence aggregation
+Evidence aggregation over feedback tables
         |
         v
 Pattern detection
@@ -1677,7 +1718,7 @@ The initial learning model should not require training neural-network weights. M
 - Frequency counters.
 - Online statistics.
 - Similarity clustering over message features.
-- Logistic regression or naive Bayes over extracted features.
+- Online logistic regression with a calibration table over extracted features (the cascade's Tier 2 — naive Bayes was considered and rejected for poor calibration; see *Classification Cascade*).
 - Contextual bandits for low-risk choices such as prompt template selection.
 - Calibration tables for provider confidence.
 - Rule outcome scoring.
@@ -1965,13 +2006,15 @@ These labels support supervised fine-tuning datasets, preference datasets, and e
 
 ### Training example object
 
-The durable internal representation should be provider-neutral and task-specific.
+Training examples are **not durable rows** — they are derived at export time from the
+per-task feedback tables. The export-time representation should be provider-neutral
+and task-specific:
 
 ```json
 {
   "id": "trn_001",
   "task": "draft_reply",
-  "source_event_ids": ["evt_draft_generated", "evt_draft_edited", "evt_draft_sent"],
+  "source_feedback": { "kind": "draft", "id": "drffb_001" },
   "privacy_level": "redacted",
   "base_model_family": "llama",
   "input": {
@@ -2003,7 +2046,7 @@ Negative example:
 {
   "id": "trn_002",
   "task": "draft_reply",
-  "source_event_ids": ["evt_draft_generated", "evt_draft_discarded"],
+  "source_feedback": { "kind": "draft", "id": "drffb_002" },
   "privacy_level": "redacted",
   "input": {
     "instruction": "Reply to the vendor about payment details.",
@@ -2096,7 +2139,8 @@ pub struct AdapterSpec {
     pub chat_template_hash: Option<String>,
 }
 
-pub trait SupportsAdapters {
+#[async_trait]
+pub trait SupportsAdapters: AiProvider {
     fn can_load_adapter(&self, adapter: &AdapterSpec) -> AdapterCompatibility;
     async fn load_adapter(&self, adapter: AdapterSpec) -> Result<(), AiProviderError>;
     async fn unload_adapter(&self, adapter_id: AdapterId) -> Result<(), AiProviderError>;
@@ -2194,21 +2238,22 @@ Ambiguous behavior, such as ignoring a suggestion, should not automatically beco
 
 ### Training pipeline boundary
 
-MailMate should initially focus on dataset capture/export and evaluation. Actual LoRA training can be external at first, then optionally integrated later.
+The **whole pipeline is built and TDD'd from the start**; only the weight-crunching
+itself sits behind a **pluggable trainer backend** (external documented toolchain by
+default, invoked as a subprocess; swappable for an in-process backend later). MailMate
+drives every step:
 
-Recommended staged pipeline:
-
-1. Capture training examples locally.
-2. Redact and normalize examples.
-3. Split into train/validation/test/holdout.
+1. Per-task feedback tables capture corrections + reasons continuously (core, not training-specific).
+2. At export time: derive examples from the feedback tables, redact, normalize.
+3. Split deterministically into train/validation/test/holdout (a function of source-row IDs, not a stored column).
 4. Export JSONL datasets.
-5. Train LoRA externally with a documented toolchain.
+5. Invoke the trainer backend (default: external toolchain via subprocess).
 6. Import adapter metadata and artifact path.
 7. Run local evaluation fixtures.
-8. Activate adapter only if evaluation passes and the user approves.
-9. Continue collecting positive and negative examples for the next adapter version.
+8. Activate adapter only if evaluation gates pass and the user approves.
+9. Feedback capture continues; the next adapter version derives from the grown tables.
 
-This keeps the architecture portable and avoids coupling MailMate to one trainer, GPU setup, or model host.
+This keeps the architecture portable and avoids coupling MailMate to one trainer, GPU setup, or model host — while the orchestration, gates, and tests exist from day one.
 
 ### Evaluation gates before activating a LoRA
 
@@ -2280,7 +2325,11 @@ The agent curator must not:
   "title": "Tag recurring newsletter as reading",
   "rationale": "The user moved 6 messages from the same sender to Reading and tagged 4 of them as newsletter.",
   "recommended_status": "pending_human_review",
-  "evidence_event_ids": ["evt_001", "evt_004", "evt_009"],
+  "evidence_refs": [
+    { "kind": "filing", "id": "filfb_001" },
+    { "kind": "filing", "id": "filfb_004" },
+    { "kind": "filing", "id": "filfb_009" }
+  ],
   "rule_draft": {
     "condition": {
       "all": [
@@ -2302,6 +2351,7 @@ The agent curator must not:
   "risk_level": "medium",
   "title": "Split broad invoice rule by sender domain",
   "rationale": "The current invoice rule has 3 recent overrides for bank emails but performs well for software vendors.",
+  "target_rule_kind": "action",
   "target_rule_id": "rule_invoice_review",
   "recommended_status": "pending_human_review"
 }
@@ -2374,7 +2424,11 @@ model = "configured-by-user"
 kind = "openai_compatible"
 endpoint = "https://api.example.com/v1"
 model = "configured-by-user"
-api_key_env = "MAILMATE_OPENAI_COMPATIBLE_API_KEY"
+# Baseline: key in a 0600-permission file in MailMate's config dir (survives
+# GUI-launched Thunderbird, which does not inherit shell exports).
+api_key_file = "secrets/openai_compatible.key"
+# Optional upgrade: OS keychain. Env var is a dev-only override:
+# api_key_env = "MAILMATE_OPENAI_COMPATIBLE_API_KEY"
 
 [ai.providers.test]
 kind = "mock"
@@ -2490,7 +2544,7 @@ Hard requirements:
 - Do not commit the user to legal positions unless present in the thread or explicitly provided.
 - Do not make promises unless present in the thread or explicitly provided.
 - Drafts must be created for human review only.
-- Edits to drafts must become learning events.
+- Edits to drafts must be captured in `draft_feedback` / `draft_edit_history`.
 
 ### Draft validation
 
@@ -2627,6 +2681,17 @@ Every automatic or suggested action must be traceable to:
 - Final action plan.
 - Thunderbird execution result.
 
+### Decision identity
+
+There is **no `decisions` table**. A `decision_id` (`dec_...`) is an **ephemeral
+correlation ID** minted per evaluation run and stamped into the rows that record the
+run's facts — `audit_log` entries and any per-task feedback rows it produces — plus
+the protocol payloads. Provenance (which rule/prompt/model/calibration versions
+produced a result) lives in each feedback row's own `pinned_versions_json`, not in a
+shared spine; the correlation ID only lets the audit view stitch one run's rows back
+together. `RuleEngine::explain(decision_id)` reconstructs an explanation by querying
+those rows.
+
 ### Explanation example
 
 ```json
@@ -2651,7 +2716,7 @@ Every automatic or suggested action must be traceable to:
     "confidence": 0.91
   },
   "policy": {
-    "allowed": ["tag_message"],
+    "allowed": ["tag"],
     "requires_review": ["move"],
     "blocked": []
   },
@@ -3109,7 +3174,7 @@ Every feature area must define all three layers:
 | Layer | Purpose | Examples |
 |---|---|---|
 | Unit tests | Verify isolated behavior and edge cases. | Rule condition evaluation, policy decisions, prompt validation, dataset label scoring. |
-| Integration tests | Verify module boundaries and persistence. | Native protocol → app core → storage with mock provider; learning event → training example capture. |
+| Integration tests | Verify module boundaries and persistence. | Native protocol → app core → storage with mock provider; correction → feedback-row capture → dataset export. |
 | End-to-end tests | Verify user-visible flow. | Thunderbird selected message → native host classification → safe tag action; draft reply → edit event → training example. |
 
 If true Thunderbird automation is unavailable in CI, end-to-end tests should use a Thunderbird adapter harness that sends the same native messages the extension sends and verifies the same action responses the extension consumes.
@@ -3127,7 +3192,7 @@ Cover:
 - Provider response validation.
 - Prompt construction redaction.
 - Draft safety validation.
-- Event serialization.
+- Feedback-row and audit-entry serialization.
 
 ### Rule engine tests
 
@@ -3173,11 +3238,14 @@ Required cases:
 
 - Request envelope parsing.
 - Response envelope serialization.
+- Notification envelope serialization (host-initiated, `notification_id`).
+- `kind` discriminator handling, including unknown-kind rejection.
 - Unknown protocol version handling.
 - Unknown request type handling.
 - Malformed JSON handling.
 - Request ID correlation.
-- Large message handling.
+- Single-writer stdout: concurrent notification + response writes never interleave frames.
+- Oversize-frame guard: a frame that would exceed the 1 MB host→extension limit becomes a structured `error`, never a written frame.
 - Error response formatting.
 
 ### Storage migration tests
@@ -3187,7 +3255,7 @@ Required cases:
 - Fresh database migration.
 - Migration from each prior version.
 - Rule version immutability.
-- Event append behavior.
+- Audit-log and feedback-table append behavior.
 - Foreign-key constraints.
 - Privacy default: full bodies not retained.
 
@@ -3196,8 +3264,12 @@ Required cases:
 Required cases:
 
 - Classify message end-to-end through Rust core using mock provider.
-- Record user move event and generate evidence.
-- Propose a rule from repeated events.
+- Background queue: new-mail event → `classification_status` pending → worker drains → `classification_ready` notification pushed.
+- Queue recovery: `pending`/`processing` rows are requeued after host restart.
+- Priority lane: an opened-but-unclassified message jumps the queue.
+- Cascade gating: a Tier-1/Tier-2-confident message never reaches the LLM task; an ambiguous one escalates.
+- Record a user move as a `filing_feedback` row and generate evidence.
+- Propose a rule from repeated feedback rows.
 - Accept rule into shadow mode.
 - Shadow rule records outcomes but does not execute move.
 - Activate rule and produce action plan.
@@ -3290,13 +3362,13 @@ Historical fixtures must be sanitized and should not require full body retention
 ### Phase 6: Action planner
 
 1. Build action planner that combines policy, rules, and provider suggestions.
-2. Support tag, junk mark, suggest move, allowed move, draft reply, summary, task extraction, explanations, spam training, not-spam training, and learn-this-filing-action.
+2. Support the three action vocabularies: `PlannedAction` (`Tag`, `Move`, `MarkJunk`, `CreateDraft`, `RequireReview` — suggested vs. applied is the `PolicyOutcome`), `TaskRequest` (`SummarizeThread`, `ExtractTasks`, `ExplainClassification`, `DraftReply`), and `UserCorrection` (`MarkSpam`, `MarkNotSpam`, `LearnFiling`).
 3. Add integration tests using mock provider.
 
 ### Phase 7: Learning engine
 
-1. Append all user/system actions as learning events.
-2. Aggregate evidence from repeated events.
+1. Capture corrections into the per-task feedback tables (with prompted reasons) and cross-cutting facts into `audit_log`.
+2. Aggregate evidence from repeated feedback rows.
 3. Generate candidate rule proposals.
 4. Add proposal review statuses.
 5. Add shadow testing.
@@ -3390,4 +3462,4 @@ Resolved during this design pass:
 
 MailMate should be built as a modular Rust application with Thunderbird as a thin adapter. The core value is a learning system based on explicit, versioned, auditable, testable, reversible rules. AI providers are useful advisors and curators, but they are replaceable and never bypass policy, rules, validation, or human review.
 
-The safest path is to implement the policy guard, rule engine, event store, and mock provider before adding real provider adapters. That keeps MailMate testable, provider-agnostic, and faithful to its core design: a local-first mail assistant that improves over time through explicit human-curated principles.
+The safest path is to implement the policy guard, rule engine, feedback/audit store, and mock provider before adding real provider adapters. That keeps MailMate testable, provider-agnostic, and faithful to its core design: a local-first mail assistant that improves over time through explicit human-curated principles.
