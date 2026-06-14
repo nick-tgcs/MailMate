@@ -95,6 +95,17 @@ pub enum StorageError {
     Backend(String),
 }
 
+/// Failures from the `PolicyGuard` port.
+#[derive(Debug, thiserror::Error)]
+pub enum PolicyError {
+    /// The policy context was missing a signal a policy needed to decide.
+    #[error("policy context incomplete: {0}")]
+    IncompleteContext(String),
+    /// An adapter-specific failure while evaluating policy.
+    #[error("policy guard error: {0}")]
+    Backend(String),
+}
+
 /// Aggregate error for call sites that prefer one type over per-port enums.
 #[derive(Debug, thiserror::Error)]
 pub enum MailMateError {
@@ -113,6 +124,9 @@ pub enum MailMateError {
     /// A storage-seam failure.
     #[error(transparent)]
     Storage(#[from] StorageError),
+    /// A policy-guard failure.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
 }
 
 #[cfg(test)]

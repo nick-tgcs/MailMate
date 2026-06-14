@@ -20,6 +20,7 @@ members = [
     "crates/mailmate-core",
     "crates/mailmate-native-host",
     "crates/mailmate-storage",
+    "crates/mailmate-policy",
     "crates/mailmate-test-support",
     "crates/mailmate-core-tests",
     "crates/mailmate-arch-test",

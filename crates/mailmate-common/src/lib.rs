@@ -10,12 +10,14 @@
 //! cross-cutting ports (`MailClient`, `Transport`, `Clock`, `SecretStore`,
 //! `FeatureExtractor`, `Tier2Classifier`) reference.
 
+pub mod action;
 pub mod draft;
 pub mod error;
 pub mod features;
 pub mod ids;
 pub mod mail;
 pub mod message;
+pub mod policy;
 pub mod protocol;
 pub mod retention;
 pub mod secret;

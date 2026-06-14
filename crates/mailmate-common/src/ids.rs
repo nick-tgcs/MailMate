@@ -91,6 +91,11 @@ id_newtype!(
     SenderId
 );
 id_newtype!(
+    "dec",
+    #[doc = "Policy/planning decision id (`dec_…`)."]
+    DecisionId
+);
+id_newtype!(
     "mf",
     #[doc = "Message-feature row id (`mf_…`)."]
     MessageFeatureId
@@ -132,5 +137,7 @@ mod tests {
         assert!(SenderId::fresh().as_str().starts_with("sender_"));
         assert_eq!(MessageFeatureId::PREFIX, "mf");
         assert!(MessageFeatureId::fresh().as_str().starts_with("mf_"));
+        assert_eq!(DecisionId::PREFIX, "dec");
+        assert!(DecisionId::fresh().as_str().starts_with("dec_"));
     }
 }
