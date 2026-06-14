@@ -1,0 +1,135 @@
+# Comprehensive, always-running PR validation.
+#
+# Per the architecture's CI policy, validation is ONE always-running workflow whose
+# jobs map to the required dimensions (fmt, clippy, unit/integration/e2e, migration,
+# native-protocol, provider, training-data, coverage, architecture). Subsystems not
+# yet built simply contribute zero tests — `cargo test --workspace` still passes — so
+# the required check never deadlocks waiting on a status that cannot yet report. As
+# TDD lands each subsystem with its tests, the same jobs grow to cover it.
+#
+# Branch protection requires the single aggregate `validation-gate` check, which
+# `needs` every required job below.
+name: pr-validation
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (warnings denied)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: tests (unit + integration + e2e/harness + protocol + provider)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+  migration:
+    name: storage migrations (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    # SQLite is the always-required leg; server engines are opt-in and non-blocking,
+    # so an external database is never a required-check dependency.
+    continue-on-error: ${{ matrix.engine != 'sqlite' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [sqlite]
+        # Opt-in, non-blocking server legs (enable when the backends land):
+        # include:
+        #   - engine: postgres
+        #   - engine: mariadb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      # Migration tests are ordinary cargo tests filtered by name; the filter
+      # matches nothing until the storage crate lands, which passes trivially.
+      - run: cargo test --workspace migration
+
+  arch-guards:
+    name: architecture guards (no-backend-leakage + dep hygiene)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p mailmate-arch-test
+      - run: ci/scripts/test-interface-no-backend-leakage.sh
+      - run: ci/scripts/test-real-adapter-deps.sh
+
+  coverage:
+    name: coverage gate (>=80%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: ci/scripts/coverage-gate.sh
+      - name: Upload coverage (lcov)
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: warn
+
+  validation-gate:
+    name: validation-gate
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, test, migration, arch-guards, coverage]
+    if: always()
+    steps:
+      - name: Assert all required jobs succeeded
+        run: |
+          echo "fmt=${{ needs.fmt.result }} clippy=${{ needs.clippy.result }} test=${{ needs.test.result }} migration=${{ needs.migration.result }} arch-guards=${{ needs.arch-guards.result }} coverage=${{ needs.coverage.result }}"
+          # The required sqlite migration leg runs inside the `migration` job; only
+          # opt-in server legs are continue-on-error, so `migration.result` is
+          # success iff the required leg passed.
+          [ "${{ needs.fmt.result }}" = "success" ] || { echo "fmt failed"; exit 1; }
+          [ "${{ needs.clippy.result }}" = "success" ] || { echo "clippy failed"; exit 1; }
+          [ "${{ needs.test.result }}" = "success" ] || { echo "test failed"; exit 1; }
+          [ "${{ needs.migration.result }}" = "success" ] || { echo "migration(sqlite) failed"; exit 1; }
+          [ "${{ needs.arch-guards.result }}" = "success" ] || { echo "arch-guards failed"; exit 1; }
+          [ "${{ needs.coverage.result }}" = "success" ] || { echo "coverage failed"; exit 1; }
+          echo "validation-gate: PASSED"

@@ -1,0 +1,32 @@
+# One PR per dependency/security issue, targeting the develop integration branch.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    target-branch: develop
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+      - rust
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    target-branch: develop
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - dependencies
+      - github-actions
+
+  # Enable when the Thunderbird extension's package.json lands (Phase 1/10):
+  # - package-ecosystem: npm
+  #   directory: "/extension"
+  #   schedule:
+  #     interval: weekly
+  #   target-branch: develop

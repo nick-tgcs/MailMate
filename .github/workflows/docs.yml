@@ -1,0 +1,64 @@
+# Documentation validation: Markdown link integrity and the safety/policy
+# invariants the architecture must always assert. Runs on develop/main and PRs.
+name: docs
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  links:
+    name: markdown link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check internal Markdown links resolve
+        run: |
+          set -euo pipefail
+          fail=0
+          # For every [text](relative/path) link in tracked Markdown, verify the
+          # target file exists (skip external URLs and in-page #anchors).
+          while IFS= read -r md; do
+            while IFS= read -r target; do
+              case "${target}" in
+                http://*|https://*|mailto:*|"#"*|"") continue ;;
+              esac
+              path="${target%%#*}"   # strip any #anchor
+              [ -z "${path}" ] && continue
+              dir="$(dirname "${md}")"
+              if [ ! -e "${dir}/${path}" ] && [ ! -e "${path}" ]; then
+                echo "BROKEN LINK in ${md}: ${target}"
+                fail=1
+              fi
+            done < <(grep -oE '\]\([^)]+\)' "${md}" | sed -E 's/^\]\(([^)]+)\)$/\1/')
+          done < <(git ls-files '*.md')
+          [ "${fail}" -eq 0 ] && echo "All internal Markdown links resolve."
+          exit "${fail}"
+
+  safety-invariants:
+    name: architecture safety invariants present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert required safety/policy constraints are documented
+        run: |
+          set -euo pipefail
+          fail=0
+          require() {
+            if ! grep -q "$1" architecture.md; then
+              echo "MISSING required architecture invariant: $1"
+              fail=1
+            fi
+          }
+          require "never_auto_send_drafts"
+          require "RequireReview"
+          require "policy guard"
+          require "shadow"
+          require "determinism"
+          [ "${fail}" -eq 0 ] && echo "All required safety invariants documented."
+          exit "${fail}"
