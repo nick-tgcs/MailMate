@@ -9,33 +9,36 @@
 1. [Goals](#goals)
 2. [Non-Goals](#non-goals)
 3. [Architecture Overview](#architecture-overview)
-4. [Component Diagram](#component-diagram)
-5. [Module Layout](#module-layout)
-6. [Core Domain Model](#core-domain-model)
-7. [Data Model](#data-model)
-8. [Rust Trait and Interface Definitions](#rust-trait-and-interface-definitions)
-9. [Native Messaging Protocol](#native-messaging-protocol)
-10. [Rule and Principle System](#rule-and-principle-system)
-11. [Rule Lifecycle](#rule-lifecycle)
-12. [Two Pipelines](#two-pipelines)
-13. [Classification Cascade](#classification-cascade)
-14. [Rule Hierarchy and Decision Order](#rule-hierarchy-and-decision-order)
-15. [Policy Guard Design](#policy-guard-design)
-16. [Learning Loop](#learning-loop)
-17. [Self-Iteration Learning Model](#self-iteration-learning-model)
-18. [Portable LoRA Training Layer](#portable-lora-training-layer)
-19. [Agent Curator](#agent-curator)
-20. [Provider-Abstraction Layer](#provider-abstraction-layer)
-21. [Action Planning and Execution](#action-planning-and-execution)
-22. [Drafting Safety](#drafting-safety)
-23. [Storage Strategy](#storage-strategy)
-24. [Auditability and Explainability](#auditability-and-explainability)
-25. [GitHub Workflow, CI, and Releases](#github-workflow-ci-and-releases)
-26. [Distribution and Installation](#distribution-and-installation)
-27. [Testing Strategy](#testing-strategy)
-28. [Implementation Sequence](#implementation-sequence)
-29. [Risks and Mitigations](#risks-and-mitigations)
-30. [Open Design Questions](#open-design-questions)
+4. [Architectural Style and Event Model](#architectural-style-and-event-model)
+5. [Component Diagram](#component-diagram)
+6. [Module Layout](#module-layout)
+7. [Core Domain Model](#core-domain-model)
+8. [Data Model](#data-model)
+9. [Rust Trait and Interface Definitions](#rust-trait-and-interface-definitions)
+10. [Replaceable Components and Extension Points](#replaceable-components-and-extension-points)
+11. [Native Messaging Protocol](#native-messaging-protocol)
+12. [Rule and Principle System](#rule-and-principle-system)
+13. [Rule Lifecycle](#rule-lifecycle)
+14. [Two Pipelines](#two-pipelines)
+15. [Classification Cascade](#classification-cascade)
+16. [Rule Hierarchy and Decision Order](#rule-hierarchy-and-decision-order)
+17. [Policy Guard Design](#policy-guard-design)
+18. [Learning Loop](#learning-loop)
+19. [Self-Iteration Learning Model](#self-iteration-learning-model)
+20. [On-Device Training Layer](#on-device-training-layer)
+21. [Agent Curator](#agent-curator)
+22. [Provider-Abstraction Layer](#provider-abstraction-layer)
+23. [Action Planning and Execution](#action-planning-and-execution)
+24. [Sales Pipeline and Follow-up Workflows](#sales-pipeline-and-follow-up-workflows)
+25. [Drafting Safety](#drafting-safety)
+26. [Storage Strategy](#storage-strategy)
+27. [Auditability and Explainability](#auditability-and-explainability)
+28. [GitHub Workflow, CI, and Releases](#github-workflow-ci-and-releases)
+29. [Distribution and Installation](#distribution-and-installation)
+30. [Testing Strategy](#testing-strategy)
+31. [Implementation Sequence](#implementation-sequence)
+32. [Risks and Mitigations](#risks-and-mitigations)
+33. [Open Design Questions](#open-design-questions)
 
 ---
 
@@ -52,10 +55,13 @@ MailMate should support:
 - Task extraction.
 - Priority tagging.
 - Email triage.
+- Lightweight sales-pipeline tracking with review-required, time-triggered follow-up drafts for quotes/proposals, whose cadence, content, and stop conditions are learned.
 - Learning from user behavior through explicit rules/principles.
 - Human approval, editing, rejection, disabling, and override of learned behavior.
 - Safe, auditable automation.
 - Test-driven development for all production code, with unit, integration, and end-to-end coverage for every feature area.
+
+**v1 ships the full product.** The Implementation-Sequence phases are engineering build order, not a staged feature release — there is no reduced MVP slice. v1 is feature-complete across the goals above.
 
 The central product idea is not “an artificial intelligence (AI) wrapper for email.” The central product idea is a **learning decision system** for email, where AI is one replaceable advisor inside a larger rule, policy, storage, and review architecture.
 
@@ -68,6 +74,10 @@ The system should be inspired by Ray Dalio-style principles:
 - Rules are reviewed.
 - Rules are improved or retired.
 - Humans remain able to override any decision.
+
+**Determinism first — a learned trait becomes a model-free rule.** AI and machine learning are how MailMate *discovers* a principle and how it handles what it has **not yet** learned — never how it **re-decides** something it has **already** learned. The instant a trait is learned, its terminal form is a **deterministic rule** (a versioned JSON-AST condition over deterministic features) that runs with **no LLM and no model inference at all**: same input → same output, offline, reproducible, audit-replayable, and fully functional with **zero AI providers configured**. The model tiers are the *teacher* and the *fallback for the not-yet-learned*; the deterministic rule layer is the *steady-state executor* — and learned rules already outrank model predictions at runtime. See *Learning Loop → Crystallization* (the promotion mechanism) and *Classification Cascade* (model use shrinking as rules accrue).
+
+**Frozen foundations, learned layer in Burn — and both behind ports.** MailMate never *fine-tunes the large model*. Any generative LLM (drafting, summaries) runs **frozen** on a mature local engine through the `AiProvider` trait — exactly as the sibling project **[idiolect](https://github.com/nick-tgcs/idiolect)** runs Whisper frozen via `whisper-rs`. The **learned layer is Rust-native Burn**, on-device: the Tier-2 classifier, preference/scoring/tone models, and the trainer — pinned to an exact Burn version, CPU/ndarray by default, GPU opt-in. The learning thesis rides on *small Burn models + crystallized rules + an eval/promotion gate*, **not** on LoRA-adapting a big LLM (idiolect ships exactly this shape today, so it is buildable now). Burn is the committed default **but lives entirely behind engine-neutral contracts + a trait + a swappable adapter** (idiolect's `idiolect-ml-core` / `idiolect-ports` / `idiolect-trainer-burn` split), so it can be replaced if and when needed — *committed ≠ welded-in*. See *On-Device Training Layer* and *Replaceable Components and Extension Points*.
 
 ---
 
@@ -88,6 +98,8 @@ MailMate should intentionally avoid these behaviors:
 - Silently creating hidden rules.
 - Allowing AI-generated rules to become active without review when they could cause risky actions.
 - Training on private user data outside the local system unless the user explicitly configures a remote provider and accepts its privacy implications.
+- Building a full CRM. The pipeline tracker is a *lightweight* follow-up tracker (enroll a quote, stage it won/lost, draft timely nudges for review) — not contact management, quote/line-item authoring, revenue forecasting, or sales automation.
+- Auto-sending follow-ups. Scheduled follow-ups are **review-required drafts only**; there is no auto-send or gated-auto-send path for follow-ups. This reaffirms the "Auto-sending drafts" non-goal above — `never_auto_send_drafts` is unchanged.
 
 ---
 
@@ -121,6 +133,64 @@ MailMate has two major runtime pieces:
    - Powers the learning loop.
 
 The Thunderbird layer should be treated like a UI/client adapter. The Rust host should be treated like the product.
+
+---
+
+## Architectural Style and Event Model
+
+This section names MailMate's architectural style in one place, because the
+underlying decisions are otherwise scattered across *Native Messaging Protocol*,
+*Capture model: single writer per fact*, *Two Pipelines*, and *Decision identity*.
+
+**One-line classification.** MailMate is **event-driven at its Thunderbird boundary
+and queue-driven in the background, over a synchronous pipeline core, on a
+single-writer-per-fact relational store. It is deliberately NOT event-sourced and has
+no generic event bus.**
+
+**Dependency structure — ports and adapters (hexagonal), universally.** Every component sits behind a **port** (a Rust trait); the core (`mailmate-core`) depends **only** on ports and **never names a concrete impl** — no exceptions, **the LLM included**. Each port ships with at least one real **adapter** and a **mock**, and selection happens at the boundary (config or build feature). This is the same `core` / `ports` / `adapter-*` shape the sibling project **[idiolect](https://github.com/nick-tgcs/idiolect)** ships, and it covers not just the obvious engines (AI provider, storage, trainer, Tier-2 classifier) but **every** external or swappable concern: the **mail client** (Thunderbird is one adapter; a headless adapter drives tests), the **IPC transport**, the **clock**, the **secret store**, **embeddings**, **feature extraction**, prompt templates, and the review UI. "Frozen on a mature engine" for the LLM means exactly this — the engine is a *swappable adapter behind `AiProvider`*, not a hard-wired dependency. Enforcement is mechanical, not a style nit: a core module that imports a concrete engine, client, transport, or store is an **architecture-test failure** (idiolect ships precisely this guard as `test-interface-no-backend-leakage`; see *Replaceable Components and Extension Points* for the full seam list and *CI as enforcement for TDD and architecture constraints*).
+
+**Boundary — event-driven.** The extension forwards new-mail events and user actions
+(`record_user_action`), and the host answers asynchronously: classification is
+*background-queued with push*, and the host emits unsolicited `classification_ready`
+`notification` frames over the long-lived `runtime.connectNative` port (see *Native
+Messaging Protocol*). The extension registers a notification handler, not only
+response correlation — that is genuine event-driven messaging.
+
+**Background — queue-driven.** New mail enters a work queue tracked by
+`messages.classification_status` (`pending → processing → done/failed`); a worker
+drains it, escalates through the cascade, and pushes results when ready. The queue is
+recoverable after restart and has a priority lane. Async happens at the I/O edges; the
+storage writer is serialized (see *the embedded backend's execution model* under
+*Storage Strategy*). Note the protocol's *single-writer stdout* invariant and the
+storage *single-writer* model are unrelated concerns that merely share a name: one is
+about not interleaving native-messaging frames, the other about SQLite's write path.
+
+**Trigger sources — three, all reduced to durable state.** Three things start work in
+the host: (1) inbound-mail events, (2) user actions, and (3) **time** — a follow-up
+step coming due. Time is *not* a new event bus or a daemon: it is the single durable
+column `workflow_instances.next_due_at`, polled by an in-host *follow-up scheduler*
+worker exactly the way `messages.classification_status` is drained. Because the host
+only runs while Thunderbird is open, on startup the scheduler **catches up** — it
+reconciles every elapsed due-time (coalescing a backlog into one current follow-up,
+never a blast) before resuming steady-state polling. No OS daemon, no event stream, not
+event-sourced. Each due step **drives the existing P2 plan/guard path** to emit a
+review-required draft; it does not classify and is not a third pipeline (see *Sales
+Pipeline and Follow-up Workflows*).
+
+**Core — pipeline/dataflow.** Once a message is in the host, processing is a
+deterministic two-stage pipeline (P1 classify → P2 plan/guard; see *Two Pipelines* and
+*Action flow*). Stages call each other directly; there is no internal event bus
+dispatching between them.
+
+**Explicitly not event-sourced.** There is no generic event stream, no fact lands in
+two tables, rule performance (`rule_outcomes` is a *view*, not a stored table) and the
+unified message timeline are *views* — not replayed projections — there is no
+`decisions` table, and `decision_id` is an ephemeral correlation ID, not an event spine
+(see *Capture model: single writer per fact* and *Decision identity*). Event sourcing
+is rejected on purpose: it would duplicate the training signal at lower fidelity and
+split single-writer ownership. The one CQRS-flavored note: writer-owned canonical
+tables vs. read-only SQL views — command/query separation over a relational store, not
+CQRS-over-an-event-store.
 
 ---
 
@@ -171,7 +241,7 @@ The Thunderbird layer should be treated like a UI/client adapter. The Rust host 
 |           v                         v                         v       |
 |  +----------------+       +----------------+       +----------------+ |
 |  | ai             |       | learning       |       | storage        | |
-|  | provider trait |       | engine         |       | SQLite         | |
+|  | provider trait |       | engine         |       | StorageBackend | |
 |  +-------+--------+       +----------------+       +----------------+ |
 |          |                                                            |
 |          v                                                            |
@@ -181,12 +251,28 @@ The Thunderbird layer should be treated like a UI/client adapter. The Rust host 
 |  +----------------+  +----------------------+  +--------------------+ |
 |          |                                                            |
 |          v                                                            |
-|  +----------------+                                                   |
-|  | mock provider  |                                                   |
-|  | for tests      |                                                   |
-|  +----------------+                                                   |
+|  +----------------+   +-------------------------------+               |
+|  | mock provider  |   | burn in-process provider      |               |
+|  | for tests      |   | (v1 supported; local-first)   |               |
+|  +----------------+   +-------------------------------+               |
 +-----------------------------------------------------------------------+
 ```
+
+Two things the boxes encode deliberately:
+
+- The **storage** box is the `StorageBackend` seam, not an engine. **SQLite is the
+  default**; a server engine (Postgres/MariaDB) is opt-in behind the same seam.
+- Every provider — including the optional **Burn in-process** provider — sits *behind*
+  the `ai provider trait`, never parallel to it. The Rust-native ML substrate
+  (`mailmate-ml`, Burn) likewise sits *behind* three traits: the `ai provider trait`
+  (optional inference), the Tier-2 `classifier-engine` trait (default), and the
+  `TrainerBackend` trait (default). "Trait first, Burn is one impl" — so nothing in the
+  core hard-depends on Burn any more than it does on Ollama.
+- The **`followup_scheduler`** (in `mailmate-workflow`) is neither a daemon nor a new
+  pipeline: it polls the durable `workflow_instances.next_due_at` column while the host
+  is alive (catch-up-on-launch) and *drives* `action_planner` (P2) to emit
+  review-required follow-up drafts. It sits beside the classification worker, never
+  parallel to the two pipelines (see *Sales Pipeline and Follow-up Workflows*).
 
 ---
 
@@ -227,6 +313,8 @@ mailmate/
         draft.rs
         task.rs
         priority.rs
+        pipeline.rs              # PipelineItem (deal/quote) + PipelineStage (pure data types)
+        workflow.rs              # WorkflowDefinition/Version + WorkflowInstance data + statuses
 
     mailmate-policy/
       Cargo.toml
@@ -263,6 +351,18 @@ mailmate/
         outcome.rs
         feedback.rs
 
+    mailmate-workflow/           # follow-up pipeline tracker (behaviour only; data types live
+                                 # in mailmate-domain). Reuses mailmate-rules version/lifecycle.
+      Cargo.toml
+      src/
+        lib.rs
+        definition.rs           # WorkflowDefinition/Version lifecycle (reuses rule machinery)
+        instance.rs             # WorkflowInstance state machine (the mutable cursor)
+        scheduler.rs            # FollowUpScheduler: catch-up-on-launch drain + coalescing guard
+        exit_detection.rs       # reply (host-side thread identity) / won-lost exits
+        emit.rs                 # builds ActionPlanningInput, DRIVES existing ActionPlanner + PolicyGuard
+        repo.rs                 # WorkflowRepository / PipelineItemRepository trait surfaces
+
     mailmate-training/
       Cargo.toml
       src/
@@ -272,10 +372,11 @@ mailmate/
         datasets.rs
         export.rs
         lora.rs
-        trainer.rs
+        trainer.rs               # defines the TrainerBackend trait (default impl: Burn, in mailmate-ml)
         trainers/
           mod.rs
-          external.rs
+          external.rs            # subprocess toolchain backend (pluggable fallback)
+          mock.rs               # in-memory trainer for tests (no GPU, no external tool)
         evaluation.rs
         privacy.rs
 
@@ -296,14 +397,28 @@ mailmate/
           llama_cpp.rs
           mock.rs
 
+    mailmate-ml/                 # Rust-native (Burn) ML substrate — feature-gated.
+                                 # Depends on the trait-owning crates below and
+                                 # implements their traits; never the reverse.
+      Cargo.toml
+      src/
+        lib.rs
+        backend.rs               # Burn compute-backend selection (NdArray/burn-flex CPU
+                                 # default; WGPU/CUDA/Metal opt-in for training/heavy inference)
+        classifier.rs            # default Tier-2 discriminative classifier
+                                 # (impl mailmate-rules/-ai Tier2Classifier trait)
+        trainer.rs               # default trainer (impl mailmate-training::TrainerBackend)
+        inference.rs             # v1-supported in-process AiProvider via burn-lm
+        import.rs                # safetensors / .pt / burn-onnx weight import
+
     mailmate-storage/
       Cargo.toml
       src/
         lib.rs
-        sqlite.rs
-        migrations.rs
-        repositories/
-          audit.rs
+        backend.rs               # StorageBackend trait + factory (reads [storage] config)
+        dialect.rs               # the ONE place engine-specific SQL fragments live
+        repositories/            # engine-neutral repository traits + shared impl,
+          audit.rs               # ABOVE the backend (the core only sees these)
           feedback.rs
           rules.rs
           messages.rs
@@ -312,6 +427,12 @@ mailmate/
           drafts.rs
           proposals.rs
           shadow.rs
+          pipeline_items.rs      # follow-up pipeline tables (deal, workflow def/version/instance)
+          workflow.rs
+          followup_feedback.rs
+        backends/
+          sqlite.rs              # default backend: rusqlite/r2d2/WAL/pragmas live HERE
+          postgres.rs            # documented stub (opt-in server backend; built when needed)
 
     mailmate-audit/
       Cargo.toml
@@ -338,10 +459,14 @@ mailmate/
     message_reader.js
     tests/
 
-  migrations/
-    0001_initial.sql
-    0002_rule_versions.sql
-    0003_audit_and_feedback.sql
+  migrations/                   # bundled (compiled into the host); applied in-process on startup.
+    common/                     # engine-neutral DDL (~90%): tables over TEXT/INTEGER,
+      0001_initial.sql          # app-generated prefixed-string PKs, no AUTOINCREMENT/SERIAL
+      0002_rule_versions.sql
+      0003_audit_and_feedback.sql
+      0004_followups.sql        # pipeline_items, workflow_*, followup_feedback, workflow_shadow_outcomes, workflow_conflicts
+    sqlite/                     # default overlay: JSON columns as TEXT, view bodies, PRAGMA/FK setup
+    postgres/                   # opt-in overlay stub: jsonb columns, server view bodies (added when needed)
 
   docs/
     architecture.md
@@ -374,12 +499,39 @@ Core concepts:
 - `AuditEntry`: cross-cutting provenance fact (policy block, provider rejection, lifecycle transition).
 - `AgentProposal`: AI-generated proposal requiring human review or shadow testing.
 - `DraftRecord`: generated draft plus subsequent edit telemetry, without requiring body retention by default.
+- `PipelineItem`: a lightweight tracked deal/quote with a `PipelineStage` (open/engaged/won/lost/abandoned), anchored to a thread — not a CRM record.
+- `WorkflowDefinition` / `WorkflowDefinitionVersion`: a versioned, shadow-testable, human-curated follow-up *cadence* (ordered day-offset steps) that reuses the rule lifecycle/version/conflict-record machinery — but is a cadence, not a condition→effect rule (see *Sales Pipeline and Follow-up Workflows*).
+- `WorkflowInstance`: the running follow-up state machine — the **single durable temporal trigger** (`next_due_at`, `current_step_index`, `status`), polled by the scheduler like `messages.classification_status`.
 
 ---
 
 ## Data Model
 
-SQLite is the initial storage engine. The schema should be migration-based and append-friendly.
+SQLite is the **default, zero-config local-first** storage engine. Storage is reached
+only through engine-neutral repository traits over a `StorageBackend` seam (see *Rust
+Trait and Interface Definitions* and *Replaceable Components and Extension Points*), so
+a server engine (Postgres/MariaDB) can be added as an opt-in **without touching the
+core**. The schema is migration-based (a shared `common` core plus per-dialect
+overlays) and append-friendly.
+
+### Portable column conventions
+
+The schema deliberately uses a portable lowest-common-denominator so the same tables
+work across engines with minimal per-dialect divergence:
+
+- **Primary keys** are app-generated prefixed strings (`msg_…`, `rv_…`, `dec_…` via
+  `mailmate-core::ids`), stored as `TEXT`. No `AUTOINCREMENT`/`SERIAL`/`IDENTITY`, so
+  identity is engine-independent — and because the id is known *before* insert, the
+  schema never needs `RETURNING` (which MySQL lacks and MariaDB only partly supports).
+- **Timestamps** are ISO-8601 `TEXT`; **booleans** are `INTEGER 0/1`. (A server engine
+  *may* map these to `TIMESTAMPTZ`/`BOOLEAN` in its overlay, but the portable default
+  keeps them as TEXT/INTEGER.)
+- **`*_json` columns** are opaque application JSON: `TEXT` on SQLite, `jsonb` on
+  Postgres, `JSON` on MySQL — the column *type* is the per-dialect part; the value is
+  written/read as a whole by Rust, not queried into with engine-specific JSON operators
+  unless a view explicitly needs to (see *Engine portability*).
+- The store is **append-only / append-friendly** with immutable versions, so it needs
+  no upserts today; any future upsert would be a `dialect` fragment, not core logic.
 
 ### `messages`
 
@@ -422,15 +574,22 @@ would duplicate the training signal at lower fidelity.
 
 - **Corrections / training signal** → the per-task feedback tables
   (`classification_feedback`, `filing_feedback`, `draft_feedback`,
-  `summary_feedback`, `task_extraction_feedback`, `rule_proposal_feedback`),
-  each the sole owner of its task's signal, capturing the AI proposal, the human
-  correction, and the **reason** for it.
-- **Rule performance** (the former `rule_outcomes`) and the **audit timeline**
-  are *views* over those tables — a view stores nothing, so it cannot duplicate.
+  `summary_feedback`, `task_extraction_feedback`, `rule_proposal_feedback`,
+  `followup_feedback`), each the sole owner of its task's signal, capturing the AI
+  proposal, the human correction, and the **reason** for it. (`followup_feedback` owns
+  the *cadence/timing* signal only; the follow-up draft's *body* signal stays in
+  `draft_feedback`, reached via `draft_id` — no fact in two tables.)
+- **Rule performance** (the former `rule_outcomes`), **workflow performance**, and the
+  **audit timeline** are *views* over those tables — a view stores nothing, so it cannot
+  duplicate.
 - Facts that are genuinely not task-feedback get their own dedicated owner table:
-  `rule_conflicts` (conflicts), `shadow_outcomes` (rules that fired in shadow but
-  never surfaced, so there is no feedback row), and a narrow `audit_log` for
-  cross-cutting provenance with no other home.
+  `rule_conflicts` (conflicts), `shadow_outcomes` (rules that fired in shadow),
+  `workflow_shadow_outcomes` (shadow follow-up steps — separate because they have no
+  triggering message), and a narrow `audit_log` for cross-cutting provenance with no
+  other home.
+- **Operational state** (not a fact-about-an-event) lives in `pipeline_items` and
+  `workflow_instances`; the latter is the one mutable cursor, with every transition and
+  fired step appended to `audit_log` so its history is reconstructable.
 
 No event type lands in two tables.
 
@@ -441,7 +600,7 @@ Append-only timeline for cross-cutting provenance that is *not* task feedback.
 | Column | Type | Notes |
 |---|---:|---|
 | `id` | TEXT PRIMARY KEY | `audit_...` |
-| `event_type` | TEXT | `action_applied`, `action_blocked_by_policy`, `provider_response_rejected`, rule lifecycle transitions, etc. |
+| `event_type` | TEXT | `action_applied`, `action_blocked_by_policy`, `provider_response_rejected`, rule lifecycle transitions, follow-up events (`followup_step_fired`, `followup_coalesced`, `followup_needs_attention`, `pipeline_item_stage_changed`), etc. |
 | `message_id` | TEXT NULL | Related message |
 | `thread_id` | TEXT NULL | Related thread |
 | `rule_kind` | TEXT NULL | `classification` or `action` when a rule is referenced |
@@ -538,6 +697,17 @@ version: fire count, applied count, `user_feedback` distribution
 (`accepted`/`undone`/`ignored`/`edited`), and `PolicyOutcome`
 (`allowed`/`requires_review`/`blocked`) breakdown.
 
+> **Engine-portability of views.** `CREATE VIEW` exists on every engine, but a view's
+> *body* is the least portable SQL in the system: the `user_feedback`/`PolicyOutcome`
+> distributions aggregate over plain columns (portable), but the unified message
+> timeline `UNION`s heterogeneous tables (type-affinity/`UNION` rules differ across
+> engines), and any view that reaches *inside* a `*_json` column needs engine-specific
+> JSON SQL. View DDL therefore lives in the per-dialect migration overlay, and the
+> honest fallback for the gnarlier projections is to **compute them in Rust over plain
+> row fetches** rather than as a DB view — accepting that "it's just a view" partly
+> dissolves once a second engine is supported. This applies equally to the unified
+> timeline view and the export-time training views.
+
 ### `rule_conflicts`
 
 Records conflict detection output.
@@ -628,7 +798,7 @@ Operational record behind a generated draft; `draft_edit_history` is its child.
 | Column | Type | Notes |
 |---|---:|---|
 | `id` | TEXT PRIMARY KEY | `draft_...` |
-| `message_id` | TEXT | Source message replied to |
+| `message_id` | TEXT NULL | Source message replied to; **NULL for a scheduled follow-up** (anchored instead to `thread_id` + the pipeline item's `anchor_message_id`) |
 | `thread_id` | TEXT NULL | FK to `threads.id` |
 | `provider_id` | TEXT | Provider that generated it |
 | `prompt_template_version` | TEXT | Versioned prompt used |
@@ -639,6 +809,109 @@ Operational record behind a generated draft; `draft_edit_history` is its child.
 | `status` | TEXT | `generated`, `edited`, `sent`, `discarded` |
 | `created_at` | TEXT | Timestamp |
 | `updated_at` | TEXT | Timestamp |
+
+### Follow-up pipeline tables
+
+These four tables own the sales-pipeline follow-up feature (see *Sales Pipeline and
+Follow-up Workflows*). `workflow_definitions`/`*_versions` mirror the rule tables
+(versioned, lifecycle-managed); `workflow_instances` is the one **mutable-state** row
+in an otherwise append-only model — see the note under its table.
+
+#### `pipeline_items`
+
+The tracked deal/quote. Deliberately minimal — a tracker, not a CRM (no contacts,
+line-items, or forecasting).
+
+| Column | Type | Notes |
+|---|---:|---|
+| `id` | TEXT PRIMARY KEY | `pli_...` |
+| `account_id` | TEXT | Account |
+| `thread_id` | TEXT | FK to `threads.id` (the outbound quote/proposal thread) |
+| `anchor_message_id` | TEXT NULL | FK to `messages.id` (the sent quote, when known) |
+| `counterparty_email` | TEXT | Readable; who we follow up with |
+| `counterparty_domain` | TEXT | Readable |
+| `title` | TEXT | "Acme — 40-lane SCO quote" |
+| `item_type` | TEXT | shared enum: `quote`, `proposal` |
+| `stage` | TEXT | `open`, `engaged`, `won`, `lost`, `abandoned` |
+| `amount_hint` | TEXT NULL | Display-only; **not** a forecast field |
+| `last_activity_at` | TEXT | Timestamp |
+| `created_by` | TEXT | `Actor` (`user` — never `ai`) |
+| `created_at` | TEXT | Timestamp |
+| `updated_at` | TEXT | Timestamp |
+
+Indexes: `(thread_id)`, `(account_id, stage)`, `(counterparty_domain)`, `(last_activity_at)`.
+
+#### `workflow_definitions`
+
+Current metadata for a versioned follow-up cadence (mirrors `classification_rules`).
+
+| Column | Type | Notes |
+|---|---:|---|
+| `id` | TEXT PRIMARY KEY | `wfd_...` |
+| `stable_name` | TEXT | "standard-quote-follow-up" |
+| `scope` | TEXT | reuse `RuleScope`: `global`/`account`/`domain`/`sender` |
+| `applies_to_item_type` | TEXT | shared `item_type` enum (`quote`/`proposal`) |
+| `status` | TEXT | **reuse the rule lifecycle statuses** (`draft`…`active`…`retired`) |
+| `current_version_id` | TEXT | FK to `workflow_definition_versions.id` |
+| `created_by` | TEXT | `Actor`: `user`, `ai` (curator may propose; activation needs review) |
+| `created_at` | TEXT | Timestamp |
+| `updated_at` | TEXT | Timestamp |
+
+Indexes: `(status)`, `(scope)`.
+
+#### `workflow_definition_versions`
+
+Immutable cadence content (mirrors `*_rule_versions`).
+
+| Column | Type | Notes |
+|---|---:|---|
+| `id` | TEXT PRIMARY KEY | `wfdv_...` |
+| `workflow_id` | TEXT | FK to `workflow_definitions.id` |
+| `version_number` | INTEGER | Monotonic, immutable |
+| `title` | TEXT | Human title |
+| `description` | TEXT | Explanation |
+| `anchor` | TEXT | `quote_sent_at`, `last_outbound_at`, `item_created_at` |
+| `enrollment_condition_json` | TEXT NULL | Optional JSON-AST condition for auto-suggesting enrollment (reuses the rule condition AST) |
+| `steps_json` | TEXT | Ordered `[{step_index, offset_days, draft_intent, prompt_template_ref, forbidden_commitments}]` — `offset_days` is **absolute from the anchor**, not "prior step + N" |
+| `exit_conditions_json` | TEXT | `reply_received`, `won`, `lost`, `user_cancel`, `max_steps` |
+| `staleness_json` | TEXT | `{coalesce: true, abandon_horizon_days: N}` (see *Catch-up + staleness*) |
+| `risk_level` | TEXT | `low`/`medium`/`high` (follow-up drafting is `medium` by default) |
+| `created_by` | TEXT | `Actor` |
+| `change_reason` | TEXT | Why this version exists |
+| `created_at` | TEXT | Timestamp |
+
+Index: `(workflow_id)`.
+
+#### `workflow_instances`
+
+The running state machine — **the durable temporal trigger** and the one mutable-state
+row.
+
+| Column | Type | Notes |
+|---|---:|---|
+| `id` | TEXT PRIMARY KEY | `wfi_...` |
+| `pipeline_item_id` | TEXT | FK to `pipeline_items.id` |
+| `workflow_id` | TEXT | FK to `workflow_definitions.id` |
+| `pinned_def_version_id` | TEXT | FK to `workflow_definition_versions.id` — **canonical** version pin, immutable for the instance's life |
+| `thread_id` | TEXT | FK to `threads.id` (reply-exit lookup) |
+| `anchor_at` | TEXT | The resolved anchor timestamp the offsets count from |
+| `status` | TEXT | FSM: `active`, `awaiting_review`, `engaged`, `snoozed`, `needs_attention`, `completed`, `cancelled` |
+| `current_step_index` | INTEGER | Cursor: the next step to fire |
+| `next_due_at` | TEXT NULL | The trigger. **Invariant: non-NULL iff `status ∈ {active, snoozed}`** |
+| `created_at` | TEXT | Timestamp |
+| `updated_at` | TEXT | Timestamp |
+
+**Indexes (ship with migration):** `(status, next_due_at)` *(the scheduler drain — the
+`messages(classification_status)` analogue, the load-bearing index)*, `(thread_id, status)`
+*(reply-exit)*, `(pipeline_item_id)`.
+
+> **Mutable-state exception.** `workflow_instances` is a *cursor over immutable content*:
+> the cadence lives in immutable `workflow_definition_versions` (pinned by
+> `pinned_def_version_id`), and every transition + every fired step appends an
+> `audit_log` row, so the full history is reconstructable. "Step N fired at T" lives in
+> `audit_log` **only** (the instance carries no separate fired-step columns) — the same
+> reasoning that justifies the mutable `messages.classification_status` column. This is
+> the single exception to the otherwise append-only/immutable-version store.
 
 ### Per-task feedback tables (training source of truth)
 
@@ -736,6 +1009,37 @@ the prompt fires on **divergence/override**, not on acceptance.
 | `polarity` | TEXT | `positive` / `negative` |
 | `created_at` | TEXT | Timestamp |
 
+#### `followup_feedback` — follow-up cadence / timing / stop
+
+Sole owner of the **cadence/timing/stop** signal. It does **not** re-encode the
+draft's send disposition (`sent_asis`/`minor`/`major`/`discarded`) — that fact is
+owned by `draft_feedback`, reached via `draft_id`. A follow-up step thus produces *two*
+rows with disjoint ownership: a `draft_feedback` row (was the draft *body* good?) and a
+`followup_feedback` row (was the *timing/decision to send at all* good?). No fact in
+two tables.
+
+| Column | Type | Notes |
+|---|---:|---|
+| `id` | TEXT PRIMARY KEY | `flwfb_...` |
+| `workflow_instance_id` | TEXT | FK to `workflow_instances.id` |
+| `pipeline_item_id` | TEXT | FK to `pipeline_items.id` |
+| `step_index` | INTEGER | Which cadence step |
+| `draft_id` | TEXT NULL | FK to `drafts.id` (the send disposition lives in `draft_feedback`) |
+| `pinned_versions_json` | TEXT | Provenance copy-at-event (canonical pin is `workflow_instances.pinned_def_version_id`) |
+| `ai_scheduled_offset_days` | INTEGER | What the cadence scheduled |
+| `actual_offset_days` | INTEGER NULL | When the user actually followed up (off-cadence signal) |
+| `reply_received_before_step` | INTEGER | 0/1 — a reply pre-empted this step |
+| `reply_latency_days` | INTEGER NULL | Days from anchor to reply, when known |
+| `outcome` | TEXT | cadence-only: `surfaced_for_review`, `rescheduled`, `snoozed`, `step_skipped_coalesced`, `workflow_stopped`, `expired_needs_attention`, `manual_followup_off_cadence` |
+| `coalesced_from_json` | TEXT NULL | Step indexes collapsed into this one by the staleness guard |
+| `human_reason_code` | TEXT NULL | Why (chips) |
+| `human_reason_text` | TEXT NULL | Freeform |
+| `polarity` | TEXT | `positive` / `negative` |
+| `created_at` | TEXT | Timestamp |
+
+Indexes: `(workflow_instance_id)`, `(pipeline_item_id)`, `(created_at)`. The "why"
+prompt fires on **divergence/override** (reschedule/skip/stop), not on a plain send.
+
 ### `shadow_outcomes`
 
 Rules that fired in shadow mode but never surfaced to the user (so there is no
@@ -752,6 +1056,58 @@ feedback row). Sole owner of shadow performance data.
 | `would_have_policy_outcome` | TEXT | `PolicyOutcome` if it had run |
 | `matched_later_user_action` | INTEGER NULL | Did the user later do the same manually? |
 | `created_at` | TEXT | Timestamp |
+
+### `workflow_shadow_outcomes`
+
+Shadow follow-up *steps* that would have fired but never surfaced. This is a **separate
+table from `shadow_outcomes`**, not a reuse: `shadow_outcomes.message_id` is NOT NULL
+because a shadow rule is always triggered by a message, but a shadow follow-up step is
+triggered by *time* and has no message at fire time — so it cannot honour that column.
+Sole owner of shadow follow-up performance.
+
+| Column | Type | Notes |
+|---|---:|---|
+| `id` | TEXT PRIMARY KEY | `wsho_...` |
+| `workflow_id` | TEXT | Shadow workflow that would have fired |
+| `workflow_version_id` | TEXT | Exact version |
+| `pipeline_item_id` | TEXT | The item it was shadow-running on |
+| `thread_id` | TEXT | Thread (no `message_id` — there is no triggering message) |
+| `step_index` | INTEGER | Which step |
+| `would_fire_at` | TEXT | When the step would have surfaced a draft |
+| `reply_before_fire` | INTEGER | 0/1 — a reply had already arrived (the step would have been redundant) |
+| `matched_manual_followup_within_days` | INTEGER NULL | The user manually followed up within ±window of `would_fire_at` |
+| `created_at` | TEXT | Timestamp |
+
+> **What workflow shadow-mode measures (and its honest limit).** Rule shadow precision
+> asks "did the user later do the same thing" (`matched_later_user_action`). A follow-up
+> cadence cannot be evaluated that cleanly: the true counterfactual — *would the user
+> have sent the drafted follow-up that a shadow run never produced?* — is **unobservable**,
+> because in the shadow world no draft exists to accept or reject. So workflow shadow
+> measures a **weaker but observable** proxy: per would-fire step, did a reply arrive
+> first (`reply_before_fire` → the step would have been wasted) and did the user manually
+> follow up near `would_fire_at` (`matched_manual_followup_within_days` → the cadence
+> matches real behaviour). A promotion report aggregates these into a *cadence-fit* score
+> (manual-followup alignment) net of reply-pre-emption — and the report explicitly states
+> it is a behavioural-alignment estimate, not a send-acceptance rate.
+
+### `workflow_conflicts`
+
+Two active workflows on one `pipeline_item` is a **containment** conflict, not the
+AST/effect-overlap that `rule_conflicts` records — so it gets its **own owner table** (in
+`0004_followups`), not a `workflow` kind on `rule_conflicts` (whose `rule_kind` /
+`rule_a_id`/`rule_b_id` / overlap `conflict_kind` vocabulary does not fit a containment
+check). This mirrors the `workflow_shadow_outcomes`-vs-`shadow_outcomes` split above, and
+`WorkflowEngine::detect_conflicts` already returns the distinct `WorkflowConflict` type.
+
+| Column | Type | Notes |
+|---|---:|---|
+| `id` | TEXT PRIMARY KEY | `wcf_...` |
+| `pipeline_item_id` | TEXT | The item both workflows target |
+| `workflow_a_id` | TEXT | First workflow (or active instance) |
+| `workflow_b_id` | TEXT | Second workflow proposed/armed on the same item |
+| `conflict_kind` | TEXT | e.g. `concurrent_active_workflow` |
+| `status` | TEXT | `open` / `resolved` (human-reviewed) |
+| `detected_at` | TEXT | Timestamp |
 
 ---
 
@@ -932,6 +1288,55 @@ pub trait ActionPlanner: Send + Sync {
 }
 ```
 
+`ActionPlanningInput` carries a `trigger: TriggerKind` (`NewMail` | `FollowUpDue`). The
+planner stays message-keyed: a `FollowUpDue` trigger supplies the pipeline item's
+`thread_id` and `anchor_message_id`, so the resulting draft/explanation/audit rows key
+off the anchor message exactly like a reply would. No second planner is introduced.
+
+### Workflow engine and follow-up scheduler traits
+
+The follow-up feature adds three traits in `mailmate-workflow`. They **drive** the
+existing `ActionPlanner`/`PolicyGuard` — they do not plan or guard themselves.
+
+```rust
+#[async_trait]
+pub trait WorkflowEngine: Send + Sync {
+    /// Arm a pipeline item on a workflow: pin the def version, compute the first next_due_at.
+    async fn arm(&self, item: PipelineItemId, workflow: WorkflowDefId)
+        -> Result<WorkflowInstanceId, WorkflowError>;
+    /// Two active workflows on one item is a CONTAINMENT conflict, not AST overlap.
+    async fn detect_conflicts(&self, candidate: WorkflowDraft)
+        -> Result<Vec<WorkflowConflict>, WorkflowError>;
+    async fn explain(&self, instance: WorkflowInstanceId)
+        -> Result<DecisionExplanation, WorkflowError>; // mirrors RuleEngine::explain
+}
+
+#[async_trait]
+pub trait FollowUpScheduler: Send + Sync {
+    /// Poll `workflow_instances WHERE status IN ('active','snoozed') AND next_due_at <= now`
+    /// via the (status, next_due_at) index, apply the coalescing/staleness guard, and
+    /// DRIVE P2 to emit [CreateDraft, RequireReview]. NOT a daemon — app.rs calls it on
+    /// start (catch-up) and on a periodic tick while the host is alive.
+    async fn drain_due(&self, now: Timestamp) -> Result<DrainReport, WorkflowError>;
+    /// Restart recovery: reset rows orphaned mid-fire (idempotency key = (instance, step_index)).
+    async fn recover(&self) -> Result<(), WorkflowError>;
+}
+
+#[async_trait]
+pub trait ExitDetector: Send + Sync {
+    /// Reply (matched by host-side thread identity) → `engaged`; won/lost → `completed`.
+    async fn on_inbound_or_deal_event(&self, item: PipelineItemId, event: ExitEvent)
+        -> Result<Vec<WorkflowInstanceId>, WorkflowError>;
+}
+```
+
+A `WorkflowDefinition` **reuses** the rule version-immutability, lifecycle state set
+(`RuleStatus`), and human-review gating — but it is a *cadence*, not a condition→effect
+rule, so the condition evaluator and the AST-overlap conflict detector do **not** apply
+to the cadence content. Only the optional `enrollment_condition_json` (which quotes to
+suggest enrolling) is a JSON-AST condition; workflow conflict (`WorkflowConflict`) is the
+distinct "don't run two active workflows on the same item" containment check.
+
 ### Storage repository traits
 
 ```rust
@@ -961,6 +1366,186 @@ pub trait FeedbackRepository<F: TaskFeedbackKind>: Send + Sync {
     async fn query(&self, query: F::Query) -> Result<Vec<F::Row>, StorageError>;
 }
 ```
+
+`followup_feedback` plugs into this **existing** generic as a new `FollowUpFeedbackKind`
+— no new feedback mechanism. `WorkflowRepository` and `PipelineItemRepository` are new
+engine-neutral repository traits over the same `StorageBackend` seam (the scheduler never
+sees a `Connection` or SQL), and `WorkflowDefinition` reuses `RuleRepository`'s
+version/lifecycle methods as a third kind.
+
+### Storage backend seam
+
+The repository traits above are the **only** storage surface the core sees — no
+`Connection`, `Row`, transaction handle, or SQL string crosses that line. Beneath the
+repositories sits one engine seam so the engine can be swapped (SQLite default →
+Postgres/MariaDB opt-in) without touching the core:
+
+```rust
+/// Owns the connection pool and transactions; knows which dialect it is. The embedded
+/// SQLite backend satisfies the async contract by running blocking `rusqlite` work on
+/// a pool; a networked backend (sqlx / tokio-postgres) is async-native. HOW each
+/// backend satisfies `async` is private to the backend — the seam only promises async.
+#[async_trait]
+pub trait StorageBackend: Send + Sync {
+    fn dialect(&self) -> Dialect;                        // Sqlite | Postgres | MySql
+    async fn begin(&self) -> Result<Box<dyn Tx>, StorageError>;
+    async fn run_migrations(&self) -> Result<(), StorageError>; // common + per-dialect overlay
+}
+```
+
+Every divergent SQL fragment — JSON column type and (if a view needs it) JSON
+extraction, view bodies, boolean/timestamp literals, FK/pragma setup, and *should the
+schema ever need them* upsert and `RETURNING` — lives in one `dialect` module, never
+scattered through the repositories. Because the current schema is append-only with
+app-generated prefixed-string IDs, it needs no DB-generated keys, upserts, or
+`RETURNING` today; that is the main reason the seam stays thin.
+
+### Trainer backend trait
+
+Fine-tuning weight-crunching sits behind one trait so the default (in-process Burn) can
+be swapped for an external toolchain or a remote trainer. The trait is owned by
+`mailmate-training`; the Burn impl lives in `mailmate-ml`, the subprocess impl in
+`mailmate-training::trainers::external`, and a mock in `…::trainers::mock` for tests
+(so no test needs a GPU or an external tool).
+
+```rust
+#[async_trait]
+pub trait TrainerBackend: Send + Sync {
+    fn id(&self) -> TrainerId;
+    fn capabilities(&self) -> TrainerCapabilities; // sft? preference? lora? on_device?
+    async fn train(&self, job: TrainingJob) -> Result<AdapterArtifact, TrainerError>;
+}
+```
+
+`capabilities()` is how the honest Burn limits surface in code rather than prose: the
+Burn backend reports `on_device: true, sft: true` but advertises `lora` only if/when a
+low-rank adapter is actually implemented on Burn primitives — so the planner never
+assumes on-device LoRA exists.
+
+### Classifier-engine trait
+
+The cascade's Tier-2 model is also a seam. The default impl is a small Burn-trained
+**discriminative** classifier; an online-logistic-regression impl is retained as a
+lightweight alternative. (Semantic *embeddings/encoders* are a separate seam, not the
+Tier-2 gate.) Either impl thresholds on **calibrated** confidence — the gate is only as
+good as that calibration, and `calibration_version` is versioned like everything else.
+
+```rust
+#[async_trait]
+pub trait Tier2Classifier: Send + Sync {
+    async fn predict(&self, features: FeatureVector) -> Result<CalibratedScores, MlError>;
+    async fn update(&self, labeled: LabeledExample) -> Result<(), MlError>; // online or batch
+}
+```
+
+### Cross-cutting ports (mail client, transport, clock, secrets, features)
+
+The domain traits above are not the whole abstraction surface. Per the hexagonal law
+(*Architectural Style and Event Model*), **every** external or swappable concern is a
+port too — so the core never names a concrete client, wire, clock, or secret backend
+(the LLM is already covered by `AiProvider` above). Each ships with at least one real
+adapter and a mock:
+
+```rust
+#[async_trait]
+pub trait MailClient: Send + Sync {        // Thunderbird is ONE adapter; a headless adapter drives tests
+    async fn apply(&self, action: MailAction) -> Result<(), MailError>;          // move/tag/junk/read/flag
+    async fn create_draft(&self, spec: DraftSpec) -> Result<DraftId, MailError>; // persists only — never sends
+    async fn fetch(&self, id: MessageId, scope: FetchScope) -> Result<MessageData, MailError>;
+    fn events(&self) -> EventStream<MailEvent>;                                  // new-mail + user actions
+}
+
+pub trait Transport: Send + Sync {         // native-messaging stdio is ONE adapter; in-process is another
+    fn send(&self, frame: Frame) -> Result<(), TransportError>;
+    fn incoming(&self) -> FrameStream;
+}
+
+pub trait Clock: Send + Sync {             // system wall-clock by default; a fake clock makes scheduler tests deterministic
+    fn now(&self) -> Timestamp;
+}
+
+#[async_trait]
+pub trait SecretStore: Send + Sync {       // 0600 file (default) | OS keychain | env (dev) | mock
+    async fn get(&self, key: SecretKey) -> Result<Option<Secret>, SecretError>;
+    async fn put(&self, key: SecretKey, value: Secret) -> Result<(), SecretError>;
+}
+
+pub trait FeatureExtractor: Send + Sync {  // deterministic; a fixture adapter feeds crystallization back-tests
+    fn extract(&self, msg: &MessageData) -> FeatureVector;                       // pure → message_features
+}
+```
+
+Together with `AiProvider`, `RuleEngine`, `PolicyGuard`, `ActionPlanner`,
+`LearningEngine`, `WorkflowEngine` / `FollowUpScheduler` / `ExitDetector`,
+`Tier2Classifier`, `TrainerBackend`, and `StorageBackend` + the repository traits, these
+make the dependency rule total: **no `mailmate-core` module imports a concrete engine,
+mail client, transport, clock, or secret store.** idiolect consolidates such ports in a
+single `idiolect-ports` crate (a structure MailMate may adopt; today each trait is owned
+by its domain crate) and enforces the rule with an interface-no-backend-leakage test —
+MailMate does the same (see *Testing Strategy*, *CI as enforcement for TDD and
+architecture constraints*).
+
+---
+
+## Replaceable Components and Extension Points
+
+Every component — **without exception, the LLM included** — is a **port (trait) + a
+config-selected concrete adapter + a default + a mock/test adapter**; the core depends
+only on the port and **never names a concrete impl** (the hexagonal law from
+*Architectural Style and Event Model*). This is what lets a better model or engine be
+dropped in — or SQLite replaced by MariaDB, or Thunderbird replaced by another mail
+client — without rewriting the core. The full seam list (the engines, **and** the
+cross-cutting mail-client / transport / clock / secret-store / feature-extraction
+ports):
+
+| Seam | Trait / boundary | Selected by | Default impl | Pluggable alternatives |
+|---|---|---|---|---|
+| AI provider *(generative foundation model — run **frozen**)* | `AiProvider` (+ optional `NativeClassifier`, `SupportsAdapters`) | `[ai] default_provider` + `ProviderRegistry` | mature local engine — **Ollama / llama.cpp** (frozen, idiolect-style) | OpenAI-compatible, LM Studio, mock, **Burn in-process** `burn-lm` *(optional pure-Rust generative path; v0.0.1, Llama 3.x/TinyLlama, no GGUF — mature engine preferred for model breadth)* |
+| Storage engine | repository traits over `StorageBackend` + `dialect` | `[storage] engine` | embedded **SQLite** *(zero-config)* | Postgres / MariaDB *(documented stub → opt-in; needs a running daemon + URL)* |
+| Trainer backend *(learned layer — Burn-committed)* | `TrainerBackend` (idiolect `ml-core` contracts + `trainer-burn` adapter shape) | `[training] backend` | **in-process Burn, pinned** *(trains small classifier/preference/tone models today — idiolect-proven; on-device LoRA is a deferred optional target on Burn primitives)* | external toolchain (subprocess), remote, mock |
+| Tier-2 classifier | `Tier2Classifier` | `[ml] tier2_engine` | **Burn discriminative classifier** | online logistic regression (lightweight), other |
+| Rule condition language | declarative JSON AST | fixed (closed decision) | JSON AST | — |
+| Embeddings | embeddings trait *(existing seam, listed for completeness)* | `[ml]` | *(deferred; Burn encoder when added)* | provider-hosted embeddings |
+| Prompt templates | versioned `prompt_templates` *(existing seam, listed for completeness)* | DB-versioned, task layer | seeded templates | curator-proposed revisions |
+| Follow-up scheduler | `FollowUpScheduler` (+ `WorkflowEngine`, `ExitDetector`) | started by `app.rs`; `[followup] poll_interval_secs` | in-host polling worker *(catch-up-on-launch)* | mock scheduler for tests — *no OS-daemon impl by design (runtime is catch-up-on-launch)* |
+| Review UI surface | a **client** of `mailmate-core`'s query/command API (the same surface the native-messaging host relays) — a frontend, not a backend trait | build feature / launcher | **native `egui` companion** (`mailmate review` subcommand of the one binary) | in-Thunderbird WebExtension page *(thin launcher / quick-approve)*, **Tauri** webview *(web-grade UI, capability-scoped `ipc://localhost`)*; TOML/DB audit substrate beneath all; loopback-in-browser explicitly rejected (see *Open Design Questions*) |
+| **Mail client** | `MailClient` (+ headless mock) | build/runtime adapter | **Thunderbird** WebExtension + native-messaging host | any MailExtension-capable client; headless test adapter; IMAP-direct or another client as a future adapter — *core is client-agnostic* |
+| **IPC transport** | `Transport` | host wiring | **native-messaging stdio** (`runtime.connectNative`) | in-process channel (tests), local socket — *wire swappable; framing is versioned* |
+| **Secret store** | `SecretStore` | `[secrets] backend` | **0600 config-dir file** | OS keychain (libsecret / macOS Keychain / Windows Credential Mgr), env override (dev), mock |
+| **Clock / time source** | `Clock` | injected | **system wall-clock** | fake/controllable clock — deterministic follow-up-scheduler + crystallization back-test tests |
+| **Feature extractor** | `FeatureExtractor` | fixed (deterministic) | built-in extractor → `message_features` | fixture extractor for back-tests — *output pure + versioned* |
+
+Selection is config-driven. Config keys are owned by `mailmate-core::config`
+(`config.rs`) and grouped by seam:
+
+```toml
+[storage]
+engine = "sqlite"        # default; "postgres" | "mysql" select a server backend
+path = "mailmate.db"     # embedded engine (XOR `url` for a networked engine)
+# url = "postgres://user@host/mailmate"
+pool_size = 4
+
+[ml]
+tier2_engine = "burn"    # "burn" (default) | "logreg"
+backend = "ndarray"      # Burn compute backend: "ndarray"/"burn-flex" (CPU, default) | "wgpu" | "cuda" | "metal"
+
+[training]
+backend = "burn"         # "burn" (default, in-process) | "external" | "remote"
+
+[secrets]
+backend = "file"         # 0600 config-dir file (default) | "keychain" | "env" (dev override)
+
+[followup]
+poll_interval_secs = 60  # in-host scheduler tick; also runs a catch-up sweep on startup
+# there is intentionally NO daemon/OS-timer option — runtime is catch-up-on-launch
+```
+
+The `[ai]` block (provider selection, including `kind = "burn"`) is shown under
+*Provider-Abstraction Layer*. Local providers remain a non-dependency: the core never
+hard-requires Ollama **or** Burn — both are impls behind `AiProvider`, feature-gated.
+This is what keeps the Non-Goals ("hard-coding one AI provider", "making Ollama a core
+architectural dependency") true even with Burn as the *default* ML substrate: default
+≠ hard dependency, because selection happens at the trait boundary.
 
 ---
 
@@ -1201,6 +1786,65 @@ is written to two places.
 }
 ```
 
+### Follow-up frames
+
+These reuse the existing envelope (`kind` + a new `type`); they are **additive**, so
+`protocol_version` stays `"1.0"`. Reply and won/lost are **not** new request types —
+they ride the existing `record_user_action`, which the host's router now also matches
+against tracked threads.
+
+#### `followup_draft_ready` notification (host → extension)
+
+Surfaced when a step fires (including on catch-up at launch). It is a review-required
+draft, **never sent on arrival** — it mirrors `classification_ready`.
+
+```json
+{
+  "protocol_version": "1.0",
+  "kind": "notification",
+  "notification_id": "ntf_01HZY...",
+  "type": "followup_draft_ready",
+  "payload": {
+    "workflow_instance_id": "wfi_001",
+    "pipeline_item_id": "pli_001",
+    "thread_id": "thread_123",
+    "step_index": 2,
+    "coalesced_from_step_indexes": [1],
+    "draft": { "draft_id": "draft_900", "subject": "Re: Acme quote", "requires_review": true },
+    "guarded_plan": { "actions": [{ "kind": "create_draft", "policy_outcome": "requires_review" }] },
+    "explanation": { "summary": "Day-14 follow-up on the Acme quote (no reply since day 7)." }
+  }
+}
+```
+
+#### `followup_needs_attention` notification (host → extension)
+
+No draft — the item went stale past the abandon horizon.
+
+```json
+{
+  "protocol_version": "1.0",
+  "kind": "notification",
+  "notification_id": "ntf_01HZZ...",
+  "type": "followup_needs_attention",
+  "payload": { "workflow_instance_id": "wfi_002", "reason": "stale_past_horizon", "skipped_step_indexes": [2, 3] }
+}
+```
+
+#### Follow-up control requests (extension → host)
+
+| `type` | Purpose |
+|---|---|
+| `enroll_pipeline_item` | Tag a quote/proposal → create a `pipeline_item` and arm a workflow |
+| `update_pipeline_stage` | Mark `won` / `lost` (closes the sequence) |
+| `cancel_sequence` | Stop the workflow instance |
+| `reschedule_followup` / `snooze` | Push `next_due_at` out |
+| `review_followup` | Resolve a surfaced draft: `send` (user-confirmed) / `edit` / `skip` |
+
+A reply landing on a tracked thread, and folder/move events, continue to ride
+`record_user_action`; the host routes won/lost/snooze/skip into the workflow tables and
+`followup_feedback` (its single owner), never two places.
+
 ---
 
 ## Rule and Principle System
@@ -1399,6 +2043,23 @@ PIPELINE 2 — PLAN / GUARD
 capture: classification_feedback (P1) / filing_feedback, draft_feedback, … (P2)
 ```
 
+**A third trigger for Pipeline 2 — not a third pipeline.** A due `WorkflowInstance`
+step does **not** classify (P1 is untouched); it assembles a P2 `ActionPlanningInput`
+(`trigger = FollowUpDue`) for the item's thread and drives the **existing** action
+planner → policy guard, which emits `[CreateDraft, RequireReview]`. This is the same
+shape as a new-mail classification result driving P2 today — a new *trigger*, not a new
+ranked classification ladder.
+
+```text
+TIME TRIGGER (scheduler: workflow_instances.next_due_at due)
+        |
+        v
+  [ no P1 ]  ->  PIPELINE 2 — PLAN / GUARD (existing action planner + policy guard)
+        |
+        v
+  [CreateDraft, RequireReview]  ->  followup_draft_ready  (review-required; never auto-sent)
+```
+
 There are **two rule types**, in fully separate tables, that reuse one shared
 condition evaluator, lifecycle state machine, and conflict detector:
 
@@ -1419,18 +2080,30 @@ was opted into, only genuinely-ambiguous messages' content would ever leave).
 Tier 1  deterministic signals + ClassificationRules
         SPF/DKIM/DMARC, list-id, sender-in-contacts, allow/block lists, label rules.
         Zero training, available day one.   confident? -> accept
-Tier 2  online logistic regression + calibration table over features
-        trained online from classification_feedback.   confident? -> accept
+Tier 2  Tier2Classifier engine + calibration table over features
+        default: small Burn discriminative classifier (logreg is a lightweight
+        alternative); trained from classification_feedback.   confident? -> accept
 Tier 3  LLM classify task   (also the always-path for draft/summarize/extract)
 ```
 
-- **Tier 2 is online logistic regression with a calibration table**, not naive Bayes:
-  the gate thresholds on confidence, and the cascade is only as good as that confidence
-  is calibrated. (`calibration_version` is versioned like everything else.)
+- **Tier 2 is a `Tier2Classifier` engine behind a trait** (see *Rust Trait and
+  Interface Definitions*), defaulting to a small **Burn-trained discriminative
+  classifier** with a calibration table; an **online logistic regression** impl is kept
+  as a lightweight alternative (naive Bayes was rejected for poor calibration). Burn is
+  production-shaped for training and serving small discriminative classifiers in-process
+  today — the full `Learner` loop (AdamW, schedulers, checkpointing) with pure-Rust,
+  single-binary CPU deployment (NdArray/burn-flex) and optional GPU. Whatever the
+  engine, the gate thresholds on **calibrated** confidence, and the cascade is only as
+  good as that calibration. (`calibration_version` is versioned like everything else.)
 - **Escalation = versioned confidence bands**, conservative at cold-start (the Tier-2
   model is untrained at install, so the band is wide → escalate often → and the
   escalation rate falls automatically as `classification_feedback` accumulates). The
-  virtuous loop: more corrections → better cheap model → fewer LLM calls.
+  virtuous loop is **deterministic-first**: corrections first **crystallize into model-free
+  Tier-1 rules** (that trait then leaves the model path entirely — see *Learning Loop →
+  Crystallization*); only the irreducible residual that resists a deterministic rule trains
+  a **better Tier-2 model**; and both together mean **fewer Tier-3 LLM calls**. Coverage of
+  the model-free layer grows monotonically while model inference retreats to the genuinely
+  novel.
 - **Asymmetric thresholds for safety-critical labels.** Phishing especially: a cheap
   "looks fine" is dangerous, so the cheap stage may clear a message only with strong
   signals; anything borderline escalates. "Clearly safe" needs high confidence;
@@ -1532,6 +2205,17 @@ pub struct GuardedActionPlan {
 - `send_draft`: **blocked**.
 - `open_link`: **blocked**.
 
+### Follow-ups and the send floor
+
+A scheduled follow-up adds **no new hard policy** and no new send path. A fired step
+emits only a `CreateDraft` action whose draft is `requires_review = 1` (there is no
+`send_draft` output anywhere in the follow-up path), so `never_auto_send_drafts` already
+covers it — the existing floor is sufficient. Suppressing an *unwanted* follow-up (the
+counterparty already replied, the deal is won/lost, or the item is very stale) is handled
+by **workflow exit conditions and the staleness/coalescing guard** (see *Sales Pipeline
+and Follow-up Workflows*), not by new policies; `manual_user_override_wins` is unchanged
+and still cannot force a prohibited action.
+
 ---
 
 ## Learning Loop
@@ -1582,6 +2266,10 @@ MailMate should use these events as learning evidence:
 - User overrides an automatic or suggested action.
 - User undoes an action.
 - User accepts or rejects rule proposals.
+- User reschedules, snoozes, skips, or stops a follow-up step (cadence-timing signal).
+- User manually follows up off-cadence (timing signal).
+- A reply lands before a follow-up step fires (stop-condition signal).
+- User repeatedly enrolls similar quotes in a follow-up workflow (enrollment signal).
 
 ### Proposal thresholds
 
@@ -1595,6 +2283,68 @@ Possible thresholds:
 - Multiple draft edits with the same stylistic correction.
 
 Thresholds themselves can become configurable principles.
+
+### Crystallization: a learned trait becomes a model-free rule
+
+The loop's **terminal product is a deterministic, model-free rule** — not a better model
+weight. This is the determinism-first invariant from *Goals* made mechanical. A model
+(Tier-2 classifier, Tier-3 LLM, or a LoRA) is a **teacher**: it helps *discover* a
+candidate and it *covers what no rule has learned yet*. It is never the steady-state
+*executor* of a trait the system has already learned — once a trait is learned, deciding
+it again must cost **zero inference**.
+
+**The promotion gate (discovery → crystallization):**
+
+1. **Express the candidate deterministically.** Pattern detection emits the candidate as a
+   **JSON-AST condition over deterministic features only** (headers, addresses, list-id,
+   auth results, attachment kinds, thread shape, counterparty history, normalized-subject
+   keywords/regex — the `message_features` surface; see *Condition language*). No clause may
+   call a model. A pattern that cannot be written this way is **not** a crystallization
+   candidate (see *the honest boundary* below).
+2. **Back-test it against history.** Replay the candidate over the recorded decisions it
+   claims to explain (the same substrate as *Shadow evaluation* and *Simulation tests
+   against historical examples*). It is eligible only if it **reproduces the user's actual
+   past decisions at a precision bar** with enough support — the rule must *match the trait*,
+   not merely correlate with it.
+3. **Promote through the existing gate.** An eligible candidate runs the normal *Rule
+   Lifecycle* (draft → shadow → human-approved → active). On activation it is a first-class
+   learned rule that, by *Rule Hierarchy and Decision Order*, **outranks any model
+   prediction**.
+4. **The trait leaves the model path.** From activation on, that trait is decided by AST
+   evaluation over deterministic features: **no LLM, no classifier inference**, offline,
+   same input → same output, audit-replayable, and it still fires with **zero providers
+   configured**. The model is no longer consulted for it.
+
+**Monotonic coverage.** The model tiers are invoked only on the **not-yet-learned
+residual**, and every such invocation is *captured as evidence* (per-task feedback) that can
+crystallize the next rule. So the model-free layer's coverage grows while model inference
+retreats toward the genuinely novel — the cascade's escalation rate falling as
+`classification_feedback` accrues (see *Classification Cascade*) is the same effect seen
+from the runtime side.
+
+**The honest boundary (no silent approximation).** Some traits are irreducibly semantic —
+their signal does not survive reduction to deterministic features (e.g. "this is a veiled
+escalation," "this tone is off"). For these:
+
+- A deterministic **surrogate** (sender + structure + keyword/regex + thread shape) is
+  crystallized **only if it clears the same historical precision bar**; its uncovered
+  residual still escalates. The surrogate is honest *because the back-test proved it*, not
+  because it reads plausibly.
+- If no deterministic surrogate clears the bar, the trait is **not** crystallized. It stays
+  **model-assisted** and is **not** counted as a model-free learned trait — MailMate does not
+  fake determinism by shipping a low-precision rule. That residual remains the Tier-2/Tier-3
+  frontier.
+- A **frozen Tier-2 model is deterministic-but-opaque** (same input → same output, but no
+  readable rationale, and still *a model*). It is the **fallback for what resists a symbolic
+  rule**, never the preferred home of a trait that *could* be expressed as one. The gold
+  terminal state is the auditable AST rule; the frozen model is the consolation when
+  reduction fails.
+
+**No new machinery.** Crystallization reuses what already exists — the JSON-AST *Condition
+language*, the *Rule Lifecycle*, `shadow_outcomes` back-testing, immutable rule versioning,
+and the learned-rule-over-model precedence. What this section adds is the **guarantee** (a
+learned trait's terminal form is model-free) and the **promotion gate** (deterministic
+expressibility + a historical precision bar) that enforces it.
 
 ---
 
@@ -1683,6 +2433,7 @@ MailMate should explicitly score and improve these targets:
 | Thread summaries | User regeneration rate, thumbs feedback | Adjust summary style prompt | Optional for low-risk prompt revisions |
 | Provider routing | Latency, validation failures, accepted output rate | Prefer provider A for summaries, provider B for classification | User setting or explicit opt-in |
 | Rule health | Override rate, stale fire rate | Split, merge, retire, or shadow-test rules | Yes |
+| Follow-up workflows | Reschedule rate, reply-before-step rate, stop-early rate, expiry-to-needs-attention rate | Refine cadence offsets, tighten stop/exit condition, propose/suspend a workflow, suggest enrollment, revise the follow-up prompt | **Yes** for any cadence/stop/enrollment change; every surfaced step is review-required regardless |
 
 ### Rule and model versioning
 
@@ -1707,9 +2458,16 @@ A MailMate decision should be explainable against exact versions:
   "provider_routing_version": "route_2",
   "feature_extractor_version": "features_4",
   "calibration_version": "cal_spam_7",
-  "policy_version": "policy_builtin_1"
+  "policy_version": "policy_builtin_1",
+  "workflow_definition_version": "wfdv_quote_followup_2"
 }
 ```
+
+(A follow-up decision additionally pins `workflow_definition_version`; the follow-up
+draft's *body* signal still flows to `draft_feedback` → the existing **derive-on-export**
+path, and `followup_feedback` is itself a derive-on-export source for a workflow-timing
+dataset (`task = "workflow_followup"`) — no new training storage, and LoRA stays advisory
+and gated, never enabling auto-send.)
 
 ### Local models before fine-tuning
 
@@ -1718,12 +2476,24 @@ The initial learning model should not require training neural-network weights. M
 - Frequency counters.
 - Online statistics.
 - Similarity clustering over message features.
-- Online logistic regression with a calibration table over extracted features (the cascade's Tier 2 — naive Bayes was considered and rejected for poor calibration; see *Classification Cascade*).
+- The cascade's Tier-2 classifier behind the `Tier2Classifier` trait — defaulting to a small Burn-trained discriminative classifier, with online logistic regression + a calibration table as the lightweight alternative (naive Bayes was considered and rejected for poor calibration; see *Classification Cascade*).
 - Contextual bandits for low-risk choices such as prompt template selection.
 - Calibration tables for provider confidence.
 - Rule outcome scoring.
 
-This keeps learning transparent and testable. Later, MailMate can optionally support embeddings and portable LoRA fine-tuning, but only as an implementation of the same auditable proposal/evaluation loop. LoRA training data capture is described separately because it requires explicit positive/negative examples, dataset versioning, privacy controls, and adapter compatibility metadata.
+This keeps learning transparent and testable. The **committed default substrate** for
+these small models and for the trainer is Rust-native **Burn** — pinned to an exact
+version, CPU/ndarray by default — built as the same engine-neutral-contracts + port +
+Burn-adapter split the sibling project **idiolect** ships (`idiolect-ml-core` /
+`idiolect-ports` / `idiolect-trainer-burn`), so Burn is the default *and* swappable
+(external tooling and a mock stay pluggable behind the same traits). It is still just one
+implementation of the same auditable proposal/evaluation loop. The foundation/generative
+model is **frozen** (run via a mature engine behind `AiProvider`, idiolect-style), so none
+of this fine-tunes the big model. Embeddings/encoders via Burn are a ready-now capability
+when that seam is built; **batteries-included LoRA is NOT shipped in Burn** (it is DIY on
+Burn primitives), so an on-device LoRA adapter stays a *deferred, optional* target behind
+the `TrainerBackend` seam — the small-model trainer above is what ships and what the
+learning thesis needs (see *On-Device Training Layer*).
 
 ### Shadow evaluation as the core of self-improvement
 
@@ -1874,9 +2644,9 @@ Self-iteration must obey strict limits:
 - It may not send more private data to providers than the user allowed.
 - It may not treat its own generated labels as ground truth without user feedback or later behavioral confirmation.
 
-### MVP self-iteration path
+### Self-iteration delivery order (within full v1)
 
-The first useful version should implement self-iteration in this order:
+v1 is feature-complete; this is the *delivery order* in which self-iteration comes online within it (a feature-delivery sequence, not a reduced scope):
 
 1. Record decisions and user outcomes.
 2. Compute simple metrics per rule and action type.
@@ -1893,18 +2663,38 @@ This gives MailMate a practical learning model immediately while keeping behavio
 
 ---
 
-## Portable LoRA Training Layer
+## On-Device Training Layer
 
-MailMate should be able to produce training data for a portable LoRA adapter that can “add on” to the user’s chosen base model. This is different from the normal rule-learning loop. Rules remain the primary, auditable source of behavior; LoRA training is an optional personalization layer that teaches the model MailMate-specific and user-specific preferences such as tone, classification style, summarization format, and task extraction conventions.
+MailMate should be able to produce training data for a portable LoRA adapter that can “add on” to the user’s chosen base model. This is an **optional, deferred** capability — *not* the core of MailMate's training layer. The committed v1 trainer is Rust-native **Burn** training **small learned models** on-device (the Tier-2 discriminative classifier and preference/scoring/tone models) from the per-task feedback tables, gated into service by an eval/promotion check — the exact shape the sibling project **[idiolect](https://github.com/nick-tgcs/idiolect)** ships (`idiolect-ml-core` contracts + `idiolect-ports` traits + an `idiolect-trainer-burn` adapter + an `idiolect-trainerctl` orchestrator whose `evaluate_promotion(policy, report, compatibility) -> Promote` gate is MailMate's crystallization gate). Two things this layer is **not**: it never fine-tunes the foundation model (any generative LLM runs **frozen** behind `AiProvider`, as idiolect runs Whisper frozen via `whisper-rs`), and it does not depend on LoRA. Rules remain the primary, auditable source of behavior; a portable LoRA adapter is a real but optional target of the same `TrainerBackend` seam — useful for tone/style personalization, never the source of truth.
 
 > **Built from the start, with two structural rules:**
-> 1. **The full pipeline is in scope from day one** — capture, all four export views,
+> 1. **Capture is day-one; LoRA export rides behind the port.** Capture (the per-task
+>    feedback tables) and **small-model training** ship first; the LoRA-export views,
 >    adapter metadata import, compatibility checks, eval gates, and training
 >    orchestration — TDD'd against fixtures so there is no "we forgot to capture" gap.
-> 2. **Training executes through a pluggable trainer backend** (external documented
->    toolchain by default, via subprocess), so the core does not hard-couple a GPU
->    training runtime and the "portable" goal stays intact. MailMate *drives* the whole
->    loop; only the weight-crunching is behind a swappable backend.
+> 2. **Training executes through a pluggable `TrainerBackend` trait.** The **default
+>    backend is in-process Burn** (Rust-native: reverse-mode autodiff via `Autodiff<B>`,
+>    AdamW/SGD, LR schedulers, gradient accumulation, and checkpointing of model +
+>    optimizer state — all production-shaped in Burn today). An **external documented
+>    toolchain** (subprocess) and a **remote** backend remain fully pluggable
+>    alternatives, and a **mock** backend exists for tests. MailMate *drives* the whole
+>    loop; only the weight-crunching is behind the swappable backend, and the "portable"
+>    goal is *strengthened* — the default path is a single Rust binary (CPU via
+>    NdArray/burn-flex; GPU via CUDA/Metal/WGPU when available), with no hard GPU or
+>    Python dependency.
+>
+> **Honest scope of the Burn default — LoRA is DIY, not first-class.** Burn ships the
+> *primitives* for parameter-efficient fine-tuning (custom `#[derive(Module)]` layers,
+> per-parameter `set_require_grad(false)` to freeze base weights, full autodiff, AdamW),
+> so a low-rank adapter on `Linear` layers is idiomatic and feasible — but there is **no
+> batteries-included LoRA module in Burn core**, and `burn-lm` does not expose one. So:
+> the committed v1 Burn trainer trains **small models** (classifier / preference / tone)
+> now; an on-device **LoRA** adapter on these primitives is a **deferred, optional
+> target — not a v1 commitment**, with the external/`peft`-style toolchain as the
+> **proven pluggable fallback** when LoRA is wanted sooner; `TrainerBackend.capabilities()`
+> advertises `lora` only once the primitive-built adapter actually works. Burn quantization is INT8/INT4 PTQ only (no
+> QAT/mixed-precision), and Burn has **no GGUF interop** — it is not a path to running
+> community GGUF weights.
 >
 > **Training data is not stored separately.** There is no `training_examples` table.
 > The per-task feedback tables (`classification_feedback`, `filing_feedback`,
@@ -2147,7 +2937,7 @@ pub trait SupportsAdapters: AiProvider {
 }
 ```
 
-Some providers may support adapters directly; others may require merging outside MailMate; others may not support adapters at all. The core should expose this as capability metadata, not assume a specific backend.
+Some providers may support adapters directly; others may require merging outside MailMate; others may not support adapters at all. The core should expose this as capability metadata, not assume a specific backend. In particular, the optional in-process **Burn** provider *may* implement `SupportsAdapters` for a DIY low-rank adapter once one exists on Burn primitives — but this is an **optional capability advertised via metadata**, not an assumed feature, and "others may not support adapters at all" remains the default expectation.
 
 ### Additional storage for LoRA training
 
@@ -2239,21 +3029,21 @@ Ambiguous behavior, such as ignoring a suggestion, should not automatically beco
 ### Training pipeline boundary
 
 The **whole pipeline is built and TDD'd from the start**; only the weight-crunching
-itself sits behind a **pluggable trainer backend** (external documented toolchain by
-default, invoked as a subprocess; swappable for an in-process backend later). MailMate
-drives every step:
+itself sits behind the **pluggable `TrainerBackend` trait** (**default: in-process
+Burn**; an external documented toolchain via subprocess, a remote backend, and a mock
+remain selectable via `[training] backend`). MailMate drives every step:
 
 1. Per-task feedback tables capture corrections + reasons continuously (core, not training-specific).
 2. At export time: derive examples from the feedback tables, redact, normalize.
 3. Split deterministically into train/validation/test/holdout (a function of source-row IDs, not a stored column).
 4. Export JSONL datasets.
-5. Invoke the trainer backend (default: external toolchain via subprocess).
+5. Invoke the `TrainerBackend` (default: **in-process Burn**; external toolchain subprocess and remote remain selectable via `[training] backend`).
 6. Import adapter metadata and artifact path.
 7. Run local evaluation fixtures.
 8. Activate adapter only if evaluation gates pass and the user approves.
 9. Feedback capture continues; the next adapter version derives from the grown tables.
 
-This keeps the architecture portable and avoids coupling MailMate to one trainer, GPU setup, or model host — while the orchestration, gates, and tests exist from day one.
+This keeps the architecture portable and avoids coupling MailMate to one trainer, GPU setup, or model host. The Burn default is pure-Rust/single-binary on CPU (NdArray/burn-flex) and can train on GPU (CUDA/Metal/WGPU) when available — nothing in the core hard-depends on a GPU — while the orchestration, gates, and tests exist from day one.
 
 ### Evaluation gates before activating a LoRA
 
@@ -2307,6 +3097,7 @@ The agent curator can:
 - Suggest threshold changes.
 - Recommend shadow testing.
 - Summarize user feedback patterns.
+- Propose, refine, or retire follow-up workflows (cadence and stop/exit conditions) and suggest enrollment.
 
 The agent curator must not:
 
@@ -2357,6 +3148,35 @@ The agent curator must not:
 }
 ```
 
+```json
+{
+  "proposal_type": "new_workflow",
+  "risk_level": "medium",
+  "title": "Standard quote follow-up: 3 / 7 / 14",
+  "rationale": "You manually followed up on 6 quotes at ~3 and ~7 days; 4 of those got a reply by day 14.",
+  "recommended_status": "shadow_mode",
+  "evidence_refs": [
+    { "kind": "followup", "id": "flwfb_010" },
+    { "kind": "followup", "id": "flwfb_014" }
+  ],
+  "workflow_draft": {
+    "anchor": "quote_sent_at",
+    "applies_to_item_type": "quote",
+    "steps": [
+      { "step_index": 0, "offset_days": 3, "draft_intent": "gentle_check_in" },
+      { "step_index": 1, "offset_days": 7, "draft_intent": "value_add" },
+      { "step_index": 2, "offset_days": 14, "draft_intent": "last_call" }
+    ],
+    "exit_conditions": ["reply_received", "won", "lost"]
+  }
+}
+```
+
+New follow-up proposal types: `new_workflow`, `refine_workflow_cadence`,
+`refine_workflow_stop_condition`, `suggest_enrollment`, `retire_workflow`. The curator
+constraints above are unchanged — it may *propose*, but activation always needs human
+review and every surfaced step is review-required.
+
 ---
 
 ## Provider-Abstraction Layer
@@ -2370,6 +3190,19 @@ Required provider implementations:
 - `mailmate-ai::providers::lm_studio`
 - `mailmate-ai::providers::llama_cpp`
 - `mailmate-ai::providers::mock`
+
+Supported v1 provider implementation (feature-gated, local-first):
+
+- **`mailmate-ml` Burn in-process provider** (registered into the `ProviderRegistry`
+  under `kind = "burn"`) — a **v1-supported** pure-Rust, single-binary local-inference
+  option. Honest operational notes (current upstream maturity, not reasons to defer):
+  `burn-lm` is **v0.0.1** (Llama 3.x / TinyLlama only, run via its own `InferenceServer`),
+  there is **no GGUF interop**, and it lags llama.cpp/Ollama in **model breadth** — so
+  users who need a wider model roster should pick Ollama/llama.cpp (the providers are
+  co-first-class; the registry ships empty and the user chooses at setup). Weights are
+  imported via safetensors / `.pt` into a Burn-defined architecture, or via `burn-onnx`
+  (verify operator coverage). It implements the same `AiProvider` primitive as every
+  other provider, so it inherits validation, the task layer, rules, and policy unchanged.
 
 ### Provider tasks
 
@@ -2430,12 +3263,22 @@ api_key_file = "secrets/openai_compatible.key"
 # Optional upgrade: OS keychain. Env var is a dev-only override:
 # api_key_env = "MAILMATE_OPENAI_COMPATIBLE_API_KEY"
 
+[ai.providers.local_burn]
+# v1-supported, in-process; requires the `burn` cargo feature.
+kind = "burn"
+model = "configured-by-user"   # e.g. a burn-lm Llama 3.2 / TinyLlama checkpoint
+# backend selection is shared with [ml].backend (ndarray/burn-flex/wgpu/cuda/metal).
+# Weights load via safetensors/.pt into a Burn-defined architecture, or burn-onnx
+# (verify ops). No GGUF.
+
 [ai.providers.test]
 kind = "mock"
 fixture_dir = "tests/fixtures/provider_responses"
 ```
 
-Only provider adapters should interpret provider-specific configuration.
+Only provider adapters should interpret provider-specific configuration. The
+non-`[ai]` selection keys (`[storage]`, `[ml]`, `[training]`) live under *Replaceable
+Components and Extension Points* and are owned by `mailmate-core::config`.
 
 ---
 
@@ -2454,8 +3297,13 @@ are now three typed enums:
 - `Move` (suggested vs. applied is the `PolicyOutcome`, not a separate kind — this
   replaces the old `suggest_move` + `move_to_folder` pair)
 - `MarkJunk`
-- `CreateDraft`
+- `CreateDraft` *(may be authored by a scheduled follow-up trigger as well as an on-demand `DraftReply`; in both cases the draft is `requires_review = 1`)*
 - `RequireReview { target }`
+
+The three enums are **unchanged** by the follow-up feature — a scheduled follow-up
+reuses `CreateDraft`; the enroll/stage/cancel/snooze/review verbs are protocol requests
++ state transitions on the pipeline tables, not new `PlannedAction`/`TaskRequest`/
+`UserCorrection` kinds.
 
 **`TaskRequest`** — on-demand AI tasks the user triggers:
 
@@ -2473,7 +3321,7 @@ are now three typed enums:
 ### Action flow
 
 ```text
-Thunderbird event/request
+Thunderbird event/request  — OR a FollowUpDue trigger from the scheduler (carries a pipeline_item)
         |
         v
 Rust host builds context
@@ -2530,6 +3378,139 @@ Execution result recorded as learning/audit event
 
 ---
 
+## Sales Pipeline and Follow-up Workflows
+
+MailMate tracks quotes/proposals through a lightweight pipeline and drafts timely
+follow-ups for review. It is a **tracker, not a CRM**, and it changes no safety
+invariant: a follow-up is a review-required draft, produced by the *existing* P2 path on
+a *time* trigger.
+
+### Where it fits
+
+```text
+PipelineItem (deal/quote, has a stage)
+   └─ runs through ─▶ WorkflowDefinition v_N   (steps: day 3 / 7 / 14 / 28)
+                        └─ instantiated as ─▶ WorkflowInstance (state machine)
+                                                 ├─ current_step_index
+                                                 ├─ next_due_at  ◀── the ONLY temporal trigger
+                                                 └─ status (FSM below)
+```
+
+You tag a sent quote → a `PipelineItem` is created and **armed** on a
+`WorkflowDefinition` → its `WorkflowInstance` carries the durable `next_due_at`. When a
+step is due, the scheduler drives P2 to emit `[CreateDraft, RequireReview]`, surfaced as
+`followup_draft_ready`. A reply (inbound mail, matched by host-side thread identity) or a
+won/lost mark **exits** the sequence. Domain types live in `mailmate-domain`; the engine
+in `mailmate-workflow`; the tables in *Data Model* (not repeated here).
+
+### The durable temporal trigger
+
+Time is the only new trigger, and it is modelled 1:1 on the existing classification
+queue — durable state polled by a worker, **never** an event bus or a daemon:
+
+| Classification queue | Follow-up scheduler |
+|---|---|
+| `messages.classification_status` (`pending`…) | `workflow_instances.next_due_at` + `status` |
+| worker drains `pending` rows | worker drains `status IN ('active','snoozed') AND next_due_at <= now` |
+| index `messages(classification_status)` | index `workflow_instances(status, next_due_at)` |
+| pushes `classification_ready` | pushes `followup_draft_ready` |
+
+`app.rs` runs the scheduler on startup (catch-up sweep) and on a periodic tick
+(`[followup] poll_interval_secs`) while the host is alive. **Invariant:** `next_due_at`
+is non-NULL **iff** `status ∈ {active, snoozed}` — those are exactly the selectable rows.
+
+### Catch-up-on-launch + staleness / coalescing guard
+
+Because the host runs only while Thunderbird is open, a step may be overdue (the client
+was closed for days). On each drain pass for an instance, with `H = abandon_horizon_days`
+(from `staleness_json`, config default):
+
+1. **Due set** = steps with `step_index ≥ current_step_index` whose absolute due-time (`anchor_at + offset_days`) `≤ now`.
+2. A due step is **fresh** if `now − due_time ≤ H`, else **stale**.
+3. **If any fresh due step exists** → let `latest` = the highest-`step_index` fresh due step. Emit **one** follow-up draft for `latest` (drive P2). Record each due step with index `< latest` as `step_skipped_coalesced` (a `followup_coalesced` audit row lists them; the emitted step's `followup_feedback.coalesced_from_json` carries them). Move to `awaiting_review`, clear `next_due_at`.
+4. **Else (all due steps stale past H)** → emit **no draft**; move to `needs_attention`; push `followup_needs_attention`.
+5. **`awaiting_review` hold (the frequency cap):** while a follow-up draft is pending review, `next_due_at` is NULL so nothing new fires — **at most one pending follow-up draft per instance**. On `review_followup`, advance `current_step_index` to `latest + 1` and set `next_due_at` to the next future step (or `completed` if none).
+
+So a 30-day absence never produces three nagging drafts: it produces one current
+follow-up (or a single needs-attention nudge).
+
+### Exit / stop detection
+
+- **Reply:** new inbound mail on the item's thread (host-side `References`/`In-Reply-To` identity, reusing `threads`) → `engaged`, `next_due_at` cleared. (The user may resume.)
+- **Won/lost:** a `record_user_action` `update_pipeline_stage` → `completed`.
+- **Cancel:** `cancel_sequence` → `cancelled`.
+
+Exit always means clearing `next_due_at`, so the scheduler simply stops selecting the row.
+
+### Instance state machine
+
+`next_due_at` non-NULL iff `status ∈ {active, snoozed}`:
+
+| From | Event | To |
+|---|---|---|
+| *(arm)* | user enrolls a quote | `active` |
+| `active` / `snoozed` | step due → draft emitted (drives P2) | `awaiting_review` |
+| `awaiting_review` | `review_followup` (send/edit/skip), more steps remain | `active` |
+| `awaiting_review` | `review_followup`, last step | `completed` |
+| `active` / `awaiting_review` / `snoozed` | reply received | `engaged` |
+| `engaged` | user resumes (optional) | `active` |
+| `active` | user snoozes | `snoozed` |
+| `active` / `awaiting_review` | all due steps stale past horizon | `needs_attention` |
+| any non-terminal | won / lost | `completed` |
+| any non-terminal | cancel | `cancelled` |
+
+### How a due step drives P2 (no logic of its own)
+
+```text
+TriggerKind::FollowUpDue { pipeline_item, thread_id, anchor_message_id }
+   → existing ActionPlanner  → draft-safety validator  → PolicyGuard
+   → [CreateDraft (allowed), RequireReview (requires_review)]  (requires_review = 1)
+   → followup_draft_ready
+```
+
+The scheduler contributes the *trigger* and the *step's prompt template + forbidden
+commitments*; the drafting, validation, and policy decisions are 100% the existing
+machinery. There is no follow-up-specific send path, draft validator, or policy.
+
+### Reusing the versioned-principle machinery
+
+A `WorkflowDefinition` is a Ray-Dalio-style principle: versioned, immutable per version,
+lifecycle-managed (`draft → pending_human_review → shadow_mode → active → …`), and
+human-curated — reusing the rule version/lifecycle/status code. It is **not** a
+condition→effect rule, so the condition evaluator and AST-overlap conflict detector do
+not apply to the cadence; only `enrollment_condition_json` is an AST condition, and a
+workflow *conflict* is the containment check "don't run two active workflows on one
+item". Shadow-mode, learning, and curation all reuse existing paths:
+
+- **Shadow:** a `shadow_mode` workflow records would-fire steps in `workflow_shadow_outcomes` (no draft); the promotion report scores *cadence-fit* (manual-followup alignment net of reply-pre-emption) — an honestly weaker signal than rule shadow, since the send-acceptance counterfactual is unobservable.
+- **Learning:** `followup_feedback` (cadence/timing) + `draft_feedback` (body) feed evidence → curator proposals (`new_workflow`, `refine_workflow_cadence`, …) → review → shadow → activate. Cadence offsets, stop conditions, and the follow-up prompt template are all learned/versioned.
+- **Curation:** the curator may *propose* but never activate; every surfaced step is review-required regardless.
+
+### Worked example
+
+Day 0: you send Acme a quote and tag it → `pli_acme` (`open`), armed on
+`standard-quote-follow-up` v2 (3/7/14) → `wfi_acme` `active`, `next_due_at = day 3`.
+Day 3: scheduler fires step 0 → review-required draft → `awaiting_review`; you edit and
+send → `active`, `next_due_at = day 7`. You then close Thunderbird for 12 days. Day 19
+you reopen: catch-up sees steps 1 (day 7) and 2 (day 14) overdue, both fresh within a
+14-day horizon → coalesce to **one** draft for step 2, step 1 recorded as
+`step_skipped_coalesced` → `awaiting_review`. If instead Acme had replied on day 9, the
+day-19 catch-up would find the instance already `engaged` (exited) and surface nothing.
+
+### Invariant-compliance checklist
+
+| Resolved decision / invariant | How this honours it |
+|---|---|
+| Review-required only (`never_auto_send_drafts`) | Output is `CreateDraft + RequireReview`, `requires_review = 1`; no `send_draft` exists in the path. |
+| Catch-up-on-launch, no daemon | In-host scheduler polls `next_due_at`; startup catch-up sweep; no OS timer. |
+| No draft blast | Coalesce to one fresh step; stale→`needs_attention`; `awaiting_review` caps to one pending draft. |
+| Not a third pipeline | A `FollowUpDue` trigger drives the existing P2 planner; P1 untouched. |
+| No event bus / not event-sourced | The trigger is one durable column polled by a worker. |
+| Single writer per fact | `followup_feedback` (cadence) vs `draft_feedback` (body) vs `audit_log` (provenance) vs `workflow_shadow_outcomes` (shadow) — disjoint owners. |
+| Lightweight, not a CRM | `pipeline_items` is stage + thread anchor + counterparty + opaque amount hint only. |
+
+---
+
 ## Drafting Safety
 
 Drafting must be designed around human review.
@@ -2545,6 +3526,7 @@ Hard requirements:
 - Do not make promises unless present in the thread or explicitly provided.
 - Drafts must be created for human review only.
 - Edits to drafts must be captured in `draft_feedback` / `draft_edit_history`.
+- A scheduled follow-up draft is an ordinary draft: it passes the **same** draft-safety validator, is created `requires_review = 1`, and its step's `forbidden_commitments` (e.g. `["dates","prices","payment_changes","legal_positions"]`) are enforced by that existing validator — a follow-up cannot smuggle a price, date, or commitment.
 
 ### Draft validation
 
@@ -2569,32 +3551,81 @@ If validation fails, MailMate can either:
 
 MailMate is local-first.
 
-Initial storage:
+### Default storage (SQLite)
 
-- SQLite via `rusqlite` (bundled).
-- Migration-managed schema.
+The default engine, behind the `StorageBackend` seam:
+
+- SQLite via `rusqlite` (bundled — statically compiled, no system library, single binary).
+- Zero-config: on startup the host creates the DB file if absent and applies the bundled `common` + `sqlite` migrations in-process; the default user never sees a migration step.
+- Migration-managed schema (shared `common` core + per-dialect overlay).
 - Append-only audit timeline.
 - Immutable rule versions.
 - Readable local metadata; hashes used for identity/dedup only.
 
 ### Storage execution model
 
-SQLite is a single-file serial writer; an async SQL driver would add ceremony
-without buying write parallelism. So:
+The execution model has two layers: an **engine-neutral contract** that the core
+depends on, and **backend-private** details that differ per engine.
+
+**Engine-neutral contract (true for every backend).**
+
+- The core reaches storage only through the async repository traits (`RuleRepository`,
+  `AuditRepository`, `FeedbackRepository`, …) over a `StorageBackend` — returning domain
+  types and `StorageError`. No `Connection`, `Row`, transaction handle, or SQL string
+  crosses the seam. The async contract is what the seam promises; *how* a backend
+  satisfies it is private.
+- Core traits (`RuleEngine`, `PolicyGuard`, `ActionPlanner`, `LearningEngine`,
+  repositories) keep their `async` signatures.
+- Only `AiProvider` performs real network async (`reqwest`). `app.rs` is the async
+  orchestration seam: it awaits provider calls and the storage facade; rule/policy logic
+  is pure/CPU-bound and runs inline inside those async methods.
+
+**Default backend: embedded SQLite (these details are SQLite-backend-private, NOT
+cross-engine invariants).**
 
 - Engine: SQLite via `rusqlite` (bundled, synchronous).
-- Core traits (`RuleEngine`, `PolicyGuard`, `ActionPlanner`, `LearningEngine`,
-  repositories) keep their `async` signatures, but storage is reached through an
-  async facade that runs blocking `rusqlite` work via `tokio::task::spawn_blocking`,
-  drawing connections from an `r2d2` pool.
+- The SQLite backend satisfies the async contract by running blocking `rusqlite` work
+  via `tokio::task::spawn_blocking`, drawing connections from an `r2d2` pool.
 - Pragmas set per connection: `journal_mode=WAL` (concurrent readers),
   `foreign_keys=ON` (FK enforcement is off by default in SQLite),
   `busy_timeout` (serializes writers without spurious `SQLITE_BUSY`).
-- Only `AiProvider` performs real network async (`reqwest`). `app.rs` is the async
-  orchestration seam: it awaits provider calls and the storage facade; rule/policy
-  logic is pure/CPU-bound and runs inline inside those async methods.
-- Writes serialize through a single logical writer path; reader/writer overlap
-  relies on WAL.
+- Writes serialize through a single logical writer path; reader/writer overlap relies on
+  WAL.
+- A **networked backend** (sqlx / tokio-postgres) is **async-native**: it does **not**
+  use `spawn_blocking`, has no WAL/`busy_timeout`/pragma setup, enforces FKs by default,
+  and gains real write concurrency via MVCC. So for the embedded default a blocking
+  driver on a pool is sufficient; a server engine simply awaits its driver — the
+  single-writer/WAL reasoning above is *not* imposed on it.
+
+### Engine portability
+
+The repository traits keep the core engine-agnostic; the unavoidable per-engine SQL is
+quarantined in one `dialect` module so 90% of queries (plain INSERT/SELECT/UPDATE over
+TEXT/INTEGER columns with prefixed-string PKs) stay shared. The surfaces that genuinely
+diverge and must route through `dialect`:
+
+- **JSON column type** (`TEXT` / `jsonb` / `JSON`) and, only where a view reaches inside
+  a `*_json` column, the JSON-extraction expression (`json_extract` vs `->>` vs
+  `JSON_UNQUOTE(JSON_EXTRACT(...))`). The portable default is to treat `*_json` as opaque
+  and do structured work in Rust.
+- **View bodies** and cross-table `UNION`s (type-affinity rules differ) — see the
+  engine-portability note under `rule_outcomes (view)`.
+- **Boolean/timestamp column types** (LCD `INTEGER`/`TEXT` by default; a server overlay
+  may use `BOOLEAN`/`TIMESTAMPTZ`).
+- **FK enforcement / pragmas** (SQLite needs `PRAGMA foreign_keys=ON`; servers default-on).
+- **Upsert and `RETURNING`** — *anticipated* surfaces for a server backend only; the
+  current append-only, prefixed-string-ID schema uses neither.
+
+SQLite stays the **zero-config default that ships**; a server engine (Postgres/MariaDB)
+is an **opt-in for users who already run a database**, selected purely via
+`[storage] engine` + a connection URL, with the second backend kept as a documented
+stub until a real need exists (the seam is built thin now; the engine is not). The
+driver choice underpinning the seam is **resolved**: `rusqlite` (bundled) for the
+embedded default, `sqlx` for the opt-in server backend — a two-driver split behind one
+`StorageBackend` trait (sea-orm rejected as a redundant entity layer; diesel excluded as
+portability-hostile; see *Open Design Questions*). "Swappable" means swappable in code, not
+free in operations: a server engine adds a daemon, credentials, connection lifecycle,
+and its own backup tooling.
 
 ### Threat model and what we do (and do not) protect
 
@@ -2660,10 +3691,11 @@ These are implementation invariants, not optional polish:
   length check that emits a structured `error` instead of writing an oversize frame,
   so a bug fails loudly rather than wedging the channel.
 - **Large artifacts go out-of-band.** Dataset/rule exports, LoRA adapter files, and
-  SQLite backups are written to disk and referenced by **filesystem path** in the
-  message; they never travel through the native-messaging frame. The principle:
-  native messaging carries control + small results; large artifacts move as path
-  references over the shared local filesystem.
+  database backups/exports **for the embedded engine** are written to disk and
+  referenced by **filesystem path** in the message; they never travel through the
+  native-messaging frame. (A networked engine is backed up by its own tooling — `pg_dump`
+  etc. — not via the frame.) The principle: native messaging carries control + small
+  results; large artifacts move as path references over the shared local filesystem.
 
 ---
 
@@ -2690,7 +3722,11 @@ the protocol payloads. Provenance (which rule/prompt/model/calibration versions
 produced a result) lives in each feedback row's own `pinned_versions_json`, not in a
 shared spine; the correlation ID only lets the audit view stitch one run's rows back
 together. `RuleEngine::explain(decision_id)` reconstructs an explanation by querying
-those rows.
+those rows. A fired follow-up step works identically: it mints an ephemeral `decision_id`
+stamped into its `audit_log` (`followup_step_fired`) row, its `followup_feedback` row, and
+the `followup_draft_ready` payload, so `explain` can reconstruct "step N of workflow
+`wfd_…` v_K, prompt `pt_followup_…`, policy checks passed, surfaced for review" — still
+no `decisions` table.
 
 ### Explanation example
 
@@ -2796,7 +3832,7 @@ Required PR checks (all run from day one; empty until their subsystem lands):
 - Unit tests.
 - Integration tests.
 - End-to-end or harness-based e2e tests.
-- Storage migration tests.
+- Storage migration tests (matrix across enabled engines; the SQLite leg is required, Postgres/MariaDB legs are opt-in and non-blocking so a server engine never becomes a required-check dependency).
 - Native messaging protocol tests.
 - Thunderbird adapter tests/harness tests.
 - Provider contract tests using mock provider.
@@ -3165,7 +4201,7 @@ Hard requirements:
 - No provider implementation is complete without mock-provider equivalent tests and contract tests.
 - No storage migration is complete without migration tests.
 - No Thunderbird adapter behavior is complete without adapter tests or a documented harness simulation.
-- No LoRA/data-capture behavior is complete without tests for positive examples, negative examples, privacy filtering, dataset splits, and export formats.
+- No LoRA/data-capture behavior is complete without tests for positive examples, negative examples, privacy filtering, dataset splits, and export formats — and training orchestration is tested through a **mock `TrainerBackend`**, so no test requires a GPU, the Burn backend, or an external trainer.
 
 ### Required test layers for every feature area
 
@@ -3217,6 +4253,7 @@ Required cases:
 - Payment-detail trust is blocked.
 - Financial/security/legal moves require review unless explicitly allowed.
 - Manual override wins where the requested action is otherwise safe.
+- A fired follow-up step never yields a `send_draft`/auto-send action — only `CreateDraft` + `RequireReview` (`requires_review = 1`).
 
 ### Provider tests
 
@@ -3247,6 +4284,7 @@ Required cases:
 - Single-writer stdout: concurrent notification + response writes never interleave frames.
 - Oversize-frame guard: a frame that would exceed the 1 MB host→extension limit becomes a structured `error`, never a written frame.
 - Error response formatting.
+- `followup_draft_ready` / `followup_needs_attention` notification serialization; the new follow-up control request `type`s parse; reply/won/lost ride `record_user_action` (no new request type for them).
 
 ### Storage migration tests
 
@@ -3256,8 +4294,10 @@ Required cases:
 - Migration from each prior version.
 - Rule version immutability.
 - Audit-log and feedback-table append behavior.
-- Foreign-key constraints.
+- Foreign-key constraints (engine-aware: SQLite needs `PRAGMA foreign_keys=ON`; server engines default-on).
 - Privacy default: full bodies not retained.
+- Full migration + repository suite runs against **each enabled engine** in a CI matrix (fresh + upgrade-from-prior). The **SQLite leg is the default/required** path; Postgres/MariaDB legs are **opt-in and non-blocking**, so the always-running validation never requires an external database — consistent with "no test requires an external provider/tool".
+- `0004_followups.sql` fresh + upgrade; `workflow_definition_versions` immutability; the `workflow_instances(status, next_due_at)` index is present; `followup_feedback` and `workflow_conflicts` append-only.
 
 ### Integration tests
 
@@ -3274,6 +4314,13 @@ Required cases:
 - Shadow rule records outcomes but does not execute move.
 - Activate rule and produce action plan.
 - Policy guard blocks unsafe action from otherwise matching rule.
+- Follow-up catch-up-on-launch: host start drains overdue `workflow_instances` and reconciles.
+- Follow-up coalescing: multiple overdue steps within the horizon → exactly **one** review-required draft; skipped steps recorded (`step_skipped_coalesced` + `followup_coalesced` audit row).
+- Follow-up staleness: overdue past the abandon horizon → `needs_attention`, **no draft**.
+- Exit-on-reply: inbound mail matched by host-side thread identity moves the instance to `engaged` and clears `next_due_at`.
+- Restart recovery / lease: an orphaned mid-fire row is reclaimed with no double-fire (idempotency key `(instance, step_index)`).
+- Shadow workflow: a `shadow_mode` `WorkflowDefinition` writes `workflow_shadow_outcomes` and surfaces no draft.
+- Won/lost via `record_user_action` → `completed`, with a `followup_feedback` row.
 
 ### End-to-end tests
 
@@ -3298,6 +4345,7 @@ Simulation should measure:
 - False-positive risky actions.
 - User override rate.
 - Policy block rate.
+- Follow-up behaviour: replay a quote thread with a host-closed gap and a mid-sequence reply, asserting no auto-send, coalescing to ≤1 draft, staleness→`needs_attention`, and exit-on-reply.
 
 Historical fixtures must be sanitized and should not require full body retention by default.
 
@@ -3305,10 +4353,12 @@ Historical fixtures must be sanitized and should not require full body retention
 
 ## Implementation Sequence
 
+v1 encompasses **all** phases below; the phases are engineering build order, not an MVP cut — the system ships complete in the first release.
+
 ### Phase 0: Repository foundation
 
 1. Create Rust workspace.
-2. Add crates for native host, core, domain, policy, rules, learning, training, AI, storage, audit, and test support.
+2. Add crates for native host, core, domain, policy, rules, learning, training, AI, ml (Burn substrate, feature-gated), storage, audit, and test support.
 3. Create long-lived `develop` branch for integration and keep `main` as the release branch.
 4. Add GitHub Actions workflows for PR validation, release, docs, security checks, and Dependabot auto-merge.
 5. Add Dependabot configuration for one PR per dependency/security issue targeting `develop`.
@@ -3329,9 +4379,9 @@ Historical fixtures must be sanitized and should not require full body retention
 ### Phase 2: Domain and storage foundation
 
 1. Define message, thread, sender, action, rule, event, and draft domain types.
-2. Add SQLite migrations.
-3. Implement repository traits.
-4. Add migration tests.
+2. Define the repository traits + the `StorageBackend` seam (`backend.rs`, `dialect.rs`); add the default SQLite backend and its migrations, structured as `common` + per-dialect overlay from day one (even with only SQLite implemented).
+3. Implement repository traits over the backend seam.
+4. Add migration tests (SQLite required; engine-matrix scaffolding in place for opt-in server legs).
 5. Add privacy default tests proving full body storage is disabled.
 
 ### Phase 3: Policy guard
@@ -3358,6 +4408,7 @@ Historical fixtures must be sanitized and should not require full body retention
 4. Add provider tests.
 5. Add provider adapters for OpenAI-compatible endpoints, LM Studio, llama.cpp server, and Ollama.
 6. Ensure provider-specific details do not leak outside adapters.
+7. Introduce `mailmate-ml` (Burn) and the `Tier2Classifier` trait with its Burn-default discriminative classifier (logistic regression as the lightweight alternative) for the cascade's Tier 2; register the feature-gated in-process Burn `AiProvider` (`kind = "burn"`) as a supported v1 provider (co-first-class with Ollama/llama.cpp).
 
 ### Phase 6: Action planner
 
@@ -3387,7 +4438,7 @@ Historical fixtures must be sanitized and should not require full body retention
 > each AI function as it lands (Phases 4–8). This phase builds the rest of the pipeline,
 > TDD'd against fixtures from the start.
 
-1. Add `mailmate-training` crate.
+1. Add `mailmate-training` crate (it owns the `TrainerBackend` trait) and wire the Burn trainer impl from `mailmate-ml`.
 2. Implement `training_datasets`, `lora_adapters`, and `lora_eval_runs` migrations
    (no `training_examples` table — datasets are derived from the feedback tables).
 3. Derive positive/negative examples on export from the per-task feedback tables.
@@ -3395,9 +4446,9 @@ Historical fixtures must be sanitized and should not require full body retention
 5. Export SFT, preference, evaluation, and safety-counterexample JSONL datasets.
 6. Add adapter metadata import for externally trained LoRA artifacts.
 7. Add compatibility checks for base model family, tokenizer hash, and chat template hash.
-8. Add the pluggable trainer backend (external toolchain by default) and training orchestration.
+8. Provide the `TrainerBackend` with the **in-process Burn** default; keep the external toolchain (subprocess) and remote as pluggable alternatives and a mock for tests; gate Burn behind a cargo feature. `capabilities()` advertises `lora` only when a real low-rank adapter is implemented — do not promise on-device LoRA in v1.
 9. Add evaluation gates before an adapter can be activated.
-10. Add tests proving no LoRA path bypasses rule hierarchy or policy guard.
+10. Add tests proving no LoRA path bypasses rule hierarchy or policy guard (mock `TrainerBackend`, no GPU/external tool required).
 
 ### Phase 10: Thunderbird adapter expansion
 
@@ -3408,14 +4459,30 @@ Historical fixtures must be sanitized and should not require full body retention
 5. Apply safe actions returned by Rust host.
 6. Record user actions and execution results back to Rust host.
 
-### Phase 11: Product hardening
+### Phase 11: Sales pipeline and follow-up workflows
+
+Depends on the action planner (Phase 6), learning engine (Phase 7), curator (Phase 8),
+and reuses LoRA export (Phase 9). TDD-mandated — each step starts from a failing test.
+
+1. Add `mailmate-domain` pipeline/workflow types and the `mailmate-workflow` crate (definition, instance FSM, scheduler, exit detection, emit).
+2. Add `0004_followups.sql` (`common` + `sqlite` overlay; indexes incl. `workflow_instances(status, next_due_at)`; the workflow-performance view) with migration tests.
+3. Add `pipeline_items` / `workflow` / `followup_feedback` repositories; wire `followup_feedback` into `FeedbackRepository<F>`.
+4. Reuse rule version/lifecycle machinery for `WorkflowDefinition` (third kind); add the containment `WorkflowConflict` check.
+5. Implement the catch-up-on-launch `FollowUpScheduler` (drain + coalescing/staleness guard + lease/restart recovery), driven by `app.rs`; confirm the action planner accepts a `FollowUpDue` trigger carrying a `pipeline_item` (no new action verb).
+6. Implement `ExitDetector` (reply via host-side thread identity; won/lost via `record_user_action`).
+7. Add protocol frames (`followup_draft_ready`, `followup_needs_attention`, the control requests) with protocol tests.
+8. Add curator `new_workflow` / refine / suggest-enrollment proposals + the shadow-mode workflow promotion report over `workflow_shadow_outcomes`.
+9. Extend derive-on-export views over `followup_feedback` / `draft_feedback`; LoRA stays advisory/gated (never enables auto-send).
+10. Simulation + integration/e2e tests per *Testing Strategy* (catch-up gap, coalescing, staleness, exit-on-reply, no auto-send).
+
+### Phase 12: Product hardening
 
 1. Add audit/explanation UI surfaces.
 2. Add settings for providers and privacy retention.
 3. Add import/export for rules.
 4. Add simulation runner.
 5. Add performance benchmarks.
-6. Add backup/restore story for SQLite.
+6. Add backup/restore story for the embedded engine (SQLite); document server-engine backup (`pg_dump` etc.) as the operator's responsibility.
 
 ---
 
@@ -3423,7 +4490,7 @@ Historical fixtures must be sanitized and should not require full body retention
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Thunderbird extension API limitations | Some actions may be hard or impossible from MailExtension APIs. | Keep Thunderbird as adapter; isolate capabilities; use graceful degradation and context-menu workflows. |
+| Thunderbird extension API limitations | Some actions may be hard or impossible from MailExtension APIs. | **Confirmed sufficient** (ESR140/MV3): moves via `messages.move`/`copy`, tags via `messages.update {tags}` + `messages.tags.*`, junk/read/flagged via `messages.update`, drafts via `compose.beginNew/Reply/Forward` → `compose.saveMessage({mode:'draft'})` (review-required, never auto-sent), intake via `messages.onNewMailReceived` (see *Open Design Questions*). Keep Thunderbird as a thin adapter; re-resolve session-scoped `MailFolderId`s per session; isolate capabilities; graceful degradation and context-menu workflows. |
 | Native messaging complexity | Protocol bugs can break core UX. | Version protocol; add exhaustive protocol tests; keep messages explicit and schema-validated. |
 | Provider-specific leakage | Core becomes coupled to one AI backend. | Enforce provider trait boundary; code-review rule that provider-specific types stay inside provider modules. |
 | Unsafe automation | User loses trust or mail is mishandled. | Separate policy guard; conservative defaults; no auto-delete or auto-send; review gates. |
@@ -3437,29 +4504,58 @@ Historical fixtures must be sanitized and should not require full body retention
 | Dependency update breaks behavior | Automated bumps can introduce subtle regressions. | One PR per dependency issue, full PR validation before merge, no branch-protection bypass, auto-merge only low-risk passing updates. |
 | Rule conflict accumulation | Rule system becomes hard to reason about. | Conflict table; curator detection; human review; rule retirement flow. |
 | Audit log growth | SQLite database grows too large. | Retention policies, compaction of derived features, export/purge tools. |
+| Premature storage abstraction | Cost/complexity with no second engine ever shipping. | Keep the seam THIN (repo traits + one `dialect` module); ship only SQLite; leave the server backend a documented stub until a real need exists. |
+| Burn pre-1.0 churn | Upstream API churn on the on-device learned layer. | **Pin an exact Burn version** (sibling project *idiolect* ships on a pinned `burn = "=0.13.2"`, CPU/ndarray — proof it is stable enough to ship); keep Burn behind engine-neutral contracts + traits (`Tier2Classifier`, `TrainerBackend`) + a swappable adapter, so a version bump or engine swap never touches core. The committed trainer trains **small models** (classifier/preference/tone); on-device **LoRA** is a deferred optional target — `capabilities()` advertises `lora` only when the primitive-built adapter works, external toolchain as the proven fallback. The **generative foundation model runs frozen on a mature engine** (Ollama/llama.cpp) by design, so model breadth never depends on Burn; `burn-lm` (v0.0.1, no GGUF) is an optional pure-Rust generative path, not a dependency. |
+| Follow-up draft blast after long downtime | User returns to a backlog of nagging drafts. | Catch-up-on-launch coalesces overdue steps to one current draft; very-stale → `needs_attention` (no draft); the `awaiting_review` hold caps to one pending follow-up draft per instance. |
+| Nagging after the counterparty replied | Annoyed customer, lost trust. | Exit conditions pause the instance on inbound reply (host-side thread identity) and on user won/lost; `next_due_at` is cleared so the scheduler stops selecting it. |
+| Pipeline tracker scope-creeps into a CRM | Bloat; contradicts non-goals. | `pipeline_items` is deliberately minimal (stage + thread anchor + counterparty + opaque amount hint); no contacts/line-items/forecasting; reaffirmed in Non-Goals. |
+| Follow-up becomes a hidden auto-sender | Violates the core send posture. | Follow-up output is `CreateDraft + RequireReview` only; no `send_draft` action exists in the path; `never_auto_send_drafts` untouched; covered by policy-guard tests. |
 
 ---
 
 ## Open Design Questions
 
-Still open:
+Still open (the one genuine product/UX judgment the maintainer must own):
 
-1. Which Thunderbird APIs are sufficient for reliable folder moves, tags, junk marks, and draft creation across platforms?
-2. How much message text should be sent to providers by default for each feature?
-3. Should provider calls be disabled by default until the user chooses a provider?
-4. How should MailMate expose rule review: Thunderbird UI page, local web UI, or native settings file first?
-5. What is the minimum useful MVP: classification plus tag suggestions, or filing-learning loop first?
+**First human-review surface** — which UI hosts human review of rules/proposals/follow-ups. The review loop is *required* everywhere; no principle picks its surface. **Design constraint (maintainer-set):** a **local** UI that runs **natively cross-platform** (macOS / Linux / Windows) — it need **not** be a web UI. That reframes the choice: the surface is just another **client of `mailmate-core`** (a sibling of the Thunderbird adapter), so the axis is the *renderer*, not "inside Thunderbird vs. a browser". The candidates, with their **actual** constraints:
+
+- **(A) In-Thunderbird WebExtension options/tab page.** *Web tech, inside Thunderbird* — cross-platform because Thunderbird is. *Can do:* full HTML5/CSS + bundled frameworks (Vue/Preact), `diff2html`-style diffs, canvas/SVG charts. *Hard limits (ESR140 / MV3):* CSP forbids inline scripts/`eval` (all JS externalized); `storage.local` ≈ 10 MB; **`runtime.connectNative` is background-script-only** — an options page relays `options → runtime.sendMessage → background → connectNative` and must reconnect across MV3 event-page suspension; it is a **separate tab, not an inline sidebar** (no hooking the folder tree or message list). *Wins:* lowest footprint (no extra artifact), in-process, **no network/CSRF surface**. *Ceiling:* modest.
+- **(B) Native companion app, pure-Rust (egui / Iced / Slint).** *A native window that links `mailmate-core` directly* — no browser, no CSP, no port, no relay, no CSRF. Cross-platform via the toolkit; can ship as a **`mailmate review` subcommand of the same binary**, so "native GUI" and "single binary" stop being in tension. *Toolkits:* **egui** — immediate-mode, ≈10× the ecosystem of the others, ideal for a diff/approve/conflict tool; **Iced** — retained/Elm, better for complex multi-screen state; **Slint** — declarative markup, designer-friendly (mind the dual MIT/royalty-free-vs-commercial licensing; avoid the AGPL Qt backend). *Honest limit (all three, verified):* heavy sortable/filterable data-grids with inline edit are today's weak spot. *Wins:* pure-Rust, single-binary, zero web/network surface, native on all three OSes.
+- **(C) Native companion app, webview (Tauri v2).** *Web frontend, but a desktop app — not a browser.* Web-grade UI (Monaco, rich diff libs) over the **OS webview** (WebView2 / WKWebView / WebKitGTK), small binaries (no bundled Chromium). IPC is a **capability-scoped custom protocol** (`ipc://localhost`), **not** an exposed TCP port — so it gets the rich UI *without* loopback's CSRF/DNS-rebind/port tax (the localhost-server plugin that *would* open a port is a separate opt-in its own docs warn against in production). *Costs:* a second (web) toolchain to build/secure; per-OS webview differences; a separate bundle, so **not** one Rust binary. *Best when* the review UI needs web-grade richness or the heavy-data-grid case (B) struggles with.
+- **(D) Loopback web UI in a browser** (`127.0.0.1:PORT`). *Same web-grade UI as (C) but in a real browser* — and that is the problem: localhost has no auth (CSRF / DNS-rebinding / port-scanning, only partial mitigations — bind `127.0.0.1` only, single-use URL token, validate `Origin`, same-machine attackers out of scope), port conflicts, "open your browser" friction. **(C) delivers the same UI without any of this.** Pick (D) *only* if a true browser/remote surface is wanted — which contradicts the local + native constraint. **Demoted.**
+- **(E) Native TOML/DB edited directly.** Not a human surface (zero UI, developer-only, no visual diff, opaque field names) — but the **auditable/testable substrate** that exists day one *beneath* whichever renderer ships (review state is DB/TOML-backed).
+
+**Recommendation (revises the earlier "ship the in-Thunderbird page first" — the local + native + cross-platform steer changes it):** make the primary surface a **native companion app built with `egui`, shipped as a `mailmate review` subcommand of the same binary** — it satisfies local + native-cross-platform cleanly, keeps the single-binary / no-browser / no-CSRF posture, and fits the "core + clients" topology (the Thunderbird page deep-links "Review N pending" → signals the host → host launches/focuses the companion window). Keep the **in-Thunderbird page (A)** as a *thin* launcher / inline quick-approve, not the main surface. **Escalate to Tauri (C)** only if the review UI outgrows immediate-mode (rich editing, or the heavy data-grid case) — Tauri keeps you out of the browser/localhost-security mess even then. **Drop the loopback browser (D)** as plan-of-record. **(E)** is the substrate regardless. The one residual fork is **egui-first** (pure-Rust, single binary; you will feel it on complex tables/diffs) vs. **Tauri-first** (web-grade UI; a second toolchain and a separate bundle, losing "one Rust binary") — recommend egui-first, Tauri as the documented escape hatch. *(Yours to ratify; the steer already eliminates D and demotes A from primary.)*
 
 Resolved during this design pass:
 
 - **Rule condition language** → committed to a declarative JSON AST (see *Condition language*).
 - **Sync vs. queued classification** → background-queued with push (see *Native Messaging Protocol*).
 - **Encrypted local body retention keying** → dropped; local body encryption is out of the core design (see *Storage Strategy*).
+- **Default ML substrate** → Rust-native **Burn**, behind traits and feature-gated (see *Replaceable Components and Extension Points*).
+- **Default trainer backend** → in-process **Burn, committed and pinned** — trains small classifier / preference / tone models on-device today (idiolect-proven); external toolchain / remote / mock stay pluggable behind `TrainerBackend`; on-device LoRA is a deferred optional target (see *On-Device Training Layer*).
+- **Tier-2 classifier engine** → Burn discriminative classifier by default behind the `Tier2Classifier` trait, with logistic regression retained as a lightweight alternative (see *Classification Cascade*).
+- **Storage engine coupling** → storage reached only through repository traits over a `StorageBackend` seam; SQLite is the zero-config default, a server engine (Postgres/MariaDB) is opt-in (see *Storage Strategy*).
+- **Storage driver underpinning the seam** → **`rusqlite` (bundled) is the embedded default; `sqlx` is the driver for the opt-in server backend** — a two-driver split, not a single unified driver. `sea-orm` is rejected (its entity layer is redundant against the hand-rolled portable schema and would sit awkwardly above the repository traits); `diesel` is excluded (its philosophy fights portability). The lost cross-engine `query!` macros are moot because the `StorageBackend` seam already bans SQL strings from crossing it and quarantines per-engine SQL in the `dialect` module. A **server engine is a genuinely supported but second-class user config** — opt-in for users who already run a database, selected via `[storage] engine` + URL, kept a documented stub until a real need, with non-blocking CI legs; SQLite is the only engine that must always work (see *Storage Strategy*).
+- **Burn default compute backend** → **CPU NdArray/burn-flex** is the default build/run target (pure-Rust single binary, no hard GPU dependency); GPU (CUDA / Metal / WGPU) is opt-in for training/heavy inference via `[ml] backend`. The in-process Burn LLM provider is a **supported v1** provider — see the *Burn LLM provider in v1* item below (and *Replaceable Components and Extension Points*, *On-Device Training Layer*).
+- **Thunderbird API sufficiency** → **confirmed sufficient** for reliable folder moves, tags, junk marks, and draft creation across Linux/macOS/Windows via stable, documented `messenger.*` (MailExtension/WebExtension) methods; **target ESR140 + Manifest V3**. Concretely: moves = `messages.move(messageIds, destinationFolderId)` (`messages.copy` as the fallback when a read-only store blocks removal); tags = `messages.update(id, {tags:[...keys]})` with the catalog via `messages.tags.list/create/update/delete` (apply tag *keys*, not display names); junk = `messages.update(id, {junk:true|false})` (pair with `messages.move` to relocate — junk does not relocate by itself); read/flagged ride the same `messages.update {read}/{flagged}`; new-mail intake = `messages.onNewMailReceived` (register *synchronously* at the top of the MV3 background event page; `monitorAllFolders=true` to watch beyond Inbox); folder/special-folder discovery = `folders.query/get/getSubFolders` + `accounts.list` resolving to a `MailFolderId`; reads = `messages.list/query/get/getFull/getRaw` (some sub-fields are version-gated — `getFull`/`getRaw` `decodeContent`/`decrypt` and `messages.list` `sortType` post-date ESR140; verify per-field against the target ESR, though the design relies on none of them); right-click hooks = `menus.create({contexts:['message_list','folder_pane',…]})` (the hook + `info.selectedMessages`; we wire the action). **Draft creation = the compose pipeline**: `compose.beginNew/beginReply/beginForward(...)` → `compose.saveMessage(tabId, {mode:'draft'})` into Drafts — identity/FCC-aware. The compose API only *persists* a draft; the no-auto-send guarantee is **MailMate's policy guard** (`CreateDraft + RequireReview`), not the Thunderbird API — the follow-up/draft path never calls any send API, so `never_auto_send_drafts` is enforced by the guard, not inferred from the compose surface. The headless `messages.import(file, draftsFolderId, props)` exists but is **not** used as the draft path (it skips the compose pipeline and forces hand-built MIME). All mail-action APIs are platform-independent; the **sole per-OS divergence is native-messaging *host registration*** (manifest dir on Linux/macOS vs. registry key on Windows), already handled by the `install` subcommand — not the mail actions. Caveat baked into design: `MailFolderId` is session-scoped and invalidated by folder rename/move, so folders are re-resolved per session, never cached across sessions (see *Distribution and Installation*, *Risks and Mitigations*).
+- **Default message text sent to providers per feature (egress posture)** → **send the least the cascade forces, never the full body by default.** Tier 1/2 classification send **zero content to any model** (deterministic signals + the local Tier-2 classifier over structural features). Tier 3 and background filing/extraction send only a **bounded snippet** (≈4 KB phishing / 2 KB filing, quoted chains + signatures stripped, UTF-8-truncated) and **only to a local provider** by default — background classification/filing/extraction **never auto-send body content to a remote provider** (a config default, off; choosing a remote provider does not enable background body egress, and background escalation uses the local provider). User-initiated summary/draft/extract may use **bodies capped at the active content-retention level** (full to a local provider always; to a remote provider on opt-in), degrading to a snippet when retention is `metadata`. **Never leave by default, any provider:** attachment *content*, newly-fetched remote content (`never_download_remote_content_for_classification`), full recipient lists, or anything past a per-feature token budget (truncations audit-logged). Per-feature snippet caps + token budgets are versioned prompt-template parameters, not hardcoded constants (see *Content retention levels*, *Provider routing as a learning problem*).
+- **Provider calls off until configured** → **yes.** The provider registry ships **empty**; `default_provider` is a user choice, not a shipped value (the config example is illustrative of *format*). LLM-always-path tasks (Tier-3 escalation, summaries, draft *bodies*, task extraction, LLM rule-curation phrasing) are unavailable until a provider is chosen; a Tier-3-needed message **degrades to `RequireReview`**, never an auto-clear. MailMate is deliberately fully functional with **zero providers**: Tier 1/2 classification, the rule/policy/action/audit spine, the learning loop, follow-up scheduling, and review-required draft *slots* all run with no LLM. Selecting a **local** provider unlocks all features with **zero egress**; a **remote** provider unlocks user-initiated generative features per the egress posture above and still leaves background remote-body egress off (see *Provider-Abstraction Layer*, *Non-Goals*).
+- **`WorkflowDefinition` conflict storage** → a **sibling `workflow_conflicts` table** (in `0004_followups`), **not** a `workflow` kind on `rule_conflicts`. A workflow conflict is a *containment* check (don't run two active workflows on one pipeline item: `pipeline_item_id` + the two workflow/instance scopes + a `concurrent_active_workflow` vocabulary), structurally unlike `rule_conflicts` (which carries `rule_kind`, `rule_a_id`/`rule_b_id` into the rule tables, and an AST/effect-overlap `conflict_kind` vocabulary). This honors single-owner-per-fact and mirrors the existing `workflow_shadow_outcomes`-vs-`shadow_outcomes` split; `WorkflowEngine::detect_conflicts` already returns the distinct `WorkflowConflict` type (see *Workflow engine and follow-up scheduler traits*, *Data Model*).
+- **Seeded default cadence** → **ship a stock 3/7/14/28 `WorkflowDefinition`, but seeded *inactive*** (status `draft`/`shadow_mode`, never auto-armed, never auto-enrolling) — not "all cadences user-authored", and not active-on-install. A user must review/activate and enroll it (`pipeline_items.created_by` is `user, never ai`). This removes blank-page friction while preserving every guarantee (no auto-send, no auto-enroll, review-to-activate), mirroring the existing *seeded prompt templates* precedent (see *Rule Lifecycle*, *Sales Pipeline and Follow-up Workflows*).
+- **Follow-up send posture** → review-required only; a due step drives P2 to emit `CreateDraft + RequireReview`; no auto-send/gated exception (see *Sales Pipeline and Follow-up Workflows*, *Policy Guard Design*).
+- **Follow-up runtime** → catch-up-on-launch; durable `workflow_instances.next_due_at` polled by an in-host worker; no OS daemon; staleness/coalescing guard.
+- **Cadence modeling** → a versioned `WorkflowDefinition` reusing the rule version/lifecycle machinery (not plain `ActionRule`s, not a new classification ladder); workflow shadow uses a dedicated `workflow_shadow_outcomes` table with a cadence-fit metric (since the send-acceptance counterfactual is unobservable in shadow).
+- **v1 scope** → v1 ships the **full working product**. The Implementation-Sequence phases are engineering build order, not a staged feature release; there is no reduced MVP slice (see *Implementation Sequence*).
+- **Burn LLM provider in v1** → the in-process Burn provider (`kind = "burn"`) is an **optional pure-Rust generative path** behind the `AiProvider` trait, feature-gated. By design the generative **foundation model runs frozen on a mature engine** (Ollama / llama.cpp), idiolect-style — so `burn-lm`'s honest limits (v0.0.1, Llama 3.x/TinyLlama, no GGUF interop) never constrain model breadth; it is an option for users who want one pure-Rust stack, not a dependency. Burn's **learned-layer roles (Tier-2 classifier, `TrainerBackend`) are the committed v1 defaults** (see *Provider-Abstraction Layer*, *Replaceable Components and Extension Points*).
+- **Burn posture / buildability (idiolect-aligned)** → the on-device learning core is **implementable now**: the sibling project *[idiolect](https://github.com/nick-tgcs/idiolect)* ships the exact shape — a **frozen foundation model** on a mature engine + a **pinned Burn trainer** for small learned models + an `evaluate_promotion` gate. MailMate commits to **Burn as the learned-layer substrate** (Tier-2 classifier, preference/tone models, trainer), pinned and **behind engine-neutral contracts + a trait + a swappable adapter** so it stays replaceable; on-device **LoRA** is a deferred optional target, not a dependency of the learning thesis (see *On-Device Training Layer*, *Replaceable Components and Extension Points*).
 
 ---
 
 ## Architecture Summary
 
 MailMate should be built as a modular Rust application with Thunderbird as a thin adapter. The core value is a learning system based on explicit, versioned, auditable, testable, reversible rules. AI providers are useful advisors and curators, but they are replaceable and never bypass policy, rules, validation, or human review.
+
+The ML substrate is Rust-native (**Burn**) by default — the Tier-2 classifier engine and the trainer backend for the on-device **learned layer** — while the **generative foundation model runs frozen** on a mature local engine (Ollama/llama.cpp) behind `AiProvider`, exactly as the sibling project **idiolect** runs Whisper frozen via `whisper-rs`. The learning thesis rides on small Burn models + crystallized rules + an eval/promotion gate, not on fine-tuning the big model — a shape idiolect ships today, so it is buildable now. Every backend (AI provider, storage engine, trainer, classifier) is a config-selected impl behind engine-neutral contracts + a trait, so a better model or engine drops in (or SQLite → MariaDB) without rewriting the core. "Default" never means "hard dependency": Burn is committed but lives behind ports (idiolect's `ml-core` / `ports` / `trainer-burn` split), replaceable if and when needed.
 
 The safest path is to implement the policy guard, rule engine, feedback/audit store, and mock provider before adding real provider adapters. That keeps MailMate testable, provider-agnostic, and faithful to its core design: a local-first mail assistant that improves over time through explicit human-curated principles.
