@@ -1,0 +1,5 @@
+# Pin the toolchain so local dev matches CI exactly (CI installs this same version
+# via dtolnay/rust-toolchain). Bump deliberately, in its own reviewed PR.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

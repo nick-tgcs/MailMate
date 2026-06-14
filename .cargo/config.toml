@@ -1,0 +1,10 @@
+# Make warnings hard errors for all local builds and doc builds, mirroring the
+# CI `RUSTFLAGS="-D warnings"` gate (and idiolect's .cargo/config.toml). This is
+# why the always-green loop is `cargo test --workspace` + `cargo clippy --workspace
+# --all-targets` with nothing to special-case.
+[build]
+rustflags = ["-D", "warnings"]
+rustdocflags = ["-D", "warnings"]
+
+[term]
+color = "auto"

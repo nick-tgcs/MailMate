@@ -1,0 +1,16 @@
+[package]
+name = "mailmate-arch-test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Note: NO path-dependency on mailmate-core/-ports/-common. The guard inspects them via
+# `cargo metadata` from the outside, so it can never itself pull a backend into the
+# thing under test.
+[dependencies]
+cargo_metadata.workspace = true

@@ -1,0 +1,64 @@
+# MailMate — Cargo workspace.
+#
+# Hexagonal layering (mirrors github.com/nick-tgcs/idiolect):
+#   mailmate-common      — backend-free shared value types (the leaf).
+#   mailmate-ports       — port traits; depends only on -common.
+#   mailmate-core        — domain + use-cases; depends ONLY on -ports + -common.
+#   mailmate-test-support— in-memory fakes + fixtures implementing the ports.
+#   mailmate-core-tests  — core's behavioural tests (kept OUT of -core so -core
+#                          has zero dev-dependency path to any backend).
+#   mailmate-arch-test   — inspects the workspace via `cargo metadata` from the
+#                          OUTSIDE to enforce the no-backend-leakage law.
+#
+# The set of port traits grows phase by phase (Implementation Sequence): Phase 0
+# ships the cross-cutting infrastructure ports only.
+[workspace]
+resolver = "2"
+members = [
+    "crates/mailmate-common",
+    "crates/mailmate-ports",
+    "crates/mailmate-core",
+    "crates/mailmate-test-support",
+    "crates/mailmate-core-tests",
+    "crates/mailmate-arch-test",
+]
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-only"
+rust-version = "1.96"
+
+# Strict, warning-free hygiene — verbatim from idiolect. Every lint GROUP carries
+# priority = -1 so individual lints can still override it (and so the table parses
+# under clippy::lint_groups_priority). Each crate opts in with `[lints] workspace = true`.
+[workspace.lints.rust]
+warnings = "deny"
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_lifetimes = "deny"
+unreachable_pub = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# Exact-pinned versions (enforced by ci/scripts/test-real-adapter-deps.sh). Resolved
+# current as of 2026-06-14. No backend/runtime crate appears here that the core could
+# reach: tokio is a dev-only async test executor; cargo_metadata is arch-test only.
+[workspace.dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+thiserror = "=2.0.18"
+async-trait = "=0.1.89"
+futures = "=0.3.32"
+time = { version = "=0.3.49", features = ["serde", "macros", "formatting", "parsing"] }
+uuid = { version = "=1.23.3", features = ["v4", "serde"] }
+tokio = { version = "=1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync"] }
+cargo_metadata = "=0.23.1"
