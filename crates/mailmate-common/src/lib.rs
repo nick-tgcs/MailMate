@@ -20,6 +20,7 @@ pub mod message;
 pub mod policy;
 pub mod protocol;
 pub mod retention;
+pub mod rules;
 pub mod secret;
 pub mod sender;
 pub mod stream;

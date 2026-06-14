@@ -96,6 +96,16 @@ id_newtype!(
     DecisionId
 );
 id_newtype!(
+    "rule",
+    #[doc = "Rule id (`rule_…`)."]
+    RuleId
+);
+id_newtype!(
+    "rv",
+    #[doc = "Immutable rule-version id (`rv_…`)."]
+    RuleVersionId
+);
+id_newtype!(
     "mf",
     #[doc = "Message-feature row id (`mf_…`)."]
     MessageFeatureId
@@ -139,5 +149,8 @@ mod tests {
         assert!(MessageFeatureId::fresh().as_str().starts_with("mf_"));
         assert_eq!(DecisionId::PREFIX, "dec");
         assert!(DecisionId::fresh().as_str().starts_with("dec_"));
+        assert_eq!(RuleId::PREFIX, "rule");
+        assert_eq!(RuleVersionId::PREFIX, "rv");
+        assert!(RuleVersionId::fresh().as_str().starts_with("rv_"));
     }
 }

@@ -95,6 +95,20 @@ pub enum StorageError {
     Backend(String),
 }
 
+/// Failures from the `RuleEngine` port.
+#[derive(Debug, thiserror::Error)]
+pub enum RuleEngineError {
+    /// A rule condition referenced a field/operator combination that is not valid.
+    #[error("invalid rule condition: {0}")]
+    InvalidCondition(String),
+    /// `explain` was asked about a decision the engine has no record of.
+    #[error("no record of decision {0}")]
+    UnknownDecision(String),
+    /// An adapter-specific failure while evaluating rules.
+    #[error("rule engine error: {0}")]
+    Backend(String),
+}
+
 /// Failures from the `PolicyGuard` port.
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
@@ -127,6 +141,9 @@ pub enum MailMateError {
     /// A policy-guard failure.
     #[error(transparent)]
     Policy(#[from] PolicyError),
+    /// A rule-engine failure.
+    #[error(transparent)]
+    Rule(#[from] RuleEngineError),
 }
 
 #[cfg(test)]
