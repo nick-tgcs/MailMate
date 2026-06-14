@@ -392,6 +392,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mailmate-learning"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "mailmate-common",
+ "mailmate-ports",
+ "mailmate-rules",
+ "mailmate-storage",
+ "mailmate-test-support",
+ "serde_json",
+]
+
+[[package]]
 name = "mailmate-ml"
 version = "0.1.0"
 dependencies = [

@@ -233,6 +233,6 @@ mod tests {
     #[test]
     fn open_and_migrate_brings_a_fresh_db_current() {
         let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
-        assert_eq!(backend.applied_migration_versions().unwrap(), vec![1]);
+        assert_eq!(backend.applied_migration_versions().unwrap(), vec![1, 2, 3]);
     }
 }

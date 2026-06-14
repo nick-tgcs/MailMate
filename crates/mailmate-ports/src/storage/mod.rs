@@ -17,14 +17,24 @@ use async_trait::async_trait;
 
 use mailmate_common::error::StorageError;
 
+pub mod audit;
 pub mod drafts;
+pub mod feedback;
 pub mod messages;
+pub mod proposals;
+pub mod rules;
 pub mod senders;
+pub mod shadow_outcomes;
 pub mod threads;
 
+pub use audit::AuditRepository;
 pub use drafts::DraftRepository;
+pub use feedback::FeedbackRepository;
 pub use messages::MessageRepository;
+pub use proposals::ProposalRepository;
+pub use rules::RuleRepository;
 pub use senders::SenderRepository;
+pub use shadow_outcomes::ShadowOutcomeRepository;
 pub use threads::ThreadRepository;
 
 /// The SQL dialect a [`StorageBackend`] speaks. The per-dialect SQL fragments live in the

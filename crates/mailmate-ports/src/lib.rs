@@ -10,6 +10,7 @@ pub mod ai_provider;
 pub mod classification_engine;
 pub mod clock;
 pub mod feature_extractor;
+pub mod learning_engine;
 pub mod mail_client;
 pub mod policy_guard;
 pub mod rule_engine;

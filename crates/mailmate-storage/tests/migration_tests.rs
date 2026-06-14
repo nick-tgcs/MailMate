@@ -17,10 +17,17 @@ use mailmate_storage::{open_and_migrate, SqliteMessageRepository};
 use futures::executor::block_on;
 use std::sync::Arc;
 
+/// The full version set a fresh DB reaches today (0001 foundation, 0002 rule versions,
+/// 0003 audit + feedback).
+const CURRENT_VERSIONS: &[i64] = &[1, 2, 3];
+
 #[test]
-fn fresh_database_migrates_to_version_1() {
+fn fresh_database_migrates_to_the_current_version_set() {
     let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
-    assert_eq!(backend.applied_migration_versions().unwrap(), vec![1]);
+    assert_eq!(
+        backend.applied_migration_versions().unwrap(),
+        CURRENT_VERSIONS
+    );
 }
 
 #[test]
@@ -29,7 +36,10 @@ fn migrating_an_already_current_database_is_idempotent() {
     // Re-running over the same connection applies nothing (the upgrade-from-prior path).
     let applied = backend.migrate().unwrap();
     assert!(applied.is_empty(), "no migration should re-apply");
-    assert_eq!(backend.applied_migration_versions().unwrap(), vec![1]);
+    assert_eq!(
+        backend.applied_migration_versions().unwrap(),
+        CURRENT_VERSIONS
+    );
 }
 
 #[test]
@@ -45,8 +55,8 @@ fn engine_matrix_scaffolding_runs_each_enabled_engine() {
         .unwrap();
         assert_eq!(
             backend.applied_migration_versions().unwrap(),
-            vec![1],
-            "engine {} should reach version 1",
+            CURRENT_VERSIONS,
+            "engine {} should reach the current version set",
             engine.as_str()
         );
     }

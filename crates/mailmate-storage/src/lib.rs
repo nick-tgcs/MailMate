@@ -21,7 +21,9 @@ pub mod repositories;
 
 pub use backend::{open_and_migrate, open_backend, SqliteBackend, StorageConfig, StoragePath};
 pub use repositories::{
-    SqliteDraftRepository, SqliteMessageRepository, SqliteSenderRepository, SqliteThreadRepository,
+    SqliteAuditRepository, SqliteDraftRepository, SqliteFeedbackRepository,
+    SqliteMessageRepository, SqliteProposalRepository, SqliteRuleRepository,
+    SqliteSenderRepository, SqliteShadowOutcomeRepository, SqliteThreadRepository,
 };
 
 /// Returns this crate's package name for smoke tests.

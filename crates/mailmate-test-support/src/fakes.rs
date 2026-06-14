@@ -10,15 +10,20 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use mailmate_common::action::{ActionPlan, BlockedAction, GuardedActionPlan, ProposedAction};
+use mailmate_common::audit::AuditEntry;
 use mailmate_common::classification::{Classification, ClassificationInput};
 use mailmate_common::error::{
-    ActionPlanningError, ClassificationError, MailError, MlError, PolicyError, SecretError,
+    ActionPlanningError, ClassificationError, LearningError, MailError, MlError, PolicyError,
+    SecretError,
 };
+use mailmate_common::evidence::{EvidenceQuery, RuleEvidence};
 use mailmate_common::features::{CalibratedScores, FeatureValue, FeatureVector, LabeledExample};
-use mailmate_common::ids::{DraftId, MessageId};
+use mailmate_common::feedback::TaskFeedback;
+use mailmate_common::ids::{AuditId, DraftId, FeedbackId, MessageId};
 use mailmate_common::mail::{DraftSpec, FetchScope, MailAction, MailEvent, MessageData};
 use mailmate_common::planning::ActionPlanningInput;
 use mailmate_common::policy::{PolicyCheckResult, PolicyContext, PolicyOutcome};
+use mailmate_common::proposal::{AgentProposal, ProposalTrigger};
 use mailmate_common::protocol::Frame;
 use mailmate_common::secret::{Secret, SecretKey};
 use mailmate_common::stream::{EventStream, FrameStream};
@@ -27,6 +32,7 @@ use mailmate_ports::action_planner::ActionPlanner;
 use mailmate_ports::classification_engine::ClassificationEngine;
 use mailmate_ports::clock::Clock;
 use mailmate_ports::feature_extractor::FeatureExtractor;
+use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::policy_guard::PolicyGuard;
 use mailmate_ports::secret_store::SecretStore;
@@ -449,6 +455,84 @@ impl PolicyGuard for FakePolicyGuard {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FakeLearningEngine
+// ---------------------------------------------------------------------------
+
+/// A `LearningEngine` that records every captured correction and audit entry, and returns
+/// pre-seeded evidence/proposals — so a use-case test can prove the capture step was driven
+/// without wiring the real engine and repositories.
+#[derive(Debug, Default)]
+pub struct FakeLearningEngine {
+    feedback: Mutex<Vec<TaskFeedback>>,
+    audits: Mutex<Vec<AuditEntry>>,
+    evidence: Vec<RuleEvidence>,
+    proposals: Vec<AgentProposal>,
+}
+
+impl FakeLearningEngine {
+    /// A fresh engine that captures everything and proposes nothing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-seed the evidence `collect_evidence` returns.
+    #[must_use]
+    pub fn with_evidence(mut self, evidence: Vec<RuleEvidence>) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
+    /// Pre-seed the proposals `propose_candidates` returns.
+    #[must_use]
+    pub fn with_proposals(mut self, proposals: Vec<AgentProposal>) -> Self {
+        self.proposals = proposals;
+        self
+    }
+
+    /// The corrections it captured, in order.
+    #[must_use]
+    pub fn recorded_feedback(&self) -> Vec<TaskFeedback> {
+        self.feedback.lock().unwrap().clone()
+    }
+
+    /// The audit entries it captured, in order.
+    #[must_use]
+    pub fn recorded_audits(&self) -> Vec<AuditEntry> {
+        self.audits.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LearningEngine for FakeLearningEngine {
+    async fn record_feedback(&self, feedback: TaskFeedback) -> Result<FeedbackId, LearningError> {
+        let id = feedback.id().clone();
+        self.feedback.lock().unwrap().push(feedback);
+        Ok(id)
+    }
+
+    async fn record_audit(&self, entry: AuditEntry) -> Result<AuditId, LearningError> {
+        let id = entry.id.clone();
+        self.audits.lock().unwrap().push(entry);
+        Ok(id)
+    }
+
+    async fn collect_evidence(
+        &self,
+        _query: EvidenceQuery,
+    ) -> Result<Vec<RuleEvidence>, LearningError> {
+        Ok(self.evidence.clone())
+    }
+
+    async fn propose_candidates(
+        &self,
+        _trigger: ProposalTrigger,
+    ) -> Result<Vec<AgentProposal>, LearningError> {
+        Ok(self.proposals.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,5 +708,43 @@ mod tests {
         let guarded = block_on(guard.evaluate_action_plan(PolicyContext::default(), plan)).unwrap();
         assert_eq!(guarded.allowed_actions.len(), 1);
         assert_eq!(guarded.blocked_actions.len(), 1);
+    }
+
+    #[test]
+    fn fake_learning_engine_captures_feedback_and_audit_and_returns_seeds() {
+        use mailmate_common::actor::Actor;
+        use mailmate_common::audit::AuditEntry;
+        use mailmate_common::feedback::FeedbackPolarity;
+        use mailmate_common::feedback::{FilingFeedback, FilingFeedbackRow, PinnedVersions};
+        use mailmate_common::ids::FolderId;
+
+        let engine = FakeLearningEngine::new();
+        let row = FilingFeedbackRow {
+            id: FilingFeedback::fresh_id(),
+            message_id: MessageId::from("msg_1"),
+            pinned_versions: PinnedVersions::default(),
+            sender_domain: Some("s.com".to_owned()),
+            ai_suggested_folder: None,
+            human_chosen_folder: FolderId::from("folder_x"),
+            basis: None,
+            matched_rule_id: None,
+            polarity: FeedbackPolarity::Negative,
+            created_at: Timestamp::now(),
+        };
+        let id = block_on(engine.record_feedback(TaskFeedback::Filing(row))).unwrap();
+        assert!(id.as_str().starts_with("filfb_"));
+        assert_eq!(engine.recorded_feedback().len(), 1);
+
+        let audit_id = block_on(engine.record_audit(AuditEntry::new("x", Actor::System))).unwrap();
+        assert!(audit_id.as_str().starts_with("audit_"));
+        assert_eq!(engine.recorded_audits().len(), 1);
+
+        // collect_evidence / propose_candidates echo the seeds (empty by default).
+        assert!(block_on(engine.collect_evidence(EvidenceQuery::all()))
+            .unwrap()
+            .is_empty());
+        assert!(block_on(engine.propose_candidates(ProposalTrigger::all()))
+            .unwrap()
+            .is_empty());
     }
 }

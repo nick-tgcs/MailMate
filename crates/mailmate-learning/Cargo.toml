@@ -1,0 +1,28 @@
+[package]
+name = "mailmate-learning"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The learning-loop adapter crate: DefaultLearningEngine (the LearningEngine port) plus the
+# pure evidence-aggregation, proposal-generation, shadow-back-test (crystallization gate),
+# and outcome-aggregation logic. It composes the storage repository PORTS and reuses the
+# deterministic rule engine for the back-test; it never names a backend, and `mailmate-core`
+# never depends on it — the engine is injected at the edge behind the LearningEngine port.
+[dependencies]
+mailmate-common = { path = "../mailmate-common" }
+mailmate-ports = { path = "../mailmate-ports" }
+mailmate-rules = { path = "../mailmate-rules" }
+async-trait.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Real SQLite repositories wired into the integration tests (no GPU, no network).
+mailmate-storage = { path = "../mailmate-storage" }
+mailmate-test-support = { path = "../mailmate-test-support" }
+futures.workspace = true

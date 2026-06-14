@@ -12,6 +12,7 @@ use mailmate_ports::action_planner::ActionPlanner;
 use mailmate_ports::classification_engine::ClassificationEngine;
 use mailmate_ports::clock::Clock;
 use mailmate_ports::feature_extractor::FeatureExtractor;
+use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::policy_guard::PolicyGuard;
 use mailmate_ports::secret_store::SecretStore;
@@ -20,7 +21,7 @@ use mailmate_ports::transport::Transport;
 
 pub mod usecases;
 
-pub use usecases::{PlanningOutcome, PlanningService};
+pub use usecases::{CorrectionContext, CorrectionService, PlanningOutcome, PlanningService};
 
 /// The set of adapters the core's use-cases run against — the dependency-injection
 /// seam.
@@ -52,6 +53,8 @@ pub struct Ports {
     pub action_planner: Arc<dyn ActionPlanner>,
     /// The policy guard that gates every candidate plan.
     pub policy_guard: Arc<dyn PolicyGuard>,
+    /// The learning engine: captures corrections and proposes crystallized rules.
+    pub learning_engine: Arc<dyn LearningEngine>,
 }
 
 /// Returns this crate's package name for smoke tests.

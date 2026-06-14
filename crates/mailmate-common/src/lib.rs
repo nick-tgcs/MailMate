@@ -11,22 +11,29 @@
 //! `FeatureExtractor`, `Tier2Classifier`) reference.
 
 pub mod action;
+pub mod actor;
 pub mod ai;
+pub mod audit;
 pub mod classification;
 pub mod correction;
 pub mod draft;
 pub mod error;
+pub mod evidence;
 pub mod features;
+pub mod feedback;
 pub mod ids;
 pub mod mail;
 pub mod message;
+pub mod outcome;
 pub mod planning;
 pub mod policy;
+pub mod proposal;
 pub mod protocol;
 pub mod retention;
 pub mod rules;
 pub mod secret;
 pub mod sender;
+pub mod shadow;
 pub mod stream;
 pub mod task;
 pub mod thread;

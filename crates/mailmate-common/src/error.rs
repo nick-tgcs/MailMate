@@ -196,6 +196,33 @@ impl From<RuleEngineError> for ActionPlanningError {
     }
 }
 
+/// Failures from the `LearningEngine` port and the learning adapter above the
+/// repositories (feedback capture, evidence aggregation, proposal generation).
+#[derive(Debug, thiserror::Error)]
+pub enum LearningError {
+    /// A storage-seam failure while reading/writing feedback, evidence, or proposals.
+    #[error("learning storage error: {0}")]
+    Storage(String),
+    /// A rule-engine failure while back-testing or conflict-checking a candidate.
+    #[error("learning rule-engine error: {0}")]
+    Rules(String),
+    /// A candidate proposal was malformed (e.g. not deterministically expressible).
+    #[error("invalid proposal: {0}")]
+    InvalidProposal(String),
+}
+
+impl From<StorageError> for LearningError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(value.to_string())
+    }
+}
+
+impl From<RuleEngineError> for LearningError {
+    fn from(value: RuleEngineError) -> Self {
+        Self::Rules(value.to_string())
+    }
+}
+
 /// Aggregate error for call sites that prefer one type over per-port enums.
 #[derive(Debug, thiserror::Error)]
 pub enum MailMateError {
@@ -229,6 +256,9 @@ pub enum MailMateError {
     /// An action-planning failure.
     #[error(transparent)]
     Planning(#[from] ActionPlanningError),
+    /// A learning-engine failure.
+    #[error(transparent)]
+    Learning(#[from] LearningError),
 }
 
 #[cfg(test)]
@@ -292,6 +322,21 @@ mod tests {
         assert!(matches!(
             aggregate,
             MailMateError::Storage(StorageError::Migration(_))
+        ));
+    }
+
+    #[test]
+    fn learning_error_folds_from_leaf_errors_and_into_the_aggregate() {
+        let from_storage: LearningError = StorageError::Backend("disk".to_owned()).into();
+        assert!(matches!(from_storage, LearningError::Storage(_)));
+        let from_rules: LearningError = RuleEngineError::UnknownDecision("dec_x".to_owned()).into();
+        assert!(matches!(from_rules, LearningError::Rules(_)));
+        let invalid = LearningError::InvalidProposal("not deterministic".to_owned());
+        assert!(invalid.to_string().contains("invalid proposal"));
+        let aggregate: MailMateError = LearningError::Storage("x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Learning(LearningError::Storage(_))
         ));
     }
 }

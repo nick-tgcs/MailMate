@@ -21,15 +21,29 @@ struct Migration {
     sqlite: &'static str,
 }
 
-/// Every embedded migration, in ascending version order. Phase 2 ships only the
-/// foundational schema; later phases append `0002_…` (rule versions), `0003_…` (audit and
-/// feedback), and `0004_…` (follow-ups).
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "0001_initial",
-    common: include_str!("../../../migrations/common/0001_initial.sql"),
-    sqlite: include_str!("../../../migrations/sqlite/0001_initial.sql"),
-}];
+/// Every embedded migration, in ascending version order. Phase 2 ships the foundational
+/// schema; Phase 7 appends `0002` (rule versions) and `0003` (audit and feedback); a later
+/// phase appends `0004` (follow-ups).
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "0001_initial",
+        common: include_str!("../../../migrations/common/0001_initial.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "0002_rule_versions",
+        common: include_str!("../../../migrations/common/0002_rule_versions.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0002_rule_versions.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "0003_audit_and_feedback",
+        common: include_str!("../../../migrations/common/0003_audit_and_feedback.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0003_audit_and_feedback.sql"),
+    },
+];
 
 /// Storage engines whose migration + repository suites run in the validation matrix.
 ///
@@ -134,16 +148,39 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_applies_the_initial_migration_then_is_idempotent() {
+    fn fresh_database_applies_every_migration_then_is_idempotent() {
         let mut conn = fresh();
         let first = apply_all(&mut conn, Dialect::Sqlite).unwrap();
-        assert_eq!(first, vec![1], "fresh DB applies 0001");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1]);
+        assert_eq!(first, vec![1, 2, 3], "fresh DB applies 0001..0003 in order");
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3]);
 
         // Re-running is a no-op (covers the "migration from prior version" idempotency).
         let second = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert!(second.is_empty(), "re-run applies nothing");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn upgrade_from_prior_version_applies_only_the_new_migrations() {
+        let mut conn = fresh();
+        // Simulate a DB already at version 1 (the Phase-2 schema).
+        conn.execute_batch(TRACKING_DDL).unwrap();
+        let migration = &MIGRATIONS[0];
+        conn.execute_batch(migration.common).unwrap();
+        conn.execute_batch(migration.sqlite).unwrap();
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, '0001_initial', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let applied = apply_all(&mut conn, Dialect::Sqlite).unwrap();
+        assert_eq!(
+            applied,
+            vec![2, 3],
+            "only the not-yet-applied migrations run"
+        );
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3]);
     }
 
     #[test]
@@ -156,6 +193,16 @@ mod tests {
             "message_features",
             "sender_profiles",
             "drafts",
+            "classification_rules",
+            "action_rules",
+            "classification_rule_versions",
+            "action_rule_versions",
+            "audit_log",
+            "classification_feedback",
+            "filing_feedback",
+            "rule_evidence",
+            "shadow_outcomes",
+            "agent_proposals",
         ] {
             let count: i64 = conn
                 .query_row(

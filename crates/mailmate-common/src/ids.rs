@@ -110,6 +110,44 @@ id_newtype!(
     #[doc = "Message-feature row id (`mf_…`)."]
     MessageFeatureId
 );
+id_newtype!(
+    "fb",
+    #[doc = "Per-task feedback-row id (`fb_…` by default; the per-table prefixes \
+             `clsfb_`/`filfb_`/… are minted via [`fresh_prefixed`])."]
+    FeedbackId
+);
+id_newtype!(
+    "audit",
+    #[doc = "Append-only audit-log entry id (`audit_…`)."]
+    AuditId
+);
+id_newtype!(
+    "prop",
+    #[doc = "Agent rule-proposal id (`prop_…`)."]
+    ProposalId
+);
+id_newtype!(
+    "evid",
+    #[doc = "Rule-evidence row id (`evid_…`)."]
+    EvidenceId
+);
+id_newtype!(
+    "shad",
+    #[doc = "Shadow-outcome row id (`shad_…`)."]
+    ShadowOutcomeId
+);
+
+/// Mint a fresh `<prefix>_<uuid-simple>` string with an explicit prefix.
+///
+/// Most ids carry their prefix in the newtype (via [`fresh`](MessageId::fresh)). The
+/// per-task feedback tables are the exception: they all surface as one [`FeedbackId`]
+/// domain type, yet each table stamps a finer-grained, human-readable row prefix
+/// (`clsfb_`, `filfb_`, …) so a raw DB row announces which table it came from. Those ids
+/// are minted here from the kind's `ID_PREFIX`.
+#[must_use]
+pub fn fresh_prefixed(prefix: &str) -> String {
+    format!("{prefix}_{}", Uuid::new_v4().simple())
+}
 
 #[cfg(test)]
 mod tests {
@@ -152,5 +190,27 @@ mod tests {
         assert_eq!(RuleId::PREFIX, "rule");
         assert_eq!(RuleVersionId::PREFIX, "rv");
         assert!(RuleVersionId::fresh().as_str().starts_with("rv_"));
+    }
+
+    #[test]
+    fn phase7_id_kinds_carry_their_prefixes() {
+        assert_eq!(FeedbackId::PREFIX, "fb");
+        assert_eq!(AuditId::PREFIX, "audit");
+        assert!(AuditId::fresh().as_str().starts_with("audit_"));
+        assert_eq!(ProposalId::PREFIX, "prop");
+        assert!(ProposalId::fresh().as_str().starts_with("prop_"));
+        assert_eq!(EvidenceId::PREFIX, "evid");
+        assert!(EvidenceId::fresh().as_str().starts_with("evid_"));
+        assert_eq!(ShadowOutcomeId::PREFIX, "shad");
+        assert!(ShadowOutcomeId::fresh().as_str().starts_with("shad_"));
+    }
+
+    #[test]
+    fn fresh_prefixed_honours_the_per_table_feedback_prefix() {
+        let raw = fresh_prefixed("clsfb");
+        assert!(raw.starts_with("clsfb_"), "got {raw}");
+        let id = FeedbackId::from(raw);
+        assert!(id.as_str().starts_with("clsfb_"));
+        assert_ne!(fresh_prefixed("filfb"), fresh_prefixed("filfb"), "unique");
     }
 }
