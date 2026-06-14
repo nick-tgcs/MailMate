@@ -146,6 +146,56 @@ pub enum PolicyError {
     Backend(String),
 }
 
+/// Failures from the `ClassificationEngine` port (the cascade).
+#[derive(Debug, thiserror::Error)]
+pub enum ClassificationError {
+    /// A Tier-1 classification-rule evaluation failed.
+    #[error("classification rule evaluation failed: {0}")]
+    Rules(String),
+    /// The Tier-2 local model failed to predict.
+    #[error("tier-2 model failed: {0}")]
+    Model(String),
+    /// The Tier-3 provider escalation failed (transport, enforcement, or validation).
+    #[error("tier-3 provider escalation failed: {0}")]
+    Provider(String),
+}
+
+impl From<RuleEngineError> for ClassificationError {
+    fn from(value: RuleEngineError) -> Self {
+        Self::Rules(value.to_string())
+    }
+}
+
+impl From<MlError> for ClassificationError {
+    fn from(value: MlError) -> Self {
+        Self::Model(value.to_string())
+    }
+}
+
+impl From<AiError> for ClassificationError {
+    fn from(value: AiError) -> Self {
+        Self::Provider(value.to_string())
+    }
+}
+
+/// Failures from the `ActionPlanner` port (Pipeline 2 planning).
+#[derive(Debug, thiserror::Error)]
+pub enum ActionPlanningError {
+    /// An action-rule evaluation failed.
+    #[error("action rule evaluation failed: {0}")]
+    Rules(String),
+    /// Planning needs a stored message (an action targets a resolved message id), but the
+    /// input message has not been persisted.
+    #[error("planning requires a stored message, but the message has no resolved id")]
+    MissingMessageId,
+}
+
+impl From<RuleEngineError> for ActionPlanningError {
+    fn from(value: RuleEngineError) -> Self {
+        Self::Rules(value.to_string())
+    }
+}
+
 /// Aggregate error for call sites that prefer one type over per-port enums.
 #[derive(Debug, thiserror::Error)]
 pub enum MailMateError {
@@ -173,6 +223,12 @@ pub enum MailMateError {
     /// An AI-provider failure.
     #[error(transparent)]
     Ai(#[from] AiError),
+    /// A classification-engine (cascade) failure.
+    #[error(transparent)]
+    Classification(#[from] ClassificationError),
+    /// An action-planning failure.
+    #[error(transparent)]
+    Planning(#[from] ActionPlanningError),
 }
 
 #[cfg(test)]
@@ -199,6 +255,33 @@ mod tests {
     fn secret_error_redacts_via_key_debug_only() {
         let err = SecretError::AccessDenied(SecretKey::from("ollama_api_key"));
         assert!(err.to_string().contains("ollama_api_key"));
+    }
+
+    #[test]
+    fn classification_and_planning_errors_fold_from_leaf_errors() {
+        let from_rules: ClassificationError =
+            RuleEngineError::InvalidCondition("bad op".to_owned()).into();
+        assert!(matches!(from_rules, ClassificationError::Rules(_)));
+        let from_model: ClassificationError = MlError::NotReady.into();
+        assert!(matches!(from_model, ClassificationError::Model(_)));
+        let from_provider: ClassificationError = AiError::Unavailable("no model".to_owned()).into();
+        assert!(matches!(from_provider, ClassificationError::Provider(_)));
+
+        let planning: ActionPlanningError = RuleEngineError::Backend("boom".to_owned()).into();
+        assert!(matches!(planning, ActionPlanningError::Rules(_)));
+        let missing = ActionPlanningError::MissingMessageId;
+        assert!(missing.to_string().contains("stored message"));
+
+        let aggregate: MailMateError = ClassificationError::Model("x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Classification(ClassificationError::Model(_))
+        ));
+        let aggregate: MailMateError = ActionPlanningError::MissingMessageId.into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Planning(ActionPlanningError::MissingMessageId)
+        ));
     }
 
     #[test]

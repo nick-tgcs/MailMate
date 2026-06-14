@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use mailmate_common::classification::Priority;
+
 /// A semantic self-check run after a response deserializes — the checks beyond serde's
 /// structural ones (required fields, types, enum values, no unknown fields).
 pub trait ValidatedResponse {
@@ -24,20 +26,6 @@ fn check_unit_interval(name: &str, value: f32) -> Result<(), String> {
     } else {
         Err(format!("{name} must be in [0, 1], got {value}"))
     }
-}
-
-/// Message priority a classifier may assign.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Priority {
-    /// Low priority.
-    Low,
-    /// Normal priority.
-    Normal,
-    /// High priority.
-    High,
-    /// Urgent.
-    Urgent,
 }
 
 /// `classify_email` response.

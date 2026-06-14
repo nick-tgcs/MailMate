@@ -12,12 +12,15 @@
 
 pub mod action;
 pub mod ai;
+pub mod classification;
+pub mod correction;
 pub mod draft;
 pub mod error;
 pub mod features;
 pub mod ids;
 pub mod mail;
 pub mod message;
+pub mod planning;
 pub mod policy;
 pub mod protocol;
 pub mod retention;
@@ -25,6 +28,7 @@ pub mod rules;
 pub mod secret;
 pub mod sender;
 pub mod stream;
+pub mod task;
 pub mod thread;
 pub mod time;
 

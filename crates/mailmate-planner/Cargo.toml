@@ -1,0 +1,31 @@
+[package]
+name = "mailmate-planner"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The decision-orchestration adapter crate: Pipeline 1's three-tier classification cascade
+# (CascadeClassifier → ClassificationEngine) and Pipeline 2's action planner
+# (DefaultActionPlanner → ActionPlanner). It composes other PORTS (RuleEngine, Tier2Classifier,
+# AiProvider) plus the mailmate-ai task layer; it never names a backend, and `mailmate-core`
+# never depends on it — both engines are injected at the edge behind their ports.
+[dependencies]
+mailmate-common = { path = "../mailmate-common" }
+mailmate-ports = { path = "../mailmate-ports" }
+mailmate-ai = { path = "../mailmate-ai" }
+async-trait.workspace = true
+
+[dev-dependencies]
+# Real, pure adapters wired into the end-to-end integration tests (no backend, no GPU).
+mailmate-core = { path = "../mailmate-core" }
+mailmate-rules = { path = "../mailmate-rules" }
+mailmate-policy = { path = "../mailmate-policy" }
+mailmate-ml = { path = "../mailmate-ml" }
+mailmate-test-support = { path = "../mailmate-test-support" }
+futures.workspace = true
+serde_json.workspace = true

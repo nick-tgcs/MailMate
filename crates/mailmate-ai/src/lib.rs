@@ -12,6 +12,7 @@ pub mod http;
 pub mod providers;
 pub mod registry;
 pub mod schemas;
+pub mod tasks;
 pub mod validation;
 
 pub use registry::ProviderRegistry;

@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 mailmate-ports = { path = "../mailmate-ports" }
+mailmate-common = { path = "../mailmate-common" }

@@ -8,12 +8,19 @@
 
 use std::sync::Arc;
 
+use mailmate_ports::action_planner::ActionPlanner;
+use mailmate_ports::classification_engine::ClassificationEngine;
 use mailmate_ports::clock::Clock;
 use mailmate_ports::feature_extractor::FeatureExtractor;
 use mailmate_ports::mail_client::MailClient;
+use mailmate_ports::policy_guard::PolicyGuard;
 use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::transport::Transport;
+
+pub mod usecases;
+
+pub use usecases::{PlanningOutcome, PlanningService};
 
 /// The set of adapters the core's use-cases run against — the dependency-injection
 /// seam.
@@ -21,6 +28,10 @@ use mailmate_ports::transport::Transport;
 /// The core only ever holds *ports* here (`Arc<dyn Port>`); concrete adapters are
 /// injected at the edge in production and as fakes in tests, and the core never names
 /// either. Cloning is cheap (reference-counted) so use-cases can hold their own handle.
+///
+/// Construct it with a struct literal (every field is public) — a positional constructor
+/// over this many ports would be both error-prone and a `too_many_arguments` lint; named
+/// fields read better at the wiring edge.
 #[derive(Clone)]
 pub struct Ports {
     /// The mail client (Thunderbird in production; a fake in tests).
@@ -35,28 +46,12 @@ pub struct Ports {
     pub feature_extractor: Arc<dyn FeatureExtractor>,
     /// The Tier-2 classifier.
     pub tier2: Arc<dyn Tier2Classifier>,
-}
-
-impl Ports {
-    /// Assemble a port bundle from already-constructed adapters.
-    #[must_use]
-    pub fn new(
-        mail_client: Arc<dyn MailClient>,
-        transport: Arc<dyn Transport>,
-        clock: Arc<dyn Clock>,
-        secret_store: Arc<dyn SecretStore>,
-        feature_extractor: Arc<dyn FeatureExtractor>,
-        tier2: Arc<dyn Tier2Classifier>,
-    ) -> Self {
-        Self {
-            mail_client,
-            transport,
-            clock,
-            secret_store,
-            feature_extractor,
-            tier2,
-        }
-    }
+    /// Pipeline 1: the classification engine (the cascade in production).
+    pub classification_engine: Arc<dyn ClassificationEngine>,
+    /// Pipeline 2: the action planner.
+    pub action_planner: Arc<dyn ActionPlanner>,
+    /// The policy guard that gates every candidate plan.
+    pub policy_guard: Arc<dyn PolicyGuard>,
 }
 
 /// Returns this crate's package name for smoke tests.

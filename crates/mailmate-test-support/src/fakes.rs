@@ -9,17 +9,26 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use mailmate_common::error::{MailError, MlError, SecretError};
+use mailmate_common::action::{ActionPlan, BlockedAction, GuardedActionPlan, ProposedAction};
+use mailmate_common::classification::{Classification, ClassificationInput};
+use mailmate_common::error::{
+    ActionPlanningError, ClassificationError, MailError, MlError, PolicyError, SecretError,
+};
 use mailmate_common::features::{CalibratedScores, FeatureValue, FeatureVector, LabeledExample};
 use mailmate_common::ids::{DraftId, MessageId};
 use mailmate_common::mail::{DraftSpec, FetchScope, MailAction, MailEvent, MessageData};
+use mailmate_common::planning::ActionPlanningInput;
+use mailmate_common::policy::{PolicyCheckResult, PolicyContext, PolicyOutcome};
 use mailmate_common::protocol::Frame;
 use mailmate_common::secret::{Secret, SecretKey};
 use mailmate_common::stream::{EventStream, FrameStream};
 use mailmate_common::time::Timestamp;
+use mailmate_ports::action_planner::ActionPlanner;
+use mailmate_ports::classification_engine::ClassificationEngine;
 use mailmate_ports::clock::Clock;
 use mailmate_ports::feature_extractor::FeatureExtractor;
 use mailmate_ports::mail_client::MailClient;
+use mailmate_ports::policy_guard::PolicyGuard;
 use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::transport::Transport;
@@ -289,6 +298,157 @@ impl Tier2Classifier for FakeTier2Classifier {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FakeClassificationEngine
+// ---------------------------------------------------------------------------
+
+/// A `ClassificationEngine` that returns a fixed verdict and records what it was asked to
+/// classify — so a use-case test can prove the classify step was driven without wiring the
+/// real cascade.
+#[derive(Debug)]
+pub struct FakeClassificationEngine {
+    verdict: Classification,
+    seen: Mutex<Vec<MessageId>>,
+}
+
+impl FakeClassificationEngine {
+    /// A classifier that always returns `verdict`.
+    #[must_use]
+    pub fn returning(verdict: Classification) -> Self {
+        Self {
+            verdict,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The internal ids of the messages it was asked to classify, in order.
+    #[must_use]
+    pub fn classified(&self) -> Vec<MessageId> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ClassificationEngine for FakeClassificationEngine {
+    async fn classify(
+        &self,
+        input: ClassificationInput,
+    ) -> Result<Classification, ClassificationError> {
+        if let Some(id) = input.message.id.clone() {
+            self.seen.lock().unwrap().push(id);
+        }
+        // Keep the verdict tied to the decision the caller opened.
+        let mut verdict = self.verdict.clone();
+        verdict.decision_id = input.decision_id;
+        Ok(verdict)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeActionPlanner
+// ---------------------------------------------------------------------------
+
+/// An `ActionPlanner` that returns a fixed candidate action list and records the inputs.
+#[derive(Debug)]
+pub struct FakeActionPlanner {
+    actions: Vec<ProposedAction>,
+    seen: Mutex<Vec<ActionPlanningInput>>,
+}
+
+impl FakeActionPlanner {
+    /// A planner that always proposes `actions`.
+    #[must_use]
+    pub fn returning(actions: Vec<ProposedAction>) -> Self {
+        Self {
+            actions,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The planning inputs it was given, in order.
+    #[must_use]
+    pub fn planned(&self) -> Vec<ActionPlanningInput> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ActionPlanner for FakeActionPlanner {
+    async fn plan(&self, input: ActionPlanningInput) -> Result<ActionPlan, ActionPlanningError> {
+        let plan = ActionPlan {
+            decision_id: input.decision_id.clone(),
+            message_id: input.message.id.clone(),
+            actions: self.actions.clone(),
+        };
+        self.seen.lock().unwrap().push(input);
+        Ok(plan)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakePolicyGuard
+// ---------------------------------------------------------------------------
+
+/// A minimal `PolicyGuard`: every candidate that projects onto a safe `PlannedAction` is
+/// allowed; a prohibited candidate is blocked. It deliberately omits the sensitive-category
+/// review logic (that is the real `HardPolicyGuard`'s job) — enough to prove a use-case
+/// routes a plan through the guard.
+#[derive(Debug, Default)]
+pub struct FakePolicyGuard;
+
+impl FakePolicyGuard {
+    /// A fresh guard.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl PolicyGuard for FakePolicyGuard {
+    async fn evaluate_action_plan(
+        &self,
+        _context: PolicyContext,
+        plan: ActionPlan,
+    ) -> Result<GuardedActionPlan, PolicyError> {
+        let mut allowed_actions = Vec::new();
+        let mut blocked_actions = Vec::new();
+        let mut policy_checks = Vec::new();
+        for action in plan.actions {
+            match action.to_planned() {
+                Some(planned) => {
+                    policy_checks.push(PolicyCheckResult {
+                        policy_id: "fake_no_restriction".to_owned(),
+                        outcome: PolicyOutcome::Allowed,
+                    });
+                    allowed_actions.push(planned);
+                }
+                None => {
+                    policy_checks.push(PolicyCheckResult {
+                        policy_id: "fake_prohibited".to_owned(),
+                        outcome: PolicyOutcome::Blocked {
+                            policy_id: "fake_prohibited".to_owned(),
+                            reason: "prohibited action".to_owned(),
+                        },
+                    });
+                    blocked_actions.push(BlockedAction {
+                        action,
+                        policy_id: "fake_prohibited".to_owned(),
+                        reason: "prohibited action".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(GuardedActionPlan {
+            decision_id: plan.decision_id,
+            allowed_actions,
+            review_required_actions: Vec::new(),
+            blocked_actions,
+            policy_checks,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +554,75 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(clf.observed_updates().len(), 1);
+    }
+
+    fn a_classification() -> Classification {
+        use mailmate_common::classification::{ClassificationProvenance, Priority};
+        use mailmate_common::ids::DecisionId;
+        Classification {
+            decision_id: DecisionId::from("dec_seed"),
+            labels: vec!["general".to_owned()],
+            spam_score: 0.0,
+            phishing_score: 0.0,
+            priority: Priority::Normal,
+            needs_review: false,
+            provenance: ClassificationProvenance::tier1(vec![]),
+        }
+    }
+
+    #[test]
+    fn fake_classification_engine_returns_its_verdict_and_records_the_message() {
+        use mailmate_common::ids::DecisionId;
+        let engine = FakeClassificationEngine::returning(a_classification());
+        let msg = sample_message();
+        let input = ClassificationInput {
+            decision_id: DecisionId::from("dec_live"),
+            message: msg,
+            features: FeatureVector::new(),
+        };
+        let verdict = block_on(engine.classify(input)).unwrap();
+        assert_eq!(verdict.labels, vec!["general".to_owned()]);
+        // The verdict is retagged to the caller's decision id.
+        assert_eq!(verdict.decision_id, DecisionId::from("dec_live"));
+        assert_eq!(engine.classified(), vec![MessageId::from("msg_sample")]);
+    }
+
+    #[test]
+    fn fake_action_planner_echoes_its_actions_and_records_input() {
+        use mailmate_common::planning::ActionPlanningInput;
+        let planner = FakeActionPlanner::returning(vec![ProposedAction::Tag {
+            message_id: MessageId::from("msg_sample"),
+            tag: "x".to_owned(),
+        }]);
+        let input = ActionPlanningInput::new_mail(
+            sample_message(),
+            a_classification(),
+            FeatureVector::new(),
+        );
+        let plan = block_on(planner.plan(input)).unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(planner.planned().len(), 1);
+    }
+
+    #[test]
+    fn fake_policy_guard_allows_safe_and_blocks_prohibited() {
+        use mailmate_common::ids::DecisionId;
+        let guard = FakePolicyGuard::new();
+        let plan = ActionPlan {
+            decision_id: DecisionId::from("dec_1"),
+            message_id: Some(MessageId::from("msg_1")),
+            actions: vec![
+                ProposedAction::Tag {
+                    message_id: MessageId::from("msg_1"),
+                    tag: "ok".to_owned(),
+                },
+                ProposedAction::Delete {
+                    message_id: MessageId::from("msg_1"),
+                },
+            ],
+        };
+        let guarded = block_on(guard.evaluate_action_plan(PolicyContext::default(), plan)).unwrap();
+        assert_eq!(guarded.allowed_actions.len(), 1);
+        assert_eq!(guarded.blocked_actions.len(), 1);
     }
 }
