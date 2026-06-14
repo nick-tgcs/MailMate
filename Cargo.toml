@@ -18,6 +18,7 @@ members = [
     "crates/mailmate-common",
     "crates/mailmate-ports",
     "crates/mailmate-core",
+    "crates/mailmate-native-host",
     "crates/mailmate-test-support",
     "crates/mailmate-core-tests",
     "crates/mailmate-arch-test",

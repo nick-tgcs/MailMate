@@ -303,6 +303,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mailmate-native-host"
+version = "0.1.0"
+dependencies = [
+ "mailmate-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mailmate-ports"
 version = "0.1.0"
 dependencies = [

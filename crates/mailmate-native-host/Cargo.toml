@@ -1,0 +1,28 @@
+[package]
+name = "mailmate-native-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The native host is an EDGE adapter (outside the hexagon): it is allowed to know
+# the wire format and serde. It depends on the shared envelope types in
+# mailmate-common; it does NOT depend on a backend. The stdio framing here is the
+# production adapter behind the `Transport` port (wired to the core's app loop in a
+# later phase; the port already has its in-memory fake in mailmate-test-support).
+[dependencies]
+mailmate-common = { path = "../mailmate-common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "mailmate-native-host"
+path = "src/main.rs"
+
+[lib]
+name = "mailmate_native_host"
+path = "src/lib.rs"
