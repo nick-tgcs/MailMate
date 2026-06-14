@@ -5,6 +5,7 @@
 //! can be held as `Box<dyn Port>` in a registry. The set grows phase by phase; Phase 0
 //! adds the cross-cutting infrastructure ports.
 
+pub mod ai_provider;
 pub mod clock;
 pub mod feature_extractor;
 pub mod mail_client;

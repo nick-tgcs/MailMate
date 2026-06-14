@@ -95,6 +95,32 @@ pub enum StorageError {
     Backend(String),
 }
 
+/// Failures from the `AiProvider` port and the task/validation layer above it.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum AiError {
+    /// No provider is available (e.g. the registry is empty / not configured).
+    #[error("ai provider unavailable: {0}")]
+    Unavailable(String),
+    /// The provider's transport/request failed.
+    #[error("ai request failed ({code}): {message}")]
+    RequestFailed {
+        /// A short machine code (HTTP status, adapter code).
+        code: String,
+        /// A human-readable message.
+        message: String,
+    },
+    /// The provider could not enforce the requested structured-output schema/grammar.
+    #[error("structured-output enforcement failed: {0}")]
+    SchemaEnforcement(String),
+    /// A response failed structured validation (bad JSON, missing/extra fields, bad enum,
+    /// out-of-range confidence). Such a response is audited and never drives an action.
+    #[error("ai response failed validation: {0}")]
+    Validation(String),
+    /// A response could not be (de)serialized.
+    #[error("ai (de)serialization error: {0}")]
+    Codec(String),
+}
+
 /// Failures from the `RuleEngine` port.
 #[derive(Debug, thiserror::Error)]
 pub enum RuleEngineError {
@@ -144,6 +170,9 @@ pub enum MailMateError {
     /// A rule-engine failure.
     #[error(transparent)]
     Rule(#[from] RuleEngineError),
+    /// An AI-provider failure.
+    #[error(transparent)]
+    Ai(#[from] AiError),
 }
 
 #[cfg(test)]

@@ -1,0 +1,25 @@
+[package]
+name = "mailmate-ml"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# `burn` is RESERVED: the Burn-backed discriminative Tier-2 classifier and the in-process
+# Burn AiProvider land in Phase 9 (a trained Burn model needs the on-device trainer). The
+# logistic-regression Tier-2 classifier in this crate is the always-on lightweight
+# alternative the spec names, and needs no Burn — so the default build/gate stays light.
+[features]
+burn = []
+
+[dependencies]
+mailmate-common = { path = "../mailmate-common" }
+mailmate-ports = { path = "../mailmate-ports" }
+async-trait.workspace = true
+
+[dev-dependencies]
+futures.workspace = true

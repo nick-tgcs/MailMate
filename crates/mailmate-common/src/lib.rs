@@ -11,6 +11,7 @@
 //! `FeatureExtractor`, `Tier2Classifier`) reference.
 
 pub mod action;
+pub mod ai;
 pub mod draft;
 pub mod error;
 pub mod features;
