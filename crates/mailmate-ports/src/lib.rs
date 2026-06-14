@@ -9,6 +9,7 @@ pub mod clock;
 pub mod feature_extractor;
 pub mod mail_client;
 pub mod secret_store;
+pub mod storage;
 pub mod tier2_classifier;
 pub mod transport;
 

@@ -10,13 +10,18 @@
 //! cross-cutting ports (`MailClient`, `Transport`, `Clock`, `SecretStore`,
 //! `FeatureExtractor`, `Tier2Classifier`) reference.
 
+pub mod draft;
 pub mod error;
 pub mod features;
 pub mod ids;
 pub mod mail;
+pub mod message;
 pub mod protocol;
+pub mod retention;
 pub mod secret;
+pub mod sender;
 pub mod stream;
+pub mod thread;
 pub mod time;
 
 /// Returns this crate's package name for smoke tests.

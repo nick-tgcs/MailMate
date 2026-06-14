@@ -70,6 +70,31 @@ pub enum MlError {
     Backend(String),
 }
 
+/// Failures from the storage seam (`StorageBackend` and the repository ports).
+///
+/// The repositories return this — never a `rusqlite::Error`, a `Connection`, or any
+/// driver type — so no backend detail crosses the port boundary. A concrete backend maps
+/// its native failures onto these variants (e.g. a SQLite constraint code becomes
+/// [`StorageError::Constraint`]).
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    /// A schema migration failed to apply.
+    #[error("schema migration failed: {0}")]
+    Migration(String),
+    /// A constraint (foreign-key, uniqueness, NOT NULL) was violated.
+    #[error("storage constraint violated: {0}")]
+    Constraint(String),
+    /// A stored value could not be (de)serialized to/from its column.
+    #[error("storage (de)serialization error: {0}")]
+    Serialization(String),
+    /// The requested storage engine is not built into this binary.
+    #[error("storage engine not supported: {0}")]
+    UnsupportedEngine(String),
+    /// An adapter/driver-level failure with no more specific variant.
+    #[error("storage backend error: {0}")]
+    Backend(String),
+}
+
 /// Aggregate error for call sites that prefer one type over per-port enums.
 #[derive(Debug, thiserror::Error)]
 pub enum MailMateError {
@@ -85,6 +110,9 @@ pub enum MailMateError {
     /// A `Tier2Classifier` failure.
     #[error(transparent)]
     Ml(#[from] MlError),
+    /// A storage-seam failure.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
 }
 
 #[cfg(test)]
@@ -111,5 +139,16 @@ mod tests {
     fn secret_error_redacts_via_key_debug_only() {
         let err = SecretError::AccessDenied(SecretKey::from("ollama_api_key"));
         assert!(err.to_string().contains("ollama_api_key"));
+    }
+
+    #[test]
+    fn storage_error_displays_and_folds_into_the_aggregate() {
+        let err = StorageError::Constraint("FOREIGN KEY constraint failed".to_owned());
+        assert!(err.to_string().contains("constraint"));
+        let aggregate: MailMateError = StorageError::Migration("boom".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Storage(StorageError::Migration(_))
+        ));
     }
 }

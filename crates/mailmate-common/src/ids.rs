@@ -85,6 +85,16 @@ id_newtype!(
     #[doc = "Mail-folder identifier (`folder_…`), adapter-provided."]
     FolderId
 );
+id_newtype!(
+    "sender",
+    #[doc = "Sender-profile id (`sender_…`)."]
+    SenderId
+);
+id_newtype!(
+    "mf",
+    #[doc = "Message-feature row id (`mf_…`)."]
+    MessageFeatureId
+);
 
 #[cfg(test)]
 mod tests {
@@ -114,5 +124,13 @@ mod tests {
         // that conversions are explicit and the inner string is preserved.
         let m = MessageId::from("msg_1");
         assert_eq!(m.into_string(), "msg_1");
+    }
+
+    #[test]
+    fn phase2_id_kinds_carry_their_prefixes() {
+        assert_eq!(SenderId::PREFIX, "sender");
+        assert!(SenderId::fresh().as_str().starts_with("sender_"));
+        assert_eq!(MessageFeatureId::PREFIX, "mf");
+        assert!(MessageFeatureId::fresh().as_str().starts_with("mf_"));
     }
 }

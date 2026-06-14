@@ -19,6 +19,7 @@ members = [
     "crates/mailmate-ports",
     "crates/mailmate-core",
     "crates/mailmate-native-host",
+    "crates/mailmate-storage",
     "crates/mailmate-test-support",
     "crates/mailmate-core-tests",
     "crates/mailmate-arch-test",
@@ -63,3 +64,7 @@ time = { version = "=0.3.49", features = ["serde", "macros", "formatting", "pars
 uuid = { version = "=1.23.3", features = ["v4", "serde"] }
 tokio = { version = "=1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync"] }
 cargo_metadata = "=0.23.1"
+# Embedded SQLite driver for the default storage backend. `bundled` statically compiles
+# SQLite (no system library, single binary). Lives ONLY in the mailmate-storage adapter;
+# the no-backend-leakage guard keeps it out of core/ports/common.
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
