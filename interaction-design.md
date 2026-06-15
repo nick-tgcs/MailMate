@@ -354,6 +354,8 @@ Every timeline row carries the same `›` deep-link to its source message, and a
 
 > **Surface:** `messageDisplayAction` + its popup, anchored in the open-message header toolbar.
 > **Role in the model:** the *reading + correcting* surface. Because Thunderbird 140 exposes **no inbox banner/sidebar injection API**, every per-message affordance MailMate offers — the verdict, the suggested actions, and the one-click corrections — must live in this popup. It is the single place a user sees "what MailMate thinks about *this* message" and the single place they teach it.
+>
+> **Implementation status (Milestone 1 — shipped).** Built as `panel.html` / `panel.css` / `panel.js` behind the `message_display_action` key, driven entirely through the background's `mm:*` router (the popup owns no native port). It renders the verdict (category + a *banded* confidence + `why`), the `apply_state`-partitioned action blocks (auto-applied · suggested · blocked), and the three one-click corrections (wrong-category → `classification_corrected`, not-junk → `junk_changed`, move → the existing `onMoved` filing-correction path). Two honest M1 deferrals: the confidence is a client-side *band* (a calibrated numeric band is a host addition), and the `auto_applied` block is render-complete but unseen until a crystallized rule exists (Milestone 2) — a manual classify applies nothing.
 
 ### Design principles for this surface
 

@@ -18,6 +18,12 @@ the extension only relays events and applies host-returned safe actions.
   mini-hub / **recovery card**. Reads `HostStatus` from the background, renders
   connected / connecting / offline / version-mismatch, and offers a one-click Retry when the
   host is down. (The popup owns no port — it drives the host through the background.)
+- `panel.html` / `panel.css` / `panel.js` — the **per-message header panel**
+  (`messageDisplayAction` popup): the reading + correcting surface. Resolves the displayed
+  message, asks the background to `classify_message` it, and renders the verdict (category +
+  a *banded* confidence + `why`), the `apply_state`-partitioned action blocks
+  (auto-applied · suggested · blocked), and the three one-click corrections. Owns no port —
+  it drives the host through the background's `mm:*` router.
 - `message_reader.js` — read a Thunderbird message into the host's `classify_message` /
   `new_mail` wire shape (headers always; body only when retention allows; remote content
   never loaded for classification).
@@ -29,7 +35,9 @@ the extension only relays events and applies host-returned safe actions.
 - `background.js` — the event page and **single native-port owner**:
   `messages.onNewMailReceived` intake (registered synchronously), notification routing,
   context menus, `messages.onMoved` filing capture, the `HostStatus` → toolbar-badge wiring,
-  and the popup ↔ host message router (`mm:getStatus` / `mm:reconnect`).
+  and the popup ↔ host message router (`mm:getStatus` / `mm:reconnect` for the recovery card;
+  `mm:classify` / `mm:apply` / `mm:dismiss` / `mm:undo` / `mm:correctLabel` / `mm:notJunk` /
+  `mm:move` / `mm:folders` for the per-message panel).
 
 ## The Phase-10 capabilities
 
@@ -51,7 +59,12 @@ protocol it needs (`hello`, the per-action `apply_state` field, the `classificat
 | Surface | Wire | Status |
 |---|---|---|
 | Connection health (`HostStatus`, toolbar badge, recovery card) | `hello` handshake + `ping` heartbeat; popup ↔ background `mm:getStatus` / `mm:reconnect` | **shipped** (`native.js`, `background.js`, `action.*`) |
-| Per-message panel (`messageDisplayAction`) | cached `classify_message` + `apply_state`; corrections via the new discriminants | next |
+| Per-message panel (`messageDisplayAction`) | `classify_message` + `apply_state` partition; corrections via `classification_corrected` / `junk_changed` / `onMoved` | **shipped** (`panel.*`, `background.js` `mm:*` router) |
+
+Two honest M1 boundaries on the panel: the confidence is a client-side *band* (a calibrated
+numeric band is a host addition), and the `auto_applied` block is render-complete but unseen
+until a crystallized rule exists (Milestone 2) — a manual classify applies nothing, so M1's
+live loop is verdict → suggestion → one-click correction.
 
 ## Wire contract & testing
 

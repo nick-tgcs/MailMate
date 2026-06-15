@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'" />
+    <title>MailMate</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="mm-header">
+      <span class="mm-title">MailMate</span>
+      <span id="mm-dot" class="mm-dot mm-dot--connecting" aria-hidden="true"></span>
+      <span id="mm-phase" class="mm-phase">…</span>
+    </header>
+
+    <!-- The whole body is rendered by panel.js from the classify_message response (or, when
+         the host is down, from the HostStatus). No inline script — MV3 CSP forbids it. -->
+    <main id="mm-body" class="mm-body">
+      <p class="mm-muted">Reading this message…</p>
+    </main>
+
+    <div id="mm-toast" class="mm-toast" hidden></div>
+
+    <script src="panel.js"></script>
+  </body>
+</html>

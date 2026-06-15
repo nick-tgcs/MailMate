@@ -13,6 +13,10 @@
     "default_title": "MailMate",
     "default_popup": "action.html"
   },
+  "message_display_action": {
+    "default_title": "MailMate",
+    "default_popup": "panel.html"
+  },
   "permissions": [
     "nativeMessaging",
     "menus",

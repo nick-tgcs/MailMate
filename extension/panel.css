@@ -1,0 +1,315 @@
+/* panel.css — the per-message header panel (messageDisplayAction popup).
+ *
+ * System-themed and compact. The visual spine is the locked "crystallized-auto, rest suggest"
+ * line: an auto-applied action reads as a past-tense fact with Undo; a suggestion reads as a
+ * future offer with Apply / Dismiss. The two never share a treatment. */
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  width: 320px;
+  font: menu;
+  font-size: 13px;
+  line-height: 1.45;
+  color: FieldText;
+  background: Field;
+}
+
+.mm-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+}
+
+.mm-title {
+  font-weight: 600;
+}
+
+.mm-phase {
+  margin-left: auto;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.mm-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #9e9e9e;
+}
+.mm-dot--ready {
+  background: #2e7d32;
+}
+.mm-dot--connecting {
+  background: #9e9e9e;
+}
+.mm-dot--disconnected {
+  background: #c0392b;
+}
+.mm-dot--version_mismatch {
+  background: #e67e22;
+}
+
+.mm-body {
+  padding: 12px;
+}
+
+.mm-body p {
+  margin: 0 0 8px;
+}
+
+.mm-muted {
+  opacity: 0.75;
+}
+
+.mm-meta {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.mm-reason {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  opacity: 0.7;
+  word-break: break-word;
+}
+
+/* --- Verdict ------------------------------------------------------------------------- */
+
+.mm-verdict {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.mm-verdict--risk {
+  color: #c0392b;
+}
+
+.mm-glyph {
+  font-size: 15px;
+}
+
+/* The confidence bar is a 10-cell *banded* view (not a raw score readout) — see panel.js
+   confidenceBand(). The textual band beside it is the honest label. */
+.mm-bar {
+  display: flex;
+  gap: 2px;
+  margin: 6px 0 2px;
+}
+
+.mm-cell {
+  width: 16px;
+  height: 6px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.25);
+}
+
+.mm-cell--on {
+  background: #2563eb;
+}
+
+.mm-verdict--risk ~ .mm-bar .mm-cell--on {
+  background: #c0392b;
+}
+
+.mm-band {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.mm-summary {
+  margin-top: 6px;
+}
+
+.mm-why-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline dotted;
+}
+
+.mm-why {
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.1);
+  font-size: 12px;
+}
+
+.mm-why ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.mm-rule {
+  border: 0;
+  border-top: 1px solid rgba(128, 128, 128, 0.25);
+  margin: 12px 0;
+}
+
+/* --- Action rows -------------------------------------------------------------------- */
+
+.mm-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.mm-action__mark {
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.mm-action__text {
+  flex: 1;
+}
+
+.mm-action__sub {
+  display: block;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* Auto-applied: a calm, settled, past-tense fact. */
+.mm-action--auto .mm-action__mark {
+  color: #2e7d32;
+}
+
+/* Suggested: a live, blue, future offer. */
+.mm-action--suggest .mm-action__mark {
+  color: #2563eb;
+}
+
+/* Review marker (require_review / create_draft): informational, no Apply button. */
+.mm-action--review .mm-action__mark {
+  color: #b8860b;
+}
+
+/* Blocked: greyed and inert — the policy guard made visible, never an Apply button. */
+.mm-action--blocked {
+  opacity: 0.6;
+}
+.mm-action--blocked .mm-action__mark {
+  color: #c0392b;
+}
+
+.mm-action__buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* --- Corrections -------------------------------------------------------------------- */
+
+.mm-correct-label {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+
+.mm-correct {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mm-menu {
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.mm-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.mm-row {
+  display: flex;
+  gap: 6px;
+}
+
+.mm-row input,
+.mm-row select {
+  flex: 1;
+  font: inherit;
+  padding: 5px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: Field;
+  color: FieldText;
+}
+
+/* --- Buttons ------------------------------------------------------------------------ */
+
+button {
+  font: inherit;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: ButtonFace;
+  color: ButtonText;
+  cursor: pointer;
+}
+
+button.mm-primary {
+  border-color: transparent;
+  background: #2563eb;
+  color: #fff;
+}
+
+button.mm-chip {
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button:not(:disabled):hover {
+  filter: brightness(1.05);
+}
+
+.mm-footer {
+  margin-top: 12px;
+}
+
+.mm-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* --- Toast -------------------------------------------------------------------------- */
+
+.mm-toast {
+  padding: 8px 12px;
+  margin: 0 12px 12px;
+  border-radius: 6px;
+  background: rgba(46, 125, 50, 0.15);
+  color: #2e7d32;
+  font-size: 12px;
+}

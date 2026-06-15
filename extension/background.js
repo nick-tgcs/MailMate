@@ -8,15 +8,17 @@
 //   5. apply safe actions          -> classification_ready / mail_command -> drafts.js
 //   6. record user actions/results -> record_user_action
 //   7. connection health           -> hello handshake -> HostStatus -> toolbar badge
+//   8. per-message panel            -> mm:classify / mm:apply / mm:dismiss / mm:undo /
+//                                      mm:correctLabel / mm:notJunk / mm:move / mm:folders
 //
-// It is also the single owner of the native port: the popups (the toolbar recovery card and,
-// from Milestone 1's next slice, the per-message panel) never open their own port — they ask
-// the background over `browser.runtime` messaging, keeping one single-writer channel.
+// It is also the single owner of the native port: the popups (the toolbar recovery card and the
+// per-message panel) never open their own port — they ask the background over `browser.runtime`
+// messaging, keeping one single-writer channel.
 //
 // onNewMailReceived is registered synchronously at the top of the event page so a wake-up
 // from a new message is not missed.
 
-/* global NativeHost, HOST_PHASE, registerContextMenus, readMessageForHost,
+/* global NativeHost, HOST_PHASE, registerContextMenus, readMessageForHost, applyPlannedAction,
    openDraftFromResponse, executeMailCommand, consumeHostMove, openFollowupDraft,
    surfaceNeedsAttention */
 
@@ -56,19 +58,249 @@ function updateToolbarBadge(status) {
 }
 
 // --- Popup <-> background request router -----------------------------------------------
-// The popups (toolbar recovery card; later the per-message panel) are separate documents
-// with no native port. They drive the host through these messages, so the background stays
-// the single port owner.
+// The popups (toolbar recovery card, per-message panel) are separate documents with no native
+// port. They drive the host through these messages, so the background stays the single port
+// owner. Each handler returns a plain object (or a promise of one); unknown types return false
+// so other listeners can claim them.
+const POPUP_HANDLERS = {
+  "mm:getStatus": () => ({ status: host.status }),
+  "mm:reconnect": () => ({ status: host.reconnect() }),
+  "mm:classify": (m) => classifyForPanel(m.messageId),
+  "mm:apply": (m) => applySuggestion(m),
+  "mm:dismiss": (m) => dismissSuggestion(m),
+  "mm:undo": (m) => undoAuto(m),
+  "mm:correctLabel": (m) => correctLabel(m),
+  "mm:notJunk": (m) => markNotJunk(m),
+  "mm:move": (m) => moveMessage(m),
+  "mm:folders": () => listFolders(),
+};
+
 browser.runtime.onMessage.addListener((message) => {
-  switch (message && message.type) {
-    case "mm:getStatus":
-      return Promise.resolve({ status: host.status });
-    case "mm:reconnect":
-      return Promise.resolve({ status: host.reconnect() });
-    default:
-      return false; // not ours — let other listeners (if any) handle it
+  const handler = message && POPUP_HANDLERS[message.type];
+  if (!handler) {
+    return false; // not ours — let other listeners (if any) handle it
   }
+  // Normalize ANY handler rejection into a uniform { ok:false, error } so the popup's awaited
+  // send() never throws and a button is never left stuck-disabled with no feedback. The panel
+  // adds the same guard for the case the event page is asleep and this listener isn't reached.
+  // "Degrade, never lie" — the user always learns the outcome.
+  return Promise.resolve()
+    .then(() => handler(message))
+    .catch((e) => ({ ok: false, error: errMessage(e) }));
 });
+
+function errMessage(e) {
+  return String(e && e.message ? e.message : e);
+}
+
+// Run a best-effort learning record after a VISIBLE action already succeeded. A failed record
+// (host error / dropped port) must not report the action as failed — the mutation happened — so
+// we log the lost signal rather than lying that nothing occurred.
+async function recordBestEffort(fn, what) {
+  try {
+    await fn();
+  } catch (e) {
+    console.warn(`[MailMate] action done but failed to record ${what}:`, e);
+  }
+}
+
+// Read + classify the panel's displayed message. Returns the raw classify_message payload plus
+// the retention posture the panel renders its "headers only" notice from. Guards on the host
+// being ready so the panel can show the recovery card instead of a misleading failure.
+async function classifyForPanel(messageId) {
+  if (host.status.phase !== HOST_PHASE.ready) {
+    return { ok: false, reason: "host_not_ready", status: host.status };
+  }
+  try {
+    const header = await browser.messages.get(Number(messageId));
+    const payload = await readMessageForHost(header);
+    const result = await host.request("classify_message", payload);
+    return { ok: true, result, bodyRetentionAllowed: payload.body_retention_allowed };
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+}
+
+// Apply a suggested SAFE action locally, then record the acceptance. Accepting a suggestion is
+// exactly the positive signal the learning loop needs to one day crystallize it into an auto
+// rule (interaction-design.md §Apply). applyPlannedAction catches its own mail-op errors and
+// returns a result object, so the only thing that can fail loudly is the best-effort record.
+async function applySuggestion({ action, decisionId, messageId }) {
+  const result = await applyPlannedAction(action);
+  if (result.event_type !== "action_applied") {
+    return { ok: false, error: result.result || "couldn't apply that action" };
+  }
+  await recordBestEffort(
+    () =>
+      host.request("record_user_action", {
+        event_type: "action_applied",
+        source: "suggestion_accepted",
+        decision_id: decisionId,
+        action_kind: action.kind,
+        thunderbird_message_id: String(messageId),
+        user_initiated: true,
+      }),
+    "suggestion acceptance",
+  );
+  return { ok: true };
+}
+
+// Dismiss a suggestion: record the negative signal (ignore/reject). No mail mutation — there is
+// no chosen label or folder, so the host routes this to audit, never a fabricated feedback row.
+// Nothing visible happened, so a failed record IS the failure and is reported as such.
+async function dismissSuggestion({ decisionId, actionKind, messageId }) {
+  try {
+    await host.request("record_user_action", {
+      event_type: "suggestion_dismissed",
+      decision_id: decisionId,
+      action_kind: actionKind,
+      thunderbird_message_id: String(messageId),
+      user_initiated: true,
+    });
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  return { ok: true };
+}
+
+// Reverse an auto-applied crystallized action locally, then record the undo (the strongest
+// rule-demotion signal). A move needs its prior folder, which rides the host's apply_state
+// enrichment as `reverses_to`; absent that we cannot safely reverse a move, so we say so.
+async function undoAuto({ action, decisionId, messageId }) {
+  let reverse;
+  switch (action.kind) {
+    case "tag":
+      reverse = { kind: "untag", message_id: action.message_id, tag: action.tag };
+      break;
+    case "mark_junk":
+      reverse = { kind: "mark_junk", message_id: action.message_id, junk: !action.junk };
+      break;
+    case "move":
+      if (!action.reverses_to) {
+        return { ok: false, error: "no prior folder to undo the move" };
+      }
+      reverse = { kind: "move", message_id: action.message_id, to_folder: action.reverses_to };
+      break;
+    default:
+      // require_review / create_draft (and anything else) are not reversible mail mutations.
+      return { ok: false, error: `cannot undo ${action.kind}` };
+  }
+  const result = await applyReverse(reverse);
+  if (result.event_type !== "action_applied") {
+    return { ok: false, error: result.result };
+  }
+  await recordBestEffort(
+    () =>
+      host.request("record_user_action", {
+        event_type: "action_undone",
+        decision_id: decisionId,
+        rule_id: action.rule_id || null,
+        action_kind: action.kind,
+        thunderbird_message_id: String(messageId),
+        user_initiated: true,
+      }),
+    "undo",
+  );
+  return { ok: true };
+}
+
+// Reverse helper: "untag" removes a tag (the inverse of applyPlannedAction's tag); everything
+// else is a normal safe action applyPlannedAction already performs.
+async function applyReverse(reverse) {
+  if (reverse.kind === "untag") {
+    try {
+      const raw = String(reverse.message_id).replace(/^msg_tb_/, "");
+      const numeric = Number(raw);
+      const id = Number.isNaN(numeric) ? raw : numeric;
+      const header = await browser.messages.get(id);
+      const tags = (header.tags || []).filter((t) => t !== reverse.tag);
+      await browser.messages.update(id, { tags });
+      return { event_type: "action_applied", result: "ok" };
+    } catch (e) {
+      return { event_type: "action_failed", result: errMessage(e) };
+    }
+  }
+  return applyPlannedAction(reverse);
+}
+
+// Wrong-category correction: routes to classification_feedback via the host's CorrectLabel
+// vocabulary entry (corrected_label is the chosen label; prior_label is the AI's override).
+async function correctLabel({ decisionId, messageId, label, priorLabel }) {
+  try {
+    await host.request("record_user_action", {
+      event_type: "classification_corrected",
+      decision_id: decisionId,
+      thunderbird_message_id: String(messageId),
+      corrected_label: label,
+      prior_label: priorLabel || null,
+      user_initiated: true,
+    });
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  return { ok: true };
+}
+
+// "Not junk" / "This is legitimate": flip the junk flag (the visible effect), then record the
+// correction best-effort — a lost record must not be reported as a failed correction.
+async function markNotJunk({ messageId }) {
+  const id = Number(messageId);
+  try {
+    await browser.messages.update(id, { junk: false });
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  await recordBestEffort(() => recordJunkChanged(id, false), "junk correction");
+  return { ok: true };
+}
+
+// Trigger a real move; the onMoved listener below records the message_moved filing correction
+// (this is NOT a host-commanded move, so it is not suppressed). One genuine interaction.
+async function moveMessage({ messageId, folder }) {
+  try {
+    await browser.messages.move([Number(messageId)], folder);
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  return { ok: true };
+}
+
+// Flat, file-able folder list for the panel's Move picker. Degrades to an empty list (the
+// picker shows "No folders available") rather than throwing.
+async function listFolders() {
+  try {
+    const folders = await browser.folders.query({ canFileMessages: true });
+    const accounts = await browser.accounts.list(false);
+    const nameById = new Map(accounts.map((a) => [a.id, a.name]));
+    return {
+      folders: folders.map((f) => ({
+        accountId: f.accountId,
+        path: f.path,
+        name: f.name,
+        accountName: nameById.get(f.accountId) || "",
+      })),
+    };
+  } catch (e) {
+    return { folders: [], error: String(e) };
+  }
+}
+
+// Record a junk/not-junk correction (the host.request leg, shared by the context menu and the
+// panel's markNotJunk).
+async function recordJunkChanged(messageId, isSpam) {
+  await host.request("record_user_action", {
+    event_type: "junk_changed",
+    thunderbird_message_id: String(messageId),
+    junk: isSpam,
+    user_initiated: true,
+  });
+}
+
+// Flip the junk flag and record it — the context-menu correction path.
+async function applyJunkCorrection(messageId, isSpam) {
+  await browser.messages.update(messageId, { junk: isSpam });
+  await recordJunkChanged(messageId, isSpam);
+}
 
 // --- Host -> extension notifications ---------------------------------------------------
 host.onNotification(async (type, payload) => {
@@ -116,13 +348,7 @@ registerContextMenus({
     await openDraftFromResponse(draft, messageHeader.id);
   },
   recordCorrection: async (messageHeader, isSpam) => {
-    await browser.messages.update(messageHeader.id, { junk: isSpam });
-    await host.request("record_user_action", {
-      event_type: "junk_changed",
-      thunderbird_message_id: String(messageHeader.id),
-      junk: isSpam,
-      user_initiated: true,
-    });
+    await applyJunkCorrection(messageHeader.id, isSpam);
   },
 });
 
