@@ -25,37 +25,52 @@ pub fn classification_json(classification: &Classification) -> Value {
     })
 }
 
-/// A safe action plus the policy outcome that admitted it (`allowed` / `requires_review`).
+/// A safe action plus the policy outcome that admitted it (`allowed` / `requires_review`) and
+/// its `apply_state` — the per-action lifecycle bucket the per-message panel renders from:
+/// `suggest` (the user clicks Apply), `auto_applied` (a crystallized rule already ran it), or
+/// `blocked`. `policy_outcome` answers "did a hard policy admit it?"; `apply_state` answers
+/// "has it happened, or is it still an offer?" — the two are distinct (an `allowed` action is
+/// only `auto_applied` once a crystallized rule drove it; on a manual classify nothing has run
+/// yet, so every safe action is a `suggest`).
 #[must_use]
-pub fn suggested_action_json(action: &PlannedAction, policy_outcome: &str) -> Value {
+pub fn suggested_action_json(
+    action: &PlannedAction,
+    policy_outcome: &str,
+    apply_state: &str,
+) -> Value {
     let mut value = serde_json::to_value(action).unwrap_or_else(|_| json!({}));
     if let Value::Object(map) = &mut value {
         map.insert("policy_outcome".to_owned(), json!(policy_outcome));
+        map.insert("apply_state".to_owned(), json!(apply_state));
     }
     value
 }
 
-/// A blocked candidate plus the hard policy that refused it.
+/// A blocked candidate plus the hard policy that refused it. Its `apply_state` is `blocked` —
+/// the panel greys it out and shows the policy, never an Apply button.
 #[must_use]
 pub fn blocked_action_json(blocked: &BlockedAction) -> Value {
     json!({
         "action": blocked.action,
         "policy_id": blocked.policy_id,
         "reason": blocked.reason,
+        "apply_state": "blocked",
     })
 }
 
-/// The `allowed` ∪ `review_required` actions as `suggested_actions`, each tagged with its
-/// policy outcome — the extension applies `allowed` ones and confirms `requires_review` ones.
+/// The `allowed` ∪ `review_required` actions as `suggested_actions` — the synchronous
+/// classify view, where nothing has been applied yet, so every safe action is `apply_state:
+/// "suggest"` (the user is in the loop). The `auto_applied` bucket appears only on the
+/// background `classification_ready` path, never here.
 #[must_use]
 pub fn suggested_actions_json(plan: &GuardedActionPlan) -> Vec<Value> {
     plan.allowed_actions
         .iter()
-        .map(|a| suggested_action_json(a, "allowed"))
+        .map(|a| suggested_action_json(a, "allowed", "suggest"))
         .chain(
             plan.review_required_actions
                 .iter()
-                .map(|a| suggested_action_json(a, "requires_review")),
+                .map(|a| suggested_action_json(a, "requires_review", "suggest")),
         )
         .collect()
 }
@@ -110,11 +125,11 @@ pub fn classification_ready_payload(
         "thunderbird_message_id": thunderbird_message_id,
         "decision_id": plan.decision_id,
         "classification": classification_json(&outcome.classification),
-        "applied_actions": applied.iter().map(|a| serde_json::to_value(a).unwrap_or(Value::Null)).collect::<Vec<_>>(),
+        "applied_actions": applied.iter().map(|a| suggested_action_json(a, "allowed", "auto_applied")).collect::<Vec<_>>(),
         "review_required_actions": plan
             .review_required_actions
             .iter()
-            .map(|a| suggested_action_json(a, "requires_review"))
+            .map(|a| suggested_action_json(a, "requires_review", "suggest"))
             .collect::<Vec<_>>(),
         "blocked_actions": plan.blocked_actions.iter().map(blocked_action_json).collect::<Vec<_>>(),
         "explanation": explanation_json(outcome),
@@ -212,6 +227,9 @@ mod tests {
             payload["suggested_actions"][1]["policy_outcome"],
             "requires_review"
         );
+        // A manual classify has applied nothing: every safe action is a pending suggestion.
+        assert_eq!(payload["suggested_actions"][0]["apply_state"], "suggest");
+        assert_eq!(payload["suggested_actions"][1]["apply_state"], "suggest");
         assert_eq!(
             payload["explanation"]["policy_checks"][0],
             "never_auto_delete_mail"
@@ -227,9 +245,15 @@ mod tests {
         let payload = classification_ready_payload(&outcome(), "tb_9", &applied);
         assert_eq!(payload["applied_actions"].as_array().unwrap().len(), 1);
         assert_eq!(payload["applied_actions"][0]["kind"], "tag");
+        // An applied action is past-tense: auto_applied (Undo), never a pending suggestion.
+        assert_eq!(payload["applied_actions"][0]["apply_state"], "auto_applied");
         assert_eq!(
             payload["review_required_actions"].as_array().unwrap().len(),
             1
+        );
+        assert_eq!(
+            payload["review_required_actions"][0]["apply_state"],
+            "suggest"
         );
     }
 
@@ -245,6 +269,7 @@ mod tests {
         let value = blocked_action_json(&blocked);
         assert_eq!(value["policy_id"], "never_auto_delete_mail");
         assert_eq!(value["action"]["kind"], "delete");
+        assert_eq!(value["apply_state"], "blocked");
     }
 
     #[test]

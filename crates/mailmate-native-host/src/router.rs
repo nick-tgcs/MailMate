@@ -13,14 +13,25 @@
 //!
 //! ## What each request does
 //! - `ping` — liveness echo (the Phase-1 contract, now served here too).
+//! - `hello` — richer handshake: host/protocol version, wired capabilities, and the
+//!   secret-free drafting/retention posture, so the extension can render Connected /
+//!   version-mismatch before sending any real request.
 //! - `classify_message` / `read_message` — classify a *selected* message and return the
-//!   guarded plan as suggestions; nothing is applied (the user is in the loop).
+//!   guarded plan as suggestions, each tagged with its `apply_state` (`suggest` here — a manual
+//!   classify applies nothing; the user is in the loop).
 //! - `new_mail` — classify a *background* arrival, **apply** the policy-allowed low-risk
 //!   actions through the [`MailClient`], and push a `classification_ready` notification that
 //!   surfaces the review-required ones. This is "apply safe actions returned by the host".
 //! - `draft_reply` — generate an advisory, review-required draft.
 //! - `record_user_action` — route a correction to its per-task feedback table, or a pure
-//!   provenance/execution-result fact to the audit log — never to both.
+//!   provenance/execution-result fact to the audit log — never to both. Beyond the original
+//!   `junk_changed` / `message_moved` corrections, three learning discriminants:
+//!   `classification_corrected` (a wrong-category fix → classification feedback),
+//!   `action_undone` (an Undo of an auto-applied action → negative evidence against the rule
+//!   that fired — a reverted move/junk reuses the filing/not-spam corrections; a reverted
+//!   tag/draft has no feedback table and is audited), and `suggestion_dismissed` (the
+//!   ignore-rate signal — audited, never fabricated into a feedback row it has no chosen
+//!   label/folder for).
 
 use std::io::Read;
 use std::sync::Arc;
@@ -223,6 +234,7 @@ impl HostRouter {
                 request_id,
                 json!({ "pong": true, "echo": payload.get("nonce").cloned().unwrap_or(Value::Null) }),
             )),
+            "hello" => self.handle_hello(request_id),
             "classify_message" | "read_message" => self.handle_classify(request_id, payload).await,
             "new_mail" => self.handle_new_mail(payload).await,
             "draft_reply" => self.handle_draft(request_id, payload).await,
@@ -711,6 +723,49 @@ impl HostRouter {
         self.send(ok_response(request_id, payload))
     }
 
+    /// Answer the `hello` handshake: a richer-than-`ping` round-trip carrying the host/protocol
+    /// version, the capabilities this build has wired, and the secret-free drafting/retention
+    /// posture. The extension uses it to render Connected / version-mismatch and to gate
+    /// feature UI *before* sending any real request (and to guard the single-writer channel
+    /// against a protocol it cannot speak). It exposes no secret — drafting availability is a
+    /// bool, not a key.
+    fn handle_hello(&self, request_id: String) -> Result<(), TransportError> {
+        let mut capabilities = vec![
+            "classify_message",
+            "draft_reply",
+            "record_user_action",
+            "explain_decision",
+        ];
+        if self.followups.is_some() {
+            capabilities.push("followups");
+        }
+        if self.admin.is_some() {
+            capabilities.push("list_pending_reviews");
+            capabilities.push("get_settings");
+        }
+        // Drafting/retention come from the wired settings snapshot; an unwired admin surface
+        // reports the host's safe local-first defaults (no provider, metadata retention).
+        let (drafting_available, retention_level) = self.admin.as_ref().map_or_else(
+            || (false, "metadata".to_owned()),
+            |admin| {
+                (
+                    admin.settings.default_provider.is_some(),
+                    admin.settings.retention_level.clone(),
+                )
+            },
+        );
+        self.send(ok_response(
+            request_id,
+            json!({
+                "host_version": env!("CARGO_PKG_VERSION"),
+                "protocol_version": SUPPORTED_PROTOCOL_VERSION,
+                "capabilities": capabilities,
+                "drafting_available": drafting_available,
+                "retention_level": retention_level,
+            }),
+        ))
+    }
+
     /// Run the catch-up-on-launch drain: surface a `followup_draft_ready` for each fired step
     /// (a review-required draft, never sent on arrival) and a `followup_needs_attention` for
     /// each stale instance. Host-initiated (not a request); `app.rs` calls it at startup and
@@ -831,27 +886,125 @@ impl HostRouter {
                     .map_err(|e| e.to_string())?;
                 Ok(("filing_feedback", id.into_string()))
             }
+            // A one-click wrong-category correction → classification feedback.
+            "classification_corrected" => self.route_label_correction(payload).await,
+            // An undo of an auto-applied action → strong negative learning signal.
+            "action_undone" => self.route_undo(payload).await,
+            // A dismissed suggestion is the ignore-rate signal. The feedback tables key on a
+            // *chosen* label/folder, which a dismiss does not supply; fabricating one would be
+            // a false signal (cf. the junk-without-junk guard), so it is captured as audit
+            // provenance — queryable for ignore/dismiss-rate — carrying action_kind + authored_by.
+            "suggestion_dismissed" => self.audit_recorded(payload).await,
             // A reply on a tracked thread exits the follow-up sequence (when follow-ups are
             // wired); otherwise it falls through to the audit arm as plain provenance.
             "reply_received" if self.followups.is_some() => self.route_reply(payload).await,
             // Everything else is pure provenance / an execution result: audit only.
-            other => {
-                // Attribute by origin: an execution result is the extension's; a move that
-                // reaches this arm is host-initiated (a user move took the correction arm above),
-                // so it is the system's; the rest are user-observed behavior.
-                let actor = match other {
-                    "action_applied" | "action_failed" => Actor::Extension,
-                    "message_moved" => Actor::System,
-                    _ => Actor::User,
-                };
-                let mut entry =
-                    AuditEntry::new(other, actor).with_payload(provenance_payload(payload));
-                if let Some(message_id) = payload.message_id() {
-                    entry = entry.with_message(message_id);
-                }
-                let id = self.audit.append(entry).await.map_err(|e| e.to_string())?;
-                Ok(("audit", id.into_string()))
+            _ => self.audit_recorded(payload).await,
+        }
+    }
+
+    /// Record an event as plain audit provenance (the non-correction arm): an execution
+    /// result, a pure observation, or a signal with no learned-task feedback table. Returns
+    /// `("audit", id)`.
+    async fn audit_recorded(
+        &self,
+        payload: &RecordUserActionPayload,
+    ) -> Result<(&'static str, String), String> {
+        // Attribute by origin: an execution result is the extension's; a move that reaches this
+        // arm is host-initiated (a user move took the correction arm above), so it is the
+        // system's; the rest are user-observed behavior.
+        let event = payload.event_type.as_str();
+        let actor = match event {
+            "action_applied" | "action_failed" => Actor::Extension,
+            "message_moved" => Actor::System,
+            _ => Actor::User,
+        };
+        let mut entry = AuditEntry::new(event, actor).with_payload(provenance_payload(payload));
+        if let Some(message_id) = payload.message_id() {
+            entry = entry.with_message(message_id);
+        }
+        let id = self.audit.append(entry).await.map_err(|e| e.to_string())?;
+        Ok(("audit", id.into_string()))
+    }
+
+    /// Route a one-click wrong-category correction into classification feedback. The prior
+    /// label flows in as the AI label so the captured row's polarity records the override
+    /// honestly (a diverging label is `Negative`, an agreeing one is reinforcement).
+    async fn route_label_correction(
+        &self,
+        payload: &RecordUserActionPayload,
+    ) -> Result<(&'static str, String), String> {
+        let message_id = payload
+            .message_id()
+            .ok_or("classification_corrected requires thunderbird_message_id")?;
+        let label = payload
+            .corrected_label
+            .clone()
+            .ok_or("classification_corrected requires corrected_label")?;
+        let mut context = self.correction_ctx(payload);
+        context.ai_label = payload.prior_label.clone();
+        let id = self
+            .correction
+            .handle_correction(
+                UserCorrection::CorrectLabel { message_id, label },
+                FeatureVector::new(),
+                context,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(("classification_feedback", id.into_string()))
+    }
+
+    /// Route an undo of an auto-applied action into learning as strong negative evidence
+    /// against the rule that fired. A reverted *move* teaches the filing it was put back to
+    /// (the rule's now-undone target is the diverged AI suggestion → negative for that
+    /// folder); an undone *junk-mark* is a not-spam correction; a reverted tag/draft has no
+    /// learned-task feedback table, so it is recorded as provenance.
+    async fn route_undo(
+        &self,
+        payload: &RecordUserActionPayload,
+    ) -> Result<(&'static str, String), String> {
+        let message_id = payload
+            .message_id()
+            .ok_or("action_undone requires thunderbird_message_id")?;
+        match payload.action_kind.as_deref() {
+            Some("move") => {
+                let to_folder =
+                    payload.to_folder_id.clone().map(FolderId::from).ok_or(
+                        "action_undone(move) requires to_folder_id (the reverted-to folder)",
+                    )?;
+                let mut context = self.correction_ctx(payload);
+                // The rule's now-undone target (where the message was) is the AI-suggested
+                // folder the human diverged from by reverting it.
+                context.ai_suggested_folder = payload.from_folder_id.clone().map(FolderId::from);
+                let id = self
+                    .correction
+                    .handle_correction(
+                        UserCorrection::LearnFiling {
+                            message_id,
+                            to_folder,
+                        },
+                        FeatureVector::new(),
+                        context,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(("filing_feedback", id.into_string()))
             }
+            // A rule only ever auto-*marks* junk; undoing it is a not-spam correction.
+            Some("mark_junk" | "junk") => {
+                let id = self
+                    .correction
+                    .handle_correction(
+                        UserCorrection::MarkNotSpam { message_id },
+                        FeatureVector::new(),
+                        self.correction_ctx(payload),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(("classification_feedback", id.into_string()))
+            }
+            _ => self.audit_recorded(payload).await,
         }
     }
 
@@ -974,5 +1127,10 @@ fn provenance_payload(p: &RecordUserActionPayload) -> Value {
         "tag": p.tag,
         "user_initiated": p.user_initiated,
         "result": p.result,
+        // Carried so the curator can compute ignore/undo-rate from the audit stream for
+        // signals (dismissals, tag/draft undos) that have no learned-task feedback table.
+        "action_kind": p.action_kind,
+        "authored_by": p.authored_by,
+        "rule_id": p.rule_id,
     })
 }

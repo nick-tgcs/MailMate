@@ -165,6 +165,25 @@ pub struct RecordUserActionPayload {
     /// When it happened, if the extension stamped it.
     #[serde(default)]
     pub occurred_at: Option<Timestamp>,
+    /// The label the user says is correct (a `classification_corrected` wrong-category fix).
+    #[serde(default)]
+    pub corrected_label: Option<String>,
+    /// The label MailMate had assigned before the correction (so polarity records the
+    /// override honestly). Carried by `classification_corrected`.
+    #[serde(default)]
+    pub prior_label: Option<String>,
+    /// The kind of action an `action_undone` / `suggestion_dismissed` event concerns
+    /// (`move` / `mark_junk` / `tag` / `create_draft`). Selects how an undo is routed.
+    #[serde(default)]
+    pub action_kind: Option<String>,
+    /// The id of the rule that authored an auto-applied action (provenance for an
+    /// `action_undone`: undo is the strongest negative signal against the rule that fired).
+    #[serde(default)]
+    pub rule_id: Option<String>,
+    /// For a dismissed/undone suggestion, who authored it (`"model"` or a rule id). Audit
+    /// provenance for the ignore/undo-rate signal.
+    #[serde(default)]
+    pub authored_by: Option<String>,
 }
 
 impl RecordUserActionPayload {

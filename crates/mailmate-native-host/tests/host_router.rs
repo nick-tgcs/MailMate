@@ -166,11 +166,236 @@ fn classify_message_returns_a_guarded_plan_and_applies_nothing() {
     assert_eq!(payload["thunderbird_message_id"], "tb_42");
     assert_eq!(payload["suggested_actions"][0]["kind"], "tag");
     assert_eq!(payload["suggested_actions"][0]["policy_outcome"], "allowed");
+    // Nothing has been applied on a manual classify, so the action is a pending suggestion.
+    assert_eq!(payload["suggested_actions"][0]["apply_state"], "suggest");
     // A selected-message classify never auto-applies: the user is in the loop.
     assert!(
         mail.applied_actions().is_empty(),
         "classify applies nothing"
     );
+}
+
+#[test]
+fn hello_reports_versions_safe_defaults_and_core_capabilities() {
+    let out = Arc::new(FakeTransport::new());
+    let ports = base_ports();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    block_on(router.handle(request(
+        "hello",
+        json!({ "extension_version": "0.1.0", "protocol_version": "1.0" }),
+    )))
+    .unwrap();
+
+    let payload = one_ok_response(&out);
+    assert_eq!(payload["protocol_version"], "1.0");
+    assert!(
+        payload["host_version"]
+            .as_str()
+            .unwrap()
+            .starts_with(|c: char| c.is_ascii_digit()),
+        "host_version is a real version string"
+    );
+    // No admin/follow-ups wired → safe local-first defaults and only the core capabilities.
+    assert_eq!(payload["drafting_available"], false);
+    assert_eq!(payload["retention_level"], "metadata");
+    let caps: Vec<&str> = payload["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(caps.contains(&"classify_message"));
+    assert!(caps.contains(&"record_user_action"));
+    assert!(caps.contains(&"explain_decision"));
+    assert!(
+        !caps.contains(&"followups"),
+        "follow-ups are not wired here"
+    );
+    assert!(!caps.contains(&"get_settings"), "admin is not wired here");
+}
+
+#[test]
+fn classification_corrected_routes_a_wrong_category_to_classification_feedback() {
+    let learning = Arc::new(FakeLearningEngine::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.learning_engine = learning.clone();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "classification_corrected",
+            "thunderbird_message_id": "tb_42",
+            "corrected_label": "newsletters",
+            "prior_label": "receipts",
+            "user_initiated": true
+        }),
+    )))
+    .unwrap();
+
+    assert_eq!(one_ok_response(&out)["sink"], "classification_feedback");
+    match &learning.recorded_feedback()[0] {
+        TaskFeedback::Classification(row) => {
+            assert_eq!(row.human_label, "newsletters");
+            // The prior label rides in as the AI label so the override is recorded honestly.
+            assert_eq!(row.ai_label.as_deref(), Some("receipts"));
+            assert_eq!(
+                row.polarity,
+                mailmate_common::feedback::FeedbackPolarity::Negative
+            );
+        }
+        other => panic!("expected a classification row, got {other:?}"),
+    }
+}
+
+#[test]
+fn classification_corrected_without_a_label_is_a_record_failed_error() {
+    let out = Arc::new(FakeTransport::new());
+    let ports = base_ports();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({ "event_type": "classification_corrected", "thunderbird_message_id": "tb_42" }),
+    )))
+    .unwrap();
+    assert_eq!(error_code(&out), "record_failed");
+}
+
+#[test]
+fn action_undone_of_a_move_routes_to_filing_feedback_against_the_rule_target() {
+    let learning = Arc::new(FakeLearningEngine::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.learning_engine = learning.clone();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    // A crystallized rule moved tb_42 into "Promotions"; the user undid it back to "Inbox".
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "action_undone",
+            "action_kind": "move",
+            "thunderbird_message_id": "tb_42",
+            "from_folder_id": "Promotions",
+            "to_folder_id": "Inbox",
+            "rule_id": "R-118",
+            "user_initiated": true
+        }),
+    )))
+    .unwrap();
+
+    assert_eq!(one_ok_response(&out)["sink"], "filing_feedback");
+    match &learning.recorded_feedback()[0] {
+        TaskFeedback::Filing(row) => {
+            assert_eq!(row.human_chosen_folder, FolderId::from("Inbox"));
+            // The rule's now-undone target is recorded as the diverged AI suggestion...
+            assert_eq!(row.ai_suggested_folder, Some(FolderId::from("Promotions")));
+            // ...so the row is negative evidence against the rule that fired.
+            assert_eq!(
+                row.polarity,
+                mailmate_common::feedback::FeedbackPolarity::Negative
+            );
+        }
+        other => panic!("expected a filing row, got {other:?}"),
+    }
+}
+
+#[test]
+fn action_undone_of_a_junk_mark_routes_to_not_spam_classification_feedback() {
+    let learning = Arc::new(FakeLearningEngine::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.learning_engine = learning.clone();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "action_undone",
+            "action_kind": "mark_junk",
+            "thunderbird_message_id": "tb_42",
+            "rule_id": "R-9",
+            "user_initiated": true
+        }),
+    )))
+    .unwrap();
+
+    assert_eq!(one_ok_response(&out)["sink"], "classification_feedback");
+    match &learning.recorded_feedback()[0] {
+        TaskFeedback::Classification(row) => assert_eq!(row.human_label, "ham"),
+        other => panic!("expected a classification row, got {other:?}"),
+    }
+}
+
+#[test]
+fn action_undone_of_a_tag_has_no_feedback_table_and_is_audited() {
+    let learning = Arc::new(FakeLearningEngine::new());
+    let audit = Arc::new(FakeAuditRepository::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.learning_engine = learning.clone();
+    let router = HostRouter::from_ports(&ports, audit.clone(), out.clone());
+
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "action_undone",
+            "action_kind": "tag",
+            "thunderbird_message_id": "tb_42",
+            "tag": "needs-review",
+            "user_initiated": true
+        }),
+    )))
+    .unwrap();
+
+    assert_eq!(one_ok_response(&out)["sink"], "audit");
+    assert!(
+        learning.recorded_feedback().is_empty(),
+        "a tag has no learned-task feedback table"
+    );
+    assert!(audit
+        .entries()
+        .iter()
+        .any(|e| e.event_type == "action_undone"));
+}
+
+#[test]
+fn suggestion_dismissed_is_audited_not_a_fabricated_correction() {
+    let learning = Arc::new(FakeLearningEngine::new());
+    let audit = Arc::new(FakeAuditRepository::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.learning_engine = learning.clone();
+    let router = HostRouter::from_ports(&ports, audit.clone(), out.clone());
+
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "suggestion_dismissed",
+            "thunderbird_message_id": "tb_42",
+            "action_kind": "move",
+            "authored_by": "model",
+            "user_initiated": true
+        }),
+    )))
+    .unwrap();
+
+    assert_eq!(one_ok_response(&out)["sink"], "audit");
+    assert!(
+        learning.recorded_feedback().is_empty(),
+        "a dismiss has no chosen label/folder, so it fabricates no feedback row"
+    );
+    let dismissed = audit
+        .entries()
+        .iter()
+        .find(|e| e.event_type == "suggestion_dismissed")
+        .cloned()
+        .expect("the dismiss was audited");
+    // The ignore-rate provenance the curator can later read is captured on the audit row.
+    assert_eq!(dismissed.payload["action_kind"], "move");
+    assert_eq!(dismissed.payload["authored_by"], "model");
 }
 
 #[test]

@@ -151,6 +151,45 @@ fn get_settings_returns_the_secret_free_snapshot() {
 }
 
 #[test]
+fn hello_advertises_wired_capabilities_and_a_configured_provider() {
+    use mailmate_native_host::config::{AiSettings, ProviderSettings};
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    // A config with a configured default provider → drafting is enabled in config.
+    let config = AppConfig {
+        ai: AiSettings {
+            default_provider: Some("local".to_owned()),
+            providers: vec![ProviderSettings {
+                id: "local".to_owned(),
+                kind: "mock".to_owned(),
+                endpoint: None,
+                model: None,
+            }],
+        },
+        ..AppConfig::default()
+    };
+    let secrets = std::env::temp_dir().join("mailmate-hello-test-secrets.json");
+    let router = build_router(&config, &backend, out.clone(), secrets).unwrap();
+
+    block_on(router.handle(request("hello", json!({})))).unwrap();
+
+    let payload = one_ok_response(&out);
+    assert_eq!(payload["protocol_version"], "1.0");
+    assert_eq!(payload["drafting_available"], true);
+    assert_eq!(payload["retention_level"], "metadata");
+    let caps: Vec<&str> = payload["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    // The full composition root wires both suites, so hello advertises them.
+    assert!(caps.contains(&"followups"));
+    assert!(caps.contains(&"list_pending_reviews"));
+    assert!(caps.contains(&"get_settings"));
+}
+
+#[test]
 fn explain_decision_without_a_message_id_is_an_invalid_payload() {
     let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
     let out = Arc::new(FakeTransport::new());

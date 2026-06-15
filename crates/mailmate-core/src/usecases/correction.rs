@@ -105,27 +105,20 @@ fn build_feedback(
                 .spam_label()
                 .expect("a spam-axis correction always has a spam label")
                 .to_owned();
-            // A correction the AI already agreed with is reinforcement; otherwise an override.
-            let polarity = polarity(context.ai_label.as_deref() == Some(human_label.as_str()));
-            let mut salient = features.clone();
-            if let Some(domain) = &context.sender_domain {
-                salient.insert("sender_domain", FeatureValue::Text(domain.clone()));
-            }
-            TaskFeedback::Classification(ClassificationFeedbackRow {
-                id: ClassificationFeedback::fresh_id(),
-                message_id: message_id.clone(),
-                pinned_versions: context.pinned_versions.clone(),
-                ai_label: context.ai_label.clone(),
-                ai_score: context.ai_score,
-                ai_rationale: None,
+            TaskFeedback::Classification(classification_row(
+                message_id,
                 human_label,
-                human_reason_code: None,
-                human_reason_text: None,
-                salient_features: salient,
-                polarity,
-                created_at: Timestamp::now(),
-            })
+                features,
+                context,
+            ))
         }
+        // A wrong-category correction teaches the same classification-feedback table with an
+        // arbitrary label (e.g. "newsletters"); `ai_label` carries the prior label so the
+        // polarity records the override honestly. It is a category signal, so — unlike the
+        // spam axis — `handle_correction` does not feed it to the Tier-2 online update.
+        UserCorrection::CorrectLabel { message_id, label } => TaskFeedback::Classification(
+            classification_row(message_id, label.clone(), features, context),
+        ),
         UserCorrection::LearnFiling {
             message_id,
             to_folder,
@@ -144,6 +137,37 @@ fn build_feedback(
                 created_at: Timestamp::now(),
             })
         }
+    }
+}
+
+/// Build a classification-feedback row teaching `human_label` for `message_id`, folding the
+/// sender domain into the salient features and recording polarity against any prior AI label.
+/// Shared by the spam-axis corrections and the wrong-category correction.
+fn classification_row(
+    message_id: &mailmate_common::ids::MessageId,
+    human_label: String,
+    features: &FeatureVector,
+    context: &CorrectionContext,
+) -> ClassificationFeedbackRow {
+    // A correction the AI already agreed with is reinforcement; otherwise an override.
+    let polarity = polarity(context.ai_label.as_deref() == Some(human_label.as_str()));
+    let mut salient = features.clone();
+    if let Some(domain) = &context.sender_domain {
+        salient.insert("sender_domain", FeatureValue::Text(domain.clone()));
+    }
+    ClassificationFeedbackRow {
+        id: ClassificationFeedback::fresh_id(),
+        message_id: message_id.clone(),
+        pinned_versions: context.pinned_versions.clone(),
+        ai_label: context.ai_label.clone(),
+        ai_score: context.ai_score,
+        ai_rationale: None,
+        human_label,
+        human_reason_code: None,
+        human_reason_text: None,
+        salient_features: salient,
+        polarity,
+        created_at: Timestamp::now(),
     }
 }
 
@@ -199,6 +223,46 @@ mod tests {
         };
         let context = CorrectionContext {
             ai_label: Some("spam".to_owned()),
+            ..CorrectionContext::default()
+        };
+        let feedback = build_feedback(&correction, &FeatureVector::new(), &context);
+        assert_eq!(feedback.polarity(), FeedbackPolarity::Positive);
+    }
+
+    #[test]
+    fn correct_label_builds_a_classification_row_with_the_chosen_label_and_prior_as_override() {
+        let correction = UserCorrection::CorrectLabel {
+            message_id: MessageId::from("msg_1"),
+            label: "newsletters".to_owned(),
+        };
+        // The prior label flows in as `ai_label`, so a diverging correction is an override.
+        let context = CorrectionContext {
+            ai_label: Some("receipts".to_owned()),
+            ..ctx_with_domain("acme.test")
+        };
+        let feedback = build_feedback(&correction, &FeatureVector::new(), &context);
+        match feedback {
+            TaskFeedback::Classification(row) => {
+                assert_eq!(row.human_label, "newsletters");
+                assert_eq!(row.ai_label.as_deref(), Some("receipts"));
+                assert_eq!(row.polarity, FeedbackPolarity::Negative);
+                assert_eq!(
+                    row.salient_features.get("sender_domain"),
+                    Some(&FeatureValue::Text("acme.test".to_owned()))
+                );
+            }
+            TaskFeedback::Filing(_) => panic!("expected a classification row"),
+        }
+    }
+
+    #[test]
+    fn correct_label_to_the_same_label_is_positive_reinforcement() {
+        let correction = UserCorrection::CorrectLabel {
+            message_id: MessageId::from("msg_1"),
+            label: "receipts".to_owned(),
+        };
+        let context = CorrectionContext {
+            ai_label: Some("receipts".to_owned()),
             ..CorrectionContext::default()
         };
         let feedback = build_feedback(&correction, &FeatureVector::new(), &context);
