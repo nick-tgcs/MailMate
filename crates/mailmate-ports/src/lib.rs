@@ -13,6 +13,8 @@ pub mod feature_extractor;
 pub mod learning_engine;
 pub mod mail_client;
 pub mod policy_guard;
+pub mod proposal_review;
+pub mod rule_curator;
 pub mod rule_engine;
 pub mod secret_store;
 pub mod storage;

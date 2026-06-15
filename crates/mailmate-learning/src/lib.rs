@@ -11,14 +11,23 @@
 //! generate reviewable candidate rules ([`proposals`]) → gate promotion on a historical
 //! precision back-test ([`shadow`]) → monitor outcomes as a derived view ([`outcomes`]).
 //! Every terminal product is a model-free rule routed through the human-review/shadow gate.
+//!
+//! The AI **curator** ([`curator`]) is the teacher in that loop: it consults the provider
+//! for richer proposals (refine/merge/split/retire) and deterministic conflict scans, but it
+//! only ever *proposes*. The **review** step ([`review`]) is where a human decision actually
+//! materializes a rule — and even then into shadow/pending, never active.
 
+pub mod curator;
 pub mod engine;
 pub mod evidence;
 pub mod outcomes;
 pub mod proposals;
+pub mod review;
 pub mod shadow;
 
+pub use curator::{AiRuleCurator, CURATOR_SOURCE};
 pub use engine::{DefaultLearningEngine, DEFAULT_SOURCE};
+pub use review::DefaultProposalReview;
 
 /// Returns this crate's package name for smoke tests.
 #[must_use]

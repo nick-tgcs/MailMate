@@ -13,7 +13,8 @@ use mailmate_common::time::Timestamp;
 use mailmate_core::Ports;
 use mailmate_test_support::fakes::{
     FakeActionPlanner, FakeClassificationEngine, FakeClock, FakeLearningEngine, FakeMailClient,
-    FakePolicyGuard, FakeSecretStore, FakeTier2Classifier, FakeTransport, StubFeatureExtractor,
+    FakePolicyGuard, FakeProposalReview, FakeRuleCurator, FakeSecretStore, FakeTier2Classifier,
+    FakeTransport, StubFeatureExtractor,
 };
 
 fn neutral_classification() -> Classification {
@@ -44,6 +45,8 @@ fn core_ports_compose_from_fakes_and_route_calls() {
         action_planner: Arc::new(FakeActionPlanner::returning(vec![])),
         policy_guard: Arc::new(FakePolicyGuard::new()),
         learning_engine: Arc::new(FakeLearningEngine::new()),
+        rule_curator: Arc::new(FakeRuleCurator::new()),
+        proposal_review: Arc::new(FakeProposalReview::new()),
     };
 
     // A call made through the boxed port reaches the concrete fake behind it.

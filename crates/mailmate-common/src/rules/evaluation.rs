@@ -130,6 +130,29 @@ pub enum ConflictKind {
     UnsafeEscalation,
 }
 
+impl ConflictKind {
+    /// The stable snake_case label stored in `rule_conflicts.conflict_kind`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ContradictoryEffect => "contradictory_effect",
+            Self::Overlap => "overlap",
+            Self::UnsafeEscalation => "unsafe_escalation",
+        }
+    }
+
+    /// Parse a stored label, or `None` if unrecognized.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "contradictory_effect" => Some(Self::ContradictoryEffect),
+            "overlap" => Some(Self::Overlap),
+            "unsafe_escalation" => Some(Self::UnsafeEscalation),
+            _ => None,
+        }
+    }
+}
+
 /// How serious a conflict is.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +163,29 @@ pub enum ConflictSeverity {
     Medium,
     /// High.
     High,
+}
+
+impl ConflictSeverity {
+    /// The stable snake_case label stored in `rule_conflicts.severity`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Parse a stored label, or `None` if unrecognized.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
 }
 
 /// A detected conflict between a candidate rule and an existing rule.
@@ -187,5 +233,34 @@ mod tests {
             shadow_outcomes: vec![],
         };
         assert_eq!(result.winning_band(), Some(HierarchyBand::SystemSafety));
+    }
+
+    #[test]
+    fn conflict_kind_and_severity_labels_round_trip() {
+        for kind in [
+            ConflictKind::ContradictoryEffect,
+            ConflictKind::Overlap,
+            ConflictKind::UnsafeEscalation,
+        ] {
+            assert_eq!(ConflictKind::from_db_str(kind.as_str()), Some(kind));
+        }
+        assert_eq!(
+            ConflictKind::ContradictoryEffect.as_str(),
+            "contradictory_effect"
+        );
+        assert_eq!(ConflictKind::from_db_str("nope"), None);
+
+        for severity in [
+            ConflictSeverity::Low,
+            ConflictSeverity::Medium,
+            ConflictSeverity::High,
+        ] {
+            assert_eq!(
+                ConflictSeverity::from_db_str(severity.as_str()),
+                Some(severity)
+            );
+        }
+        assert_eq!(ConflictSeverity::High.as_str(), "high");
+        assert_eq!(ConflictSeverity::from_db_str("nope"), None);
     }
 }

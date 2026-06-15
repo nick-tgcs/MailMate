@@ -8,11 +8,13 @@ use futures::executor::block_on;
 
 use mailmate_common::actor::Actor;
 use mailmate_common::audit::{event_type, AuditEntry, AuditQuery};
+use mailmate_common::conflict::{ConflictStatus, RuleConflictRecord};
 use mailmate_common::evidence::{EvidenceKind, EvidenceSourceKind, RuleEvidence};
 use mailmate_common::features::{FeatureValue, FeatureVector};
 use mailmate_common::feedback::{
     ClassificationFeedback, ClassificationFeedbackQuery, ClassificationFeedbackRow,
     FeedbackPolarity, FilingFeedback, FilingFeedbackQuery, FilingFeedbackRow, PinnedVersions,
+    ProposalOutcome, RuleProposalFeedback, RuleProposalFeedbackQuery, RuleProposalFeedbackRow,
 };
 use mailmate_common::ids::{
     EvidenceId, FeedbackId, FolderId, MessageId, ProposalId, RuleId, RuleVersionId,
@@ -20,6 +22,7 @@ use mailmate_common::ids::{
 use mailmate_common::proposal::{AgentProposal, EvidenceRef, ProposalKind, ProposalStatus};
 use mailmate_common::rules::condition::{Condition, FieldValue, Operator, Predicate};
 use mailmate_common::rules::effect::RuleEffect;
+use mailmate_common::rules::evaluation::{ConflictKind, ConflictSeverity};
 use mailmate_common::rules::rule::{
     HierarchyBand, NewRule, NewRuleVersion, RiskLevel, RuleKind, RuleScope, RuleStatus,
     RuleVersionContent,
@@ -27,13 +30,15 @@ use mailmate_common::rules::rule::{
 use mailmate_common::shadow::ShadowOutcomeRow;
 use mailmate_common::time::Timestamp;
 use mailmate_ports::storage::audit::AuditRepository;
+use mailmate_ports::storage::conflicts::ConflictRepository;
 use mailmate_ports::storage::feedback::FeedbackRepository;
 use mailmate_ports::storage::proposals::ProposalRepository;
 use mailmate_ports::storage::rules::RuleRepository;
 use mailmate_ports::storage::shadow_outcomes::ShadowOutcomeRepository;
 use mailmate_storage::{
-    open_and_migrate, SqliteAuditRepository, SqliteBackend, SqliteFeedbackRepository,
-    SqliteProposalRepository, SqliteRuleRepository, SqliteShadowOutcomeRepository, StorageConfig,
+    open_and_migrate, SqliteAuditRepository, SqliteBackend, SqliteConflictRepository,
+    SqliteFeedbackRepository, SqliteProposalRepository, SqliteRuleRepository,
+    SqliteShadowOutcomeRepository, StorageConfig,
 };
 
 fn backend() -> Arc<SqliteBackend> {
@@ -411,4 +416,106 @@ fn shadow_outcomes_append_and_read_back_per_rule() {
         Some("Receipts"),
         "the would-have effect round-trips through JSON"
     );
+}
+
+#[test]
+fn conflicts_append_list_open_and_resolve() {
+    let repo = SqliteConflictRepository::new(backend());
+    let conflict = RuleConflictRecord::new(
+        RuleKind::Action,
+        RuleId::from("rule_a"),
+        RuleId::from("rule_b"),
+        ConflictKind::ContradictoryEffect,
+        ConflictSeverity::High,
+        "both file stripe.com to different folders",
+    );
+    let conflict_id = block_on(repo.append(conflict)).unwrap();
+    assert!(conflict_id.as_str().starts_with("conf_"));
+
+    // It shows up in the open queue, with its fields round-tripped.
+    let open = block_on(repo.list_open()).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].id, conflict_id);
+    assert_eq!(open[0].rule_a_id, RuleId::from("rule_a"));
+    assert_eq!(open[0].conflict_kind, ConflictKind::ContradictoryEffect);
+    assert_eq!(open[0].severity, ConflictSeverity::High);
+    assert_eq!(open[0].status, ConflictStatus::Open);
+    assert!(open[0].resolved_at.is_none());
+
+    // Resolving it removes it from the open queue and records the resolution time.
+    let resolved = Timestamp::now();
+    block_on(repo.set_status(&conflict_id, ConflictStatus::Resolved, Some(resolved))).unwrap();
+    assert!(
+        block_on(repo.list_open()).unwrap().is_empty(),
+        "a resolved conflict leaves the open queue"
+    );
+
+    // A second conflict can be *ignored* with no resolution time (the None branch), and it
+    // likewise leaves the open queue.
+    let other = block_on(repo.append(RuleConflictRecord::new(
+        RuleKind::Classification,
+        RuleId::from("rule_c"),
+        RuleId::from("rule_d"),
+        ConflictKind::ContradictoryEffect,
+        ConflictSeverity::Medium,
+        "two labels for the same domain",
+    )))
+    .unwrap();
+    assert_eq!(block_on(repo.list_open()).unwrap().len(), 1);
+    block_on(repo.set_status(&other, ConflictStatus::Ignored, None)).unwrap();
+    assert!(block_on(repo.list_open()).unwrap().is_empty());
+}
+
+#[test]
+fn rule_proposal_feedback_appends_and_filters_by_proposal() {
+    let repo: SqliteFeedbackRepository = SqliteFeedbackRepository::new(backend());
+    let proposal_id = ProposalId::from("prop_reviewed");
+    let row = RuleProposalFeedbackRow {
+        id: RuleProposalFeedback::fresh_id(),
+        proposal_id: proposal_id.clone(),
+        pinned_versions: PinnedVersions {
+            prompt_template_version: Some("curate-v1".to_owned()),
+            ..PinnedVersions::default()
+        },
+        outcome: ProposalOutcome::Accepted,
+        human_reason_code: Some("matches_my_filing".to_owned()),
+        human_reason_text: None,
+        polarity: FeedbackPolarity::Positive,
+        created_at: Timestamp::now(),
+    };
+    let id = block_on(FeedbackRepository::<RuleProposalFeedback>::append(
+        &repo, row,
+    ))
+    .unwrap();
+    assert!(id.as_str().starts_with("rpffb_"));
+
+    let for_proposal = block_on(FeedbackRepository::<RuleProposalFeedback>::query(
+        &repo,
+        RuleProposalFeedbackQuery {
+            proposal_id: Some(proposal_id.clone()),
+            ..RuleProposalFeedbackQuery::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(for_proposal.len(), 1);
+    assert_eq!(for_proposal[0].id, id);
+    assert_eq!(for_proposal[0].outcome, ProposalOutcome::Accepted);
+    assert_eq!(
+        for_proposal[0]
+            .pinned_versions
+            .prompt_template_version
+            .as_deref(),
+        Some("curate-v1")
+    );
+
+    // A different proposal id filters this row out.
+    assert!(block_on(FeedbackRepository::<RuleProposalFeedback>::query(
+        &repo,
+        RuleProposalFeedbackQuery {
+            proposal_id: Some(ProposalId::from("prop_other")),
+            ..RuleProposalFeedbackQuery::default()
+        },
+    ))
+    .unwrap()
+    .is_empty());
 }

@@ -13,8 +13,9 @@ use mailmate_common::features::FeatureVector;
 use mailmate_common::feedback::{
     ClassificationFeedback, ClassificationFeedbackQuery, ClassificationFeedbackRow,
     FeedbackPolarity, FilingFeedback, FilingFeedbackQuery, FilingFeedbackRow, PinnedVersions,
+    ProposalOutcome, RuleProposalFeedback, RuleProposalFeedbackQuery, RuleProposalFeedbackRow,
 };
-use mailmate_common::ids::{FeedbackId, FolderId, MessageId, RuleId};
+use mailmate_common::ids::{FeedbackId, FolderId, MessageId, ProposalId, RuleId};
 use mailmate_ports::storage::feedback::FeedbackRepository;
 
 use crate::backend::{map_rusqlite, SqliteBackend};
@@ -38,6 +39,11 @@ fn polarity_from_db(raw: &str) -> Result<FeedbackPolarity, StorageError> {
         .ok_or_else(|| StorageError::Serialization(format!("unknown polarity {raw:?}")))
 }
 
+fn proposal_outcome_from_db(raw: &str) -> Result<ProposalOutcome, StorageError> {
+    ProposalOutcome::from_db_str(raw)
+        .ok_or_else(|| StorageError::Serialization(format!("unknown proposal outcome {raw:?}")))
+}
+
 const CLASSIFICATION_COLUMNS: &str = "id, message_id, pinned_versions_json, ai_label, ai_score, \
      ai_rationale, human_label, human_reason_code, human_reason_text, salient_features_json, \
      polarity, created_at";
@@ -58,6 +64,26 @@ fn row_to_classification(row: &Row<'_>) -> Result<ClassificationFeedbackRow, Sto
         human_reason_code: row.get(7).map_err(map_rusqlite)?,
         human_reason_text: row.get(8).map_err(map_rusqlite)?,
         salient_features: json_from_db::<FeatureVector>(&features_raw)?,
+        polarity: polarity_from_db(&polarity_raw)?,
+        created_at: ts_from_db(&created_at)?,
+    })
+}
+
+const RULE_PROPOSAL_COLUMNS: &str = "id, proposal_id, pinned_versions_json, outcome, \
+     human_reason_code, human_reason_text, polarity, created_at";
+
+fn row_to_rule_proposal(row: &Row<'_>) -> Result<RuleProposalFeedbackRow, StorageError> {
+    let pinned_raw: String = row.get(2).map_err(map_rusqlite)?;
+    let outcome_raw: String = row.get(3).map_err(map_rusqlite)?;
+    let polarity_raw: String = row.get(6).map_err(map_rusqlite)?;
+    let created_at: String = row.get(7).map_err(map_rusqlite)?;
+    Ok(RuleProposalFeedbackRow {
+        id: FeedbackId::from(row.get::<_, String>(0).map_err(map_rusqlite)?),
+        proposal_id: ProposalId::from(row.get::<_, String>(1).map_err(map_rusqlite)?),
+        pinned_versions: json_from_db::<PinnedVersions>(&pinned_raw)?,
+        outcome: proposal_outcome_from_db(&outcome_raw)?,
+        human_reason_code: row.get(4).map_err(map_rusqlite)?,
+        human_reason_text: row.get(5).map_err(map_rusqlite)?,
         polarity: polarity_from_db(&polarity_raw)?,
         created_at: ts_from_db(&created_at)?,
     })
@@ -225,6 +251,67 @@ impl FeedbackRepository<FilingFeedback> for SqliteFeedbackRepository {
             let mut out = Vec::new();
             while let Some(row) = rows.next().map_err(map_rusqlite)? {
                 out.push(row_to_filing(row)?);
+            }
+            Ok(out)
+        })
+    }
+}
+
+#[async_trait]
+impl FeedbackRepository<RuleProposalFeedback> for SqliteFeedbackRepository {
+    async fn append(&self, row: RuleProposalFeedbackRow) -> Result<FeedbackId, StorageError> {
+        let pinned_json = json_to_db(&row.pinned_versions)?;
+        let id = row.id.clone();
+        self.backend.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO rule_proposal_feedback (id, proposal_id, pinned_versions_json, \
+                 outcome, human_reason_code, human_reason_text, polarity, created_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    row.id.as_str(),
+                    row.proposal_id.as_str(),
+                    pinned_json,
+                    row.outcome.as_str(),
+                    row.human_reason_code,
+                    row.human_reason_text,
+                    row.polarity.as_str(),
+                    ts_to_db(row.created_at),
+                ],
+            )
+            .map_err(map_rusqlite)?;
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    async fn query(
+        &self,
+        query: RuleProposalFeedbackQuery,
+    ) -> Result<Vec<RuleProposalFeedbackRow>, StorageError> {
+        self.backend.with_conn(|conn| {
+            let mut binds: Vec<String> = Vec::new();
+            let mut predicates: Vec<String> = Vec::new();
+            if let Some(proposal_id) = &query.proposal_id {
+                binds.push(proposal_id.as_str().to_owned());
+                predicates.push(format!("proposal_id = ?{}", binds.len()));
+            }
+            let where_sql = if predicates.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", predicates.join(" AND "))
+            };
+            let sql = format!(
+                "SELECT {RULE_PROPOSAL_COLUMNS} FROM rule_proposal_feedback {where_sql} \
+                 ORDER BY created_at DESC, id DESC {}",
+                limit_clause(query.limit)
+            );
+            let mut stmt = conn.prepare(&sql).map_err(map_rusqlite)?;
+            let refs: Vec<&dyn rusqlite::ToSql> =
+                binds.iter().map(|b| b as &dyn rusqlite::ToSql).collect();
+            let mut rows = stmt.query(refs.as_slice()).map_err(map_rusqlite)?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().map_err(map_rusqlite)? {
+                out.push(row_to_rule_proposal(row)?);
             }
             Ok(out)
         })

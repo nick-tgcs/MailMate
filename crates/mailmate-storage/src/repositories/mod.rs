@@ -5,6 +5,7 @@
 //! [`StorageError`]: mailmate_common::error::StorageError
 
 mod audit;
+mod conflicts;
 mod convert;
 mod drafts;
 mod feedback;
@@ -16,6 +17,7 @@ mod shadow_outcomes;
 mod threads;
 
 pub use audit::SqliteAuditRepository;
+pub use conflicts::SqliteConflictRepository;
 pub use drafts::SqliteDraftRepository;
 pub use feedback::SqliteFeedbackRepository;
 pub use messages::SqliteMessageRepository;

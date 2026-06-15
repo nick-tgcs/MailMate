@@ -15,13 +15,18 @@ use mailmate_ports::feature_extractor::FeatureExtractor;
 use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::policy_guard::PolicyGuard;
+use mailmate_ports::proposal_review::ProposalReview;
+use mailmate_ports::rule_curator::RuleCurator;
 use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::transport::Transport;
 
 pub mod usecases;
 
-pub use usecases::{CorrectionContext, CorrectionService, PlanningOutcome, PlanningService};
+pub use usecases::{
+    CorrectionContext, CorrectionService, CurationService, PlanningOutcome, PlanningService,
+    ReviewService,
+};
 
 /// The set of adapters the core's use-cases run against — the dependency-injection
 /// seam.
@@ -55,6 +60,10 @@ pub struct Ports {
     pub policy_guard: Arc<dyn PolicyGuard>,
     /// The learning engine: captures corrections and proposes crystallized rules.
     pub learning_engine: Arc<dyn LearningEngine>,
+    /// The AI rule curator: proposes (never activates) rule changes and detects conflicts.
+    pub rule_curator: Arc<dyn RuleCurator>,
+    /// The proposal-review step: applies a human's accept/reject decision to a proposal.
+    pub proposal_review: Arc<dyn ProposalReview>,
 }
 
 /// Returns this crate's package name for smoke tests.

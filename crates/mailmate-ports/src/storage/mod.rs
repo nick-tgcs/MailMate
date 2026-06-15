@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use mailmate_common::error::StorageError;
 
 pub mod audit;
+pub mod conflicts;
 pub mod drafts;
 pub mod feedback;
 pub mod messages;
@@ -28,6 +29,7 @@ pub mod shadow_outcomes;
 pub mod threads;
 
 pub use audit::AuditRepository;
+pub use conflicts::ConflictRepository;
 pub use drafts::DraftRepository;
 pub use feedback::FeedbackRepository;
 pub use messages::MessageRepository;

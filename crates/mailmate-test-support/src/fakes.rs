@@ -12,9 +12,10 @@ use async_trait::async_trait;
 use mailmate_common::action::{ActionPlan, BlockedAction, GuardedActionPlan, ProposedAction};
 use mailmate_common::audit::AuditEntry;
 use mailmate_common::classification::{Classification, ClassificationInput};
+use mailmate_common::curator::{CuratorReport, CuratorRequest, ReviewDecision, ReviewOutcome};
 use mailmate_common::error::{
-    ActionPlanningError, ClassificationError, LearningError, MailError, MlError, PolicyError,
-    SecretError,
+    ActionPlanningError, ClassificationError, CuratorError, LearningError, MailError, MlError,
+    PolicyError, ReviewError, SecretError,
 };
 use mailmate_common::evidence::{EvidenceQuery, RuleEvidence};
 use mailmate_common::features::{CalibratedScores, FeatureValue, FeatureVector, LabeledExample};
@@ -23,7 +24,7 @@ use mailmate_common::ids::{AuditId, DraftId, FeedbackId, MessageId};
 use mailmate_common::mail::{DraftSpec, FetchScope, MailAction, MailEvent, MessageData};
 use mailmate_common::planning::ActionPlanningInput;
 use mailmate_common::policy::{PolicyCheckResult, PolicyContext, PolicyOutcome};
-use mailmate_common::proposal::{AgentProposal, ProposalTrigger};
+use mailmate_common::proposal::{AgentProposal, ProposalStatus, ProposalTrigger};
 use mailmate_common::protocol::Frame;
 use mailmate_common::secret::{Secret, SecretKey};
 use mailmate_common::stream::{EventStream, FrameStream};
@@ -35,6 +36,8 @@ use mailmate_ports::feature_extractor::FeatureExtractor;
 use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::policy_guard::PolicyGuard;
+use mailmate_ports::proposal_review::ProposalReview;
+use mailmate_ports::rule_curator::RuleCurator;
 use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::transport::Transport;
@@ -533,6 +536,107 @@ impl LearningEngine for FakeLearningEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FakeRuleCurator
+// ---------------------------------------------------------------------------
+
+/// A `RuleCurator` that records the requests it was given and returns a pre-seeded report —
+/// so a use-case test can prove the curation step was driven without wiring the real curator,
+/// provider, and repositories.
+#[derive(Debug, Default)]
+pub struct FakeRuleCurator {
+    report: CuratorReport,
+    seen: Mutex<Vec<CuratorRequest>>,
+}
+
+impl FakeRuleCurator {
+    /// A curator that records requests and returns an empty report.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A curator that returns `report` for every pass.
+    #[must_use]
+    pub fn returning(report: CuratorReport) -> Self {
+        Self {
+            report,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The requests it was given, in order.
+    #[must_use]
+    pub fn requests(&self) -> Vec<CuratorRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RuleCurator for FakeRuleCurator {
+    async fn curate(&self, request: CuratorRequest) -> Result<CuratorReport, CuratorError> {
+        self.seen.lock().unwrap().push(request);
+        Ok(self.report.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeProposalReview
+// ---------------------------------------------------------------------------
+
+/// A `ProposalReview` that records the decisions it was given and returns a synthesized
+/// outcome (accepting → `Accepted`, otherwise → `Rejected`; never creating a rule). It can be
+/// pre-seeded with a pending queue.
+#[derive(Debug, Default)]
+pub struct FakeProposalReview {
+    pending: Vec<AgentProposal>,
+    decisions: Mutex<Vec<ReviewDecision>>,
+}
+
+impl FakeProposalReview {
+    /// A review adapter with an empty pending queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-seed the proposals `pending` returns.
+    #[must_use]
+    pub fn with_pending(mut self, pending: Vec<AgentProposal>) -> Self {
+        self.pending = pending;
+        self
+    }
+
+    /// The decisions it was given, in order.
+    #[must_use]
+    pub fn decisions(&self) -> Vec<ReviewDecision> {
+        self.decisions.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProposalReview for FakeProposalReview {
+    async fn pending(&self) -> Result<Vec<AgentProposal>, ReviewError> {
+        Ok(self.pending.clone())
+    }
+
+    async fn review(&self, decision: ReviewDecision) -> Result<ReviewOutcome, ReviewError> {
+        let proposal_id = decision.proposal_id.clone();
+        let new_status = if decision.outcome.is_acceptance() {
+            ProposalStatus::Accepted
+        } else {
+            ProposalStatus::Rejected
+        };
+        self.decisions.lock().unwrap().push(decision);
+        Ok(ReviewOutcome {
+            proposal_id,
+            new_status,
+            created_rule_id: None,
+            feedback_id: FeedbackId::from("rpffb_fake"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,5 +850,32 @@ mod tests {
         assert!(block_on(engine.propose_candidates(ProposalTrigger::all()))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn fake_rule_curator_records_requests_and_returns_its_report() {
+        use mailmate_common::curator::{CuratorOperation, CuratorReport, CuratorRequest};
+        let curator = FakeRuleCurator::returning(CuratorReport::default());
+        let report =
+            block_on(curator.curate(CuratorRequest::just(CuratorOperation::Propose))).unwrap();
+        assert!(report.is_empty());
+        assert_eq!(curator.requests().len(), 1);
+    }
+
+    #[test]
+    fn fake_proposal_review_records_decisions_and_synthesizes_outcomes() {
+        use mailmate_common::curator::ReviewDecision;
+        use mailmate_common::ids::ProposalId;
+        let review = FakeProposalReview::new();
+        let outcome =
+            block_on(review.review(ReviewDecision::accept(ProposalId::from("prop_1")))).unwrap();
+        assert_eq!(outcome.new_status, ProposalStatus::Accepted);
+        assert!(outcome.created_rule_id.is_none());
+        let outcome =
+            block_on(review.review(ReviewDecision::reject(ProposalId::from("prop_2"), "no")))
+                .unwrap();
+        assert_eq!(outcome.new_status, ProposalStatus::Rejected);
+        assert_eq!(review.decisions().len(), 2);
+        assert!(block_on(review.pending()).unwrap().is_empty());
     }
 }

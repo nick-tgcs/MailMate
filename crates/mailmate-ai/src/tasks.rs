@@ -15,7 +15,8 @@ use mailmate_common::error::AiError;
 use mailmate_ports::ai_provider::AiProvider;
 
 use crate::schemas::{
-    ClassifyEmailResponse, DraftReplyResponse, ExtractTasksResponse, ThreadSummaryResponse,
+    ClassifyEmailResponse, CurateRulesResponse, DraftReplyResponse, ExtractTasksResponse,
+    ThreadSummaryResponse,
 };
 use crate::validate_and_parse;
 
@@ -28,6 +29,8 @@ pub const DRAFT_PROMPT_VERSION: &str = "draft-v1";
 pub const SUMMARIZE_PROMPT_VERSION: &str = "summarize-v1";
 /// Task-extraction prompt-template version.
 pub const EXTRACT_PROMPT_VERSION: &str = "extract-v1";
+/// Rule-curation prompt-template version.
+pub const CURATE_PROMPT_VERSION: &str = "curate-v1";
 
 /// The bounded, pre-redacted context for a `classify_email` task. The caller is responsible
 /// for honouring the egress posture (snippet caps, quoted-chain/signature stripping, local
@@ -67,6 +70,21 @@ pub struct SummarizeThreadInput {
 pub struct ExtractTasksInput {
     /// A bounded excerpt of the message to mine for tasks.
     pub excerpt: String,
+}
+
+/// The pre-assembled, redacted context for a `curate_rules` task. The caller (the curator
+/// adapter) gathers the current rules, the recent feedback pattern, and the open conflicts
+/// into these bounded summaries — the model never sees raw message bodies.
+#[derive(Clone, Debug, Default)]
+pub struct CurateRulesInput {
+    /// The operations to perform, as their stable labels (e.g. `propose`, `refine`).
+    pub operations: Vec<String>,
+    /// A summary of the current rule set the curator may refine/merge/split/retire.
+    pub rules_summary: String,
+    /// A summary of the recent user-feedback pattern that motivates changes.
+    pub feedback_summary: String,
+    /// A summary of the conflicts already detected between live rules.
+    pub conflicts_summary: String,
 }
 
 /// Classify an email into labels + safety scores + priority (the Tier-3 cascade escalation).
@@ -167,6 +185,50 @@ pub async fn extract_tasks(
     validate_and_parse(&response)
 }
 
+/// Curate the rule system: propose/refine/merge/split/retire rules and suggest thresholds
+/// from the supplied summaries. The result is **advisory** — every proposal enters the rule
+/// lifecycle as a reviewable candidate and the curator may never recommend an `active` rule
+/// (the response is validated to enforce that).
+///
+/// # Errors
+/// [`AiError`] on transport/enforcement failure, or [`AiError::Validation`] if the response
+/// does not match [`CurateRulesResponse`]'s schema or semantic checks (e.g. an `active`
+/// recommendation, or a `new_rule` with no draft).
+pub async fn curate_rules(
+    provider: &dyn AiProvider,
+    input: CurateRulesInput,
+) -> Result<CurateRulesResponse, AiError> {
+    let operations = if input.operations.is_empty() {
+        "propose, refine, merge, split, retire, suggest_thresholds, summarize_feedback".to_owned()
+    } else {
+        input.operations.join(", ")
+    };
+    let user = format!(
+        "Operations: {operations}\n\n\
+         Current rules:\n{}\n\n\
+         Recent feedback pattern:\n{}\n\n\
+         Known conflicts:\n{}",
+        input.rules_summary, input.feedback_summary, input.conflicts_summary
+    );
+    let messages = vec![
+        PromptMessage::system(
+            "You are MailMate's rule curator. You IMPROVE an explicit, deterministic rule \
+             system; you never take it over. Return ONLY JSON with: proposals (array), \
+             threshold_suggestions (array), feedback_summary (string, optional), and \
+             rationale (string). Each proposal has proposal_type (one of new_rule, \
+             refine_rule, merge_rules, split_rule, retire_rule), risk_level (low|medium|high|\
+             critical), title, rationale, recommended_status, and — for new_rule — a \
+             rule_draft whose condition is a deterministic JSON-AST predicate over known \
+             fields (never free text). You MUST NOT recommend an active rule: use \
+             shadow_mode, or pending_human_review for risky changes. Do not include any prose.",
+        ),
+        PromptMessage::user(user),
+    ];
+    let request = StructuredRequest::new(messages, curate_schema());
+    let response = provider.complete_structured(request).await?;
+    validate_and_parse(&response)
+}
+
 /// The JSON schema sent to schema-capable providers for `classify_email`.
 #[must_use]
 pub fn classify_schema() -> Value {
@@ -232,6 +294,65 @@ pub fn extract_schema() -> Value {
                     }
                 }
             }
+        }
+    })
+}
+
+/// The JSON schema for `curate_rules`. The `rule_draft` is left as a loose object — the
+/// recursive JSON-AST condition is enforced on our side by [`CurateRulesResponse`]'s
+/// `deny_unknown_fields` deserialization and its semantic [`validate`], not by the provider.
+///
+/// [`validate`]: crate::schemas::ValidatedResponse::validate
+#[must_use]
+pub fn curate_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposals", "rationale"],
+        "properties": {
+            "proposals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["proposal_type", "risk_level", "title", "rationale",
+                                 "recommended_status"],
+                    "properties": {
+                        "proposal_type": {
+                            "type": "string",
+                            "enum": ["new_rule", "refine_rule", "merge_rules", "split_rule",
+                                     "retire_rule"]
+                        },
+                        "risk_level": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "critical"]
+                        },
+                        "title": { "type": "string" },
+                        "rationale": { "type": "string" },
+                        "recommended_status": {
+                            "type": "string",
+                            "enum": ["draft", "pending_human_review", "shadow_mode"]
+                        },
+                        "rule_draft": { "type": "object" },
+                        "target_rule_kind": { "type": "string" },
+                        "target_rule_id": { "type": "string" }
+                    }
+                }
+            },
+            "threshold_suggestions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["rule_kind", "source_kind", "suggested", "rationale"],
+                    "properties": {
+                        "rule_kind": { "type": "string" },
+                        "source_kind": { "type": "string" },
+                        "suggested": { "type": "integer", "minimum": 1 },
+                        "rationale": { "type": "string" }
+                    }
+                }
+            },
+            "feedback_summary": { "type": "string" },
+            "rationale": { "type": "string" }
         }
     })
 }
@@ -382,12 +503,76 @@ mod tests {
     }
 
     #[test]
+    fn curate_rules_builds_a_schema_request_and_returns_validated_proposals() {
+        let provider = CapturingProvider::returning(json!({
+            "proposals": [{
+                "proposal_type": "new_rule",
+                "risk_level": "low",
+                "title": "File stripe.com to Receipts",
+                "rationale": "6 moves to Receipts.",
+                "recommended_status": "shadow_mode",
+                "rule_draft": {
+                    "kind": "action",
+                    "scope": "domain",
+                    "condition": { "field": "sender_domain", "op": "eq", "value": "stripe.com" },
+                    "effect": { "move": "Receipts" }
+                }
+            }],
+            "threshold_suggestions": [],
+            "rationale": "Clustered the stripe receipts."
+        }));
+        let result = block_on(curate_rules(
+            &provider,
+            CurateRulesInput {
+                operations: vec!["propose".to_owned()],
+                rules_summary: "(none)".to_owned(),
+                feedback_summary: "6 moves stripe.com -> Receipts".to_owned(),
+                conflicts_summary: "(none)".to_owned(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(result.proposals.len(), 1);
+        assert!(result.proposals[0].is_new_rule());
+
+        // The request carried the schema and the assembled context.
+        let request = provider.last_request.lock().unwrap().clone().unwrap();
+        assert!(request.json_schema.is_some(), "schema must be attached");
+        assert!(request.messages[1].content.contains("Operations: propose"));
+        assert!(request.messages[1]
+            .content
+            .contains("stripe.com -> Receipts"));
+    }
+
+    #[test]
+    fn curate_rules_rejects_a_curator_that_tries_to_activate() {
+        let provider = CapturingProvider::returning(json!({
+            "proposals": [{
+                "proposal_type": "new_rule",
+                "risk_level": "high",
+                "title": "auto-delete everything",
+                "rationale": "trust me",
+                "recommended_status": "active",
+                "rule_draft": {
+                    "kind": "action",
+                    "scope": "global",
+                    "condition": { "field": "sender_domain", "op": "eq", "value": "x.com" },
+                    "effect": { "move": "Trash" }
+                }
+            }],
+            "rationale": "x"
+        }));
+        let err = block_on(curate_rules(&provider, CurateRulesInput::default())).unwrap_err();
+        assert!(matches!(err, AiError::Validation(_)), "got {err:?}");
+    }
+
+    #[test]
     fn schemas_are_well_formed_objects_with_required_fields() {
         for (schema, required) in [
             (classify_schema(), "spam_score"),
             (draft_schema(), "body"),
             (summarize_schema(), "summary"),
             (extract_schema(), "tasks"),
+            (curate_schema(), "proposals"),
         ] {
             assert_eq!(schema["type"], "object");
             let required_list = schema["required"].as_array().unwrap();
@@ -399,5 +584,6 @@ mod tests {
         // Prompt-template versions are stable, non-empty ids.
         assert_eq!(CLASSIFY_PROMPT_VERSION, "classify-v1");
         assert!(!DRAFT_PROMPT_VERSION.is_empty());
+        assert_eq!(CURATE_PROMPT_VERSION, "curate-v1");
     }
 }

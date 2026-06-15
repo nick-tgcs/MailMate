@@ -27,6 +27,8 @@ pub mod event_type {
     pub const RULE_STATUS_CHANGED: &str = "rule_status_changed";
     /// A proposal was reviewed (accepted/rejected) by a human.
     pub const PROPOSAL_REVIEWED: &str = "proposal_reviewed";
+    /// The curator recorded a conflict between two live rules.
+    pub const RULE_CONFLICT_DETECTED: &str = "rule_conflict_detected";
 }
 
 /// One append-only audit entry.

@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::evidence::EvidenceSourceKind;
 use crate::features::FeatureVector;
-use crate::ids::{fresh_prefixed, FeedbackId, FolderId, MessageId, RuleId, RuleVersionId};
+use crate::ids::{
+    fresh_prefixed, FeedbackId, FolderId, MessageId, ProposalId, RuleId, RuleVersionId,
+};
 use crate::time::Timestamp;
 
 /// Whether the AI was right (`Positive`) or wrong (`Negative`) on this row. A correction
@@ -124,6 +126,88 @@ pub struct FilingFeedbackRow {
     /// Whether the suggestion matched the human choice.
     pub polarity: FeedbackPolarity,
     /// When captured.
+    pub created_at: Timestamp,
+}
+
+/// What a human decided about a curator/learning proposal — the disposition recorded in
+/// `rule_proposal_feedback` so the curator loop is itself learnable (a repeatedly-rejected
+/// proposal shape becomes evidence not to re-propose it).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalOutcome {
+    /// Accepted as-is.
+    Accepted,
+    /// Accepted after the human edited the draft.
+    AcceptedWithEdits,
+    /// Rejected outright.
+    Rejected,
+    /// Accepted earlier, then the derived rule was disabled.
+    DisabledLater,
+}
+
+impl ProposalOutcome {
+    /// The stable snake_case label stored in `rule_proposal_feedback.outcome`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::AcceptedWithEdits => "accepted_with_edits",
+            Self::Rejected => "rejected",
+            Self::DisabledLater => "disabled_later",
+        }
+    }
+
+    /// Parse a stored label, or `None` if unrecognized.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "accepted" => Some(Self::Accepted),
+            "accepted_with_edits" => Some(Self::AcceptedWithEdits),
+            "rejected" => Some(Self::Rejected),
+            "disabled_later" => Some(Self::DisabledLater),
+            _ => None,
+        }
+    }
+
+    /// Whether the outcome accepted the proposal (with or without edits).
+    #[must_use]
+    pub fn is_acceptance(self) -> bool {
+        matches!(self, Self::Accepted | Self::AcceptedWithEdits)
+    }
+
+    /// The polarity this outcome implies: an acceptance reinforces the proposer, a
+    /// rejection corrects it.
+    #[must_use]
+    pub fn polarity(self) -> FeedbackPolarity {
+        if self.is_acceptance() {
+            FeedbackPolarity::Positive
+        } else {
+            FeedbackPolarity::Negative
+        }
+    }
+}
+
+/// `rule_proposal_feedback` — the outcome of a human reviewing an agent proposal. Unlike
+/// the task-feedback tables this is **proposal-scoped, not message-scoped** (it links a
+/// `proposal_id`, has no `message_id`), so it is the single writer of "what the human did
+/// with this proposal" — distinct from the audit timeline's `proposal_reviewed` event.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RuleProposalFeedbackRow {
+    /// The row id (`rpffb_…`).
+    pub id: FeedbackId,
+    /// The proposal this decision concerns.
+    pub proposal_id: ProposalId,
+    /// Provenance pinned at review time.
+    pub pinned_versions: PinnedVersions,
+    /// What the human decided.
+    pub outcome: ProposalOutcome,
+    /// Why — a chip code, if given.
+    pub human_reason_code: Option<String>,
+    /// Freeform fallback reason.
+    pub human_reason_text: Option<String>,
+    /// Whether this reinforces (`Positive`) or corrects (`Negative`) the proposer.
+    pub polarity: FeedbackPolarity,
+    /// When reviewed.
     pub created_at: Timestamp,
 }
 
@@ -251,6 +335,35 @@ impl FilingFeedback {
     }
 }
 
+/// The rule-proposal-feedback kind. Lands with the agent curator (Phase 8); it plugs into
+/// the same `FeedbackRepository<F>` generic as the message-scoped tables.
+#[derive(Clone, Copy, Debug)]
+pub struct RuleProposalFeedback;
+
+/// Query over `rule_proposal_feedback`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct RuleProposalFeedbackQuery {
+    /// Restrict to one proposal.
+    pub proposal_id: Option<ProposalId>,
+    /// Cap the number of rows (newest first).
+    pub limit: Option<usize>,
+}
+
+impl TaskFeedbackKind for RuleProposalFeedback {
+    type Row = RuleProposalFeedbackRow;
+    type Query = RuleProposalFeedbackQuery;
+    const SOURCE_KIND: EvidenceSourceKind = EvidenceSourceKind::RuleProposal;
+    const ID_PREFIX: &'static str = "rpffb";
+}
+
+impl RuleProposalFeedback {
+    /// Mint a fresh, table-prefixed id (`rpffb_…`).
+    #[must_use]
+    pub fn fresh_id() -> FeedbackId {
+        FeedbackId::from(fresh_prefixed(Self::ID_PREFIX))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +404,41 @@ mod tests {
         );
         assert_eq!(FilingFeedback::SOURCE_KIND, EvidenceSourceKind::Filing);
         assert!(FilingFeedback::fresh_id().as_str().starts_with("filfb_"));
+        assert_eq!(RuleProposalFeedback::ID_PREFIX, "rpffb");
+        assert_eq!(
+            RuleProposalFeedback::SOURCE_KIND,
+            EvidenceSourceKind::RuleProposal
+        );
+        assert!(RuleProposalFeedback::fresh_id()
+            .as_str()
+            .starts_with("rpffb_"));
+    }
+
+    #[test]
+    fn proposal_outcome_labels_and_polarity_are_stable() {
+        for outcome in [
+            ProposalOutcome::Accepted,
+            ProposalOutcome::AcceptedWithEdits,
+            ProposalOutcome::Rejected,
+            ProposalOutcome::DisabledLater,
+        ] {
+            assert_eq!(
+                ProposalOutcome::from_db_str(outcome.as_str()),
+                Some(outcome)
+            );
+        }
+        assert_eq!(ProposalOutcome::from_db_str("nope"), None);
+        assert!(ProposalOutcome::Accepted.is_acceptance());
+        assert!(ProposalOutcome::AcceptedWithEdits.is_acceptance());
+        assert!(!ProposalOutcome::Rejected.is_acceptance());
+        assert_eq!(
+            ProposalOutcome::Accepted.polarity(),
+            FeedbackPolarity::Positive
+        );
+        assert_eq!(
+            ProposalOutcome::Rejected.polarity(),
+            FeedbackPolarity::Negative
+        );
     }
 
     #[test]

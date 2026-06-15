@@ -18,6 +18,10 @@ workspace = true
 mailmate-common = { path = "../mailmate-common" }
 mailmate-ports = { path = "../mailmate-ports" }
 mailmate-rules = { path = "../mailmate-rules" }
+# The curator adapter reuses the AI task layer (curate_rules + its validated response
+# schema). mailmate-ai is a sibling edge crate; the provider itself is injected as the
+# AiProvider PORT, so no provider-specific detail crosses into this crate.
+mailmate-ai = { path = "../mailmate-ai" }
 async-trait.workspace = true
 serde_json.workspace = true
 

@@ -22,8 +22,8 @@ struct Migration {
 }
 
 /// Every embedded migration, in ascending version order. Phase 2 ships the foundational
-/// schema; Phase 7 appends `0002` (rule versions) and `0003` (audit and feedback); a later
-/// phase appends `0004` (follow-ups).
+/// schema; Phase 7 appends `0002` (rule versions) and `0003` (audit and feedback); Phase 8
+/// appends `0004` (the curator's `rule_conflicts` + `rule_proposal_feedback`).
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -42,6 +42,12 @@ const MIGRATIONS: &[Migration] = &[
         name: "0003_audit_and_feedback",
         common: include_str!("../../../migrations/common/0003_audit_and_feedback.sql"),
         sqlite: include_str!("../../../migrations/sqlite/0003_audit_and_feedback.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "0004_curator",
+        common: include_str!("../../../migrations/common/0004_curator.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0004_curator.sql"),
     },
 ];
 
@@ -151,13 +157,17 @@ mod tests {
     fn fresh_database_applies_every_migration_then_is_idempotent() {
         let mut conn = fresh();
         let first = apply_all(&mut conn, Dialect::Sqlite).unwrap();
-        assert_eq!(first, vec![1, 2, 3], "fresh DB applies 0001..0003 in order");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            first,
+            vec![1, 2, 3, 4],
+            "fresh DB applies 0001..0004 in order"
+        );
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
 
         // Re-running is a no-op (covers the "migration from prior version" idempotency).
         let second = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert!(second.is_empty(), "re-run applies nothing");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
     }
 
     #[test]
@@ -177,10 +187,10 @@ mod tests {
         let applied = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert_eq!(
             applied,
-            vec![2, 3],
+            vec![2, 3, 4],
             "only the not-yet-applied migrations run"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
     }
 
     #[test]
@@ -203,6 +213,8 @@ mod tests {
             "rule_evidence",
             "shadow_outcomes",
             "agent_proposals",
+            "rule_conflicts",
+            "rule_proposal_feedback",
         ] {
             let count: i64 = conn
                 .query_row(

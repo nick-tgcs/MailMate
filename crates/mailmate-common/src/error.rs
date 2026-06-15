@@ -223,6 +223,73 @@ impl From<RuleEngineError> for LearningError {
     }
 }
 
+/// Failures from the `RuleCurator` port and the curator adapter above the AI provider and
+/// the rule/proposal stores.
+#[derive(Debug, thiserror::Error)]
+pub enum CuratorError {
+    /// The AI provider failed or returned a response that did not validate. Such a response
+    /// is audited and never drives a proposal.
+    #[error("curator provider error: {0}")]
+    Provider(String),
+    /// A storage-seam failure while reading rules/feedback or persisting proposals/conflicts.
+    #[error("curator storage error: {0}")]
+    Storage(String),
+    /// A rule-engine failure while detecting conflicts in a candidate or live rules.
+    #[error("curator rule-engine error: {0}")]
+    Rules(String),
+}
+
+impl From<AiError> for CuratorError {
+    fn from(value: AiError) -> Self {
+        Self::Provider(value.to_string())
+    }
+}
+
+impl From<StorageError> for CuratorError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(value.to_string())
+    }
+}
+
+impl From<RuleEngineError> for CuratorError {
+    fn from(value: RuleEngineError) -> Self {
+        Self::Rules(value.to_string())
+    }
+}
+
+impl From<LearningError> for CuratorError {
+    fn from(value: LearningError) -> Self {
+        match value {
+            LearningError::Rules(msg) => Self::Rules(msg),
+            other => Self::Storage(other.to_string()),
+        }
+    }
+}
+
+/// Failures from the `ProposalReview` port — applying a human's accept/reject decision to a
+/// proposal and (on acceptance) materializing its rule.
+#[derive(Debug, thiserror::Error)]
+pub enum ReviewError {
+    /// No proposal with that id.
+    #[error("proposal not found: {0}")]
+    NotFound(String),
+    /// The proposal was already reviewed (a terminal status) and cannot be re-decided.
+    #[error("proposal already reviewed: {0}")]
+    AlreadyReviewed(String),
+    /// An acceptance asked to create a rule, but the proposal carries no rule draft.
+    #[error("proposal has no rule draft to materialize: {0}")]
+    MissingDraft(String),
+    /// A storage-seam failure while reading the proposal or writing the rule/feedback.
+    #[error("review storage error: {0}")]
+    Storage(String),
+}
+
+impl From<StorageError> for ReviewError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(value.to_string())
+    }
+}
+
 /// Aggregate error for call sites that prefer one type over per-port enums.
 #[derive(Debug, thiserror::Error)]
 pub enum MailMateError {
@@ -259,6 +326,12 @@ pub enum MailMateError {
     /// A learning-engine failure.
     #[error(transparent)]
     Learning(#[from] LearningError),
+    /// An agent-curator failure.
+    #[error(transparent)]
+    Curator(#[from] CuratorError),
+    /// A proposal-review failure.
+    #[error(transparent)]
+    Review(#[from] ReviewError),
 }
 
 #[cfg(test)]
@@ -337,6 +410,38 @@ mod tests {
         assert!(matches!(
             aggregate,
             MailMateError::Learning(LearningError::Storage(_))
+        ));
+    }
+
+    #[test]
+    fn curator_error_folds_from_leaf_errors_and_into_the_aggregate() {
+        let from_provider: CuratorError = AiError::Unavailable("no model".to_owned()).into();
+        assert!(matches!(from_provider, CuratorError::Provider(_)));
+        let from_storage: CuratorError = StorageError::Backend("disk".to_owned()).into();
+        assert!(matches!(from_storage, CuratorError::Storage(_)));
+        let from_rules: CuratorError = RuleEngineError::InvalidCondition("bad".to_owned()).into();
+        assert!(matches!(from_rules, CuratorError::Rules(_)));
+        let aggregate: MailMateError = CuratorError::Provider("x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Curator(CuratorError::Provider(_))
+        ));
+    }
+
+    #[test]
+    fn review_error_folds_and_reports_its_cases() {
+        let not_found = ReviewError::NotFound("prop_404".to_owned());
+        assert!(not_found.to_string().contains("prop_404"));
+        let already = ReviewError::AlreadyReviewed("prop_1".to_owned());
+        assert!(already.to_string().contains("already reviewed"));
+        let missing = ReviewError::MissingDraft("prop_2".to_owned());
+        assert!(missing.to_string().contains("no rule draft"));
+        let from_storage: ReviewError = StorageError::Constraint("fk".to_owned()).into();
+        assert!(matches!(from_storage, ReviewError::Storage(_)));
+        let aggregate: MailMateError = ReviewError::NotFound("prop_x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Review(ReviewError::NotFound(_))
         ));
     }
 }

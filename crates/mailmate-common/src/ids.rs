@@ -136,6 +136,11 @@ id_newtype!(
     #[doc = "Shadow-outcome row id (`shad_…`)."]
     ShadowOutcomeId
 );
+id_newtype!(
+    "conf",
+    #[doc = "Recorded rule-conflict id (`conf_…`)."]
+    ConflictId
+);
 
 /// Mint a fresh `<prefix>_<uuid-simple>` string with an explicit prefix.
 ///
@@ -203,6 +208,12 @@ mod tests {
         assert!(EvidenceId::fresh().as_str().starts_with("evid_"));
         assert_eq!(ShadowOutcomeId::PREFIX, "shad");
         assert!(ShadowOutcomeId::fresh().as_str().starts_with("shad_"));
+    }
+
+    #[test]
+    fn phase8_id_kinds_carry_their_prefixes() {
+        assert_eq!(ConflictId::PREFIX, "conf");
+        assert!(ConflictId::fresh().as_str().starts_with("conf_"));
     }
 
     #[test]
