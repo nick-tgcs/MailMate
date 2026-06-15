@@ -5,10 +5,13 @@
 //! until the peer hangs up. [`emit`] enforces the oversize-frame guard (a too-large
 //! response becomes a small structured error, never a partial write).
 //!
-//! Phase 1 implements only the `ping` request type — the skeleton that proves the
-//! channel. Later phases add `classify_message`, `record_user_action`, etc.; each new
-//! type is a new arm in [`dispatch_request`], so the envelope handling, version
-//! checking, and error formatting tested here are shared by all of them.
+//! This module serves only the Phase-1 `ping` request plus the protocol-level errors
+//! (version / kind / unknown-type); its `ok_response` / `error_response` / `emit` helpers are
+//! the shared frame builders. The Phase-10 request types (`classify_message`, `new_mail`,
+//! `draft_reply`, `record_user_action`) are NOT new arms here — they are routed by
+//! [`crate::router::HostRouter`], which drives the core use-cases. The shipped binary still runs
+//! this ping-only [`run_loop`] until the production composition root (real engines / provider /
+//! storage injected into a `Ports`) is wired in Phase 12; see `main.rs`.
 
 use std::io::{Read, Write};
 

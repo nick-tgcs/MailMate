@@ -29,8 +29,8 @@ use mailmate_ports::ai_provider::SupportsAdapters;
 use mailmate_ports::policy_guard::PolicyGuard;
 use mailmate_test_support::fakes::{
     FakeActionPlanner, FakeAdapterProvider, FakeClassificationEngine, FakeClock,
-    FakeLearningEngine, FakeMailClient, FakePolicyGuard, FakeProposalReview, FakeRuleCurator,
-    FakeSecretStore, FakeTier2Classifier, FakeTrainingPipeline, FakeTransport,
+    FakeLearningEngine, FakeMailClient, FakePolicyGuard, FakeProposalReview, FakeReplyDrafter,
+    FakeRuleCurator, FakeSecretStore, FakeTier2Classifier, FakeTrainingPipeline, FakeTransport,
     StubFeatureExtractor,
 };
 
@@ -229,6 +229,7 @@ fn full_ports() -> Ports {
         learning_engine: Arc::new(FakeLearningEngine::new()),
         rule_curator: Arc::new(FakeRuleCurator::new()),
         proposal_review: Arc::new(FakeProposalReview::new()),
+        reply_drafter: Arc::new(FakeReplyDrafter::new()),
         training_pipeline: Arc::new(FakeTrainingPipeline::new()),
     }
 }

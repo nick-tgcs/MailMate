@@ -423,7 +423,12 @@ dependencies = [
 name = "mailmate-native-host"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "mailmate-common",
+ "mailmate-core",
+ "mailmate-ports",
+ "mailmate-test-support",
  "serde",
  "serde_json",
 ]

@@ -16,6 +16,7 @@ use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::policy_guard::PolicyGuard;
 use mailmate_ports::proposal_review::ProposalReview;
+use mailmate_ports::reply_drafter::ReplyDrafter;
 use mailmate_ports::rule_curator::RuleCurator;
 use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
@@ -25,8 +26,8 @@ use mailmate_ports::transport::Transport;
 pub mod usecases;
 
 pub use usecases::{
-    CorrectionContext, CorrectionService, CurationService, PlanningOutcome, PlanningService,
-    ReviewService, TrainingService,
+    CorrectionContext, CorrectionService, CurationService, DraftService, PlanningOutcome,
+    PlanningService, ReviewService, TrainingService,
 };
 
 /// The set of adapters the core's use-cases run against — the dependency-injection
@@ -65,6 +66,8 @@ pub struct Ports {
     pub rule_curator: Arc<dyn RuleCurator>,
     /// The proposal-review step: applies a human's accept/reject decision to a proposal.
     pub proposal_review: Arc<dyn ProposalReview>,
+    /// The reply drafter: generates advisory, review-required reply drafts (never sends).
+    pub reply_drafter: Arc<dyn ReplyDrafter>,
     /// The on-device training pipeline: derives datasets, trains and evaluates a candidate
     /// adapter, and gates its promotion (an adapter is advisory, never activated here).
     pub training_pipeline: Arc<dyn TrainingPipeline>,

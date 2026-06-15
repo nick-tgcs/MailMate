@@ -15,8 +15,8 @@ use mailmate_common::time::Timestamp;
 use mailmate_core::{CurationService, Ports, ReviewService};
 use mailmate_test_support::fakes::{
     FakeActionPlanner, FakeClassificationEngine, FakeClock, FakeLearningEngine, FakeMailClient,
-    FakePolicyGuard, FakeProposalReview, FakeRuleCurator, FakeSecretStore, FakeTier2Classifier,
-    FakeTrainingPipeline, FakeTransport, StubFeatureExtractor,
+    FakePolicyGuard, FakeProposalReview, FakeReplyDrafter, FakeRuleCurator, FakeSecretStore,
+    FakeTier2Classifier, FakeTrainingPipeline, FakeTransport, StubFeatureExtractor,
 };
 
 fn a_proposal(id: &str) -> AgentProposal {
@@ -116,6 +116,7 @@ fn services_assemble_from_the_ports_bundle() {
         learning_engine: Arc::new(FakeLearningEngine::new()),
         rule_curator: Arc::new(FakeRuleCurator::new()),
         proposal_review: Arc::new(FakeProposalReview::new()),
+        reply_drafter: Arc::new(FakeReplyDrafter::new()),
         training_pipeline: Arc::new(FakeTrainingPipeline::new()),
     };
 

@@ -16,12 +16,12 @@ use mailmate_common::adapter::{
 use mailmate_common::ai::{
     ProviderCapabilities, ProviderId, StructuredRequest, StructuredResponse,
 };
-use mailmate_common::audit::AuditEntry;
+use mailmate_common::audit::{AuditEntry, AuditQuery};
 use mailmate_common::classification::{Classification, ClassificationInput};
 use mailmate_common::curator::{CuratorReport, CuratorRequest, ReviewDecision, ReviewOutcome};
 use mailmate_common::error::{
     ActionPlanningError, AiError, ClassificationError, CuratorError, LearningError, MailError,
-    MlError, PolicyError, ReviewError, SecretError, TrainingError,
+    MlError, PolicyError, ReviewError, SecretError, StorageError, TrainingError,
 };
 use mailmate_common::evidence::{EvidenceQuery, RuleEvidence};
 use mailmate_common::features::{CalibratedScores, FeatureValue, FeatureVector, LabeledExample};
@@ -32,6 +32,7 @@ use mailmate_common::planning::ActionPlanningInput;
 use mailmate_common::policy::{PolicyCheckResult, PolicyContext, PolicyOutcome};
 use mailmate_common::proposal::{AgentProposal, ProposalStatus, ProposalTrigger};
 use mailmate_common::protocol::Frame;
+use mailmate_common::reply::{DraftedReply, ReplyDraftRequest};
 use mailmate_common::secret::{Secret, SecretKey};
 use mailmate_common::stream::{EventStream, FrameStream};
 use mailmate_common::time::Timestamp;
@@ -44,8 +45,10 @@ use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::policy_guard::PolicyGuard;
 use mailmate_ports::proposal_review::ProposalReview;
+use mailmate_ports::reply_drafter::ReplyDrafter;
 use mailmate_ports::rule_curator::RuleCurator;
 use mailmate_ports::secret_store::SecretStore;
+use mailmate_ports::storage::AuditRepository;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::training_pipeline::TrainingPipeline;
 use mailmate_ports::transport::Transport;
@@ -777,12 +780,165 @@ impl SupportsAdapters for FakeAdapterProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FakeReplyDrafter
+// ---------------------------------------------------------------------------
+
+/// A `ReplyDrafter` that returns a fixed [`DraftedReply`] and records every request, so a
+/// use-case test can drive the draft flow without a real provider. With no seeded reply it
+/// returns a benign provider-unavailable error.
+#[derive(Debug, Default)]
+pub struct FakeReplyDrafter {
+    reply: Option<DraftedReply>,
+    seen: Mutex<Vec<ReplyDraftRequest>>,
+}
+
+impl FakeReplyDrafter {
+    /// A drafter that errors (no provider) and records requests.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A drafter that returns `reply` for every request.
+    #[must_use]
+    pub fn returning(reply: DraftedReply) -> Self {
+        Self {
+            reply: Some(reply),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The requests it was given, in order.
+    #[must_use]
+    pub fn requests(&self) -> Vec<ReplyDraftRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ReplyDrafter for FakeReplyDrafter {
+    async fn draft(&self, request: ReplyDraftRequest) -> Result<DraftedReply, AiError> {
+        self.seen.lock().unwrap().push(request);
+        match &self.reply {
+            Some(reply) => Ok(reply.clone()),
+            None => Err(AiError::Unavailable(
+                "fake: no drafter configured".to_owned(),
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeAuditRepository
+// ---------------------------------------------------------------------------
+
+/// An in-memory append-only [`AuditRepository`]: records entries and answers `query` with a
+/// newest-first filtered view, so a host/use-case test can assert what provenance was written.
+#[derive(Debug, Default)]
+pub struct FakeAuditRepository {
+    entries: Mutex<Vec<AuditEntry>>,
+}
+
+impl FakeAuditRepository {
+    /// A fresh, empty audit log.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The entries appended so far, in insertion order.
+    #[must_use]
+    pub fn entries(&self) -> Vec<AuditEntry> {
+        self.entries.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AuditRepository for FakeAuditRepository {
+    async fn append(&self, entry: AuditEntry) -> Result<AuditId, StorageError> {
+        let id = entry.id.clone();
+        self.entries.lock().unwrap().push(entry);
+        Ok(id)
+    }
+
+    async fn query(&self, query: AuditQuery) -> Result<Vec<AuditEntry>, StorageError> {
+        let mut matched: Vec<AuditEntry> = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                query.event_type.as_ref().is_none_or(|t| &e.event_type == t)
+                    && query
+                        .message_id
+                        .as_ref()
+                        .is_none_or(|m| e.message_id.as_ref() == Some(m))
+            })
+            .cloned()
+            .collect();
+        matched.reverse(); // newest first
+        if let Some(limit) = query.limit {
+            matched.truncate(limit);
+        }
+        Ok(matched)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixtures::sample_message;
     use futures::executor::block_on;
     use mailmate_common::protocol::{Frame, ProtocolVersion};
+
+    #[test]
+    fn fake_reply_drafter_returns_seeded_reply_and_records_requests() {
+        let drafter = FakeReplyDrafter::returning(DraftedReply::new("Re: Q", "Body"));
+        let out = block_on(drafter.draft(ReplyDraftRequest::new("Q", "c@x.test", "e"))).unwrap();
+        assert_eq!(out.subject, "Re: Q");
+        assert_eq!(drafter.requests().len(), 1);
+        // Unconfigured drafter errors rather than fabricating a reply.
+        let err =
+            block_on(FakeReplyDrafter::new().draft(ReplyDraftRequest::default())).unwrap_err();
+        assert!(matches!(err, AiError::Unavailable(_)));
+    }
+
+    #[test]
+    fn fake_audit_repository_appends_and_queries_newest_first() {
+        let audit = FakeAuditRepository::new();
+        let m = MessageId::from("msg_1");
+        block_on(
+            audit.append(
+                AuditEntry::new("action_applied", mailmate_common::actor::Actor::System)
+                    .with_message(m.clone()),
+            ),
+        )
+        .unwrap();
+        block_on(audit.append(AuditEntry::new(
+            "other_event",
+            mailmate_common::actor::Actor::User,
+        )))
+        .unwrap();
+        assert_eq!(audit.entries().len(), 2);
+
+        let only_applied = block_on(audit.query(AuditQuery {
+            event_type: Some("action_applied".to_owned()),
+            ..AuditQuery::default()
+        }))
+        .unwrap();
+        assert_eq!(only_applied.len(), 1);
+        assert_eq!(only_applied[0].message_id, Some(m));
+
+        let capped = block_on(audit.query(AuditQuery {
+            limit: Some(1),
+            ..AuditQuery::default()
+        }))
+        .unwrap();
+        // Newest first: the second (other_event) entry comes back.
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].event_type, "other_event");
+    }
 
     #[test]
     fn fake_mail_client_records_actions_and_drafts_and_never_sends() {

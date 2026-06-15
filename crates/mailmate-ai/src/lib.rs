@@ -8,6 +8,7 @@
 //! the edge. `mailmate-core` depends only on the `AiProvider` port, never on this crate, so
 //! no provider-specific detail can leak inward.
 
+pub mod drafter;
 pub mod http;
 pub mod providers;
 pub mod registry;
@@ -15,6 +16,7 @@ pub mod schemas;
 pub mod tasks;
 pub mod validation;
 
+pub use drafter::TaskReplyDrafter;
 pub use registry::ProviderRegistry;
 pub use validation::validate_and_parse;
 

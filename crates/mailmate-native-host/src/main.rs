@@ -28,6 +28,14 @@ fn main() -> ExitCode {
 }
 
 /// Run the native-messaging loop until Thunderbird closes the channel.
+///
+/// This currently drives the Phase-1 ping/protocol loop ([`run_loop`]). The Phase-10
+/// [`HostRouter`](mailmate_native_host::router::HostRouter) — which routes `classify_message`,
+/// `new_mail`, `draft_reply`, and `record_user_action` into the core use-cases — is not mounted
+/// here yet: doing so requires the production composition root (the real classification cascade,
+/// AI provider, and storage injected into a `Ports`), which is deferred to Phase 12 hardening.
+/// Until then the shipped binary answers `unknown_request_type` to the Phase-10 request types;
+/// the router and its handlers are exercised by `tests/host_router.rs` against the fakes.
 fn serve() -> ExitCode {
     let writer = FrameWriter::new(stdout().lock());
     let mut reader = stdin().lock();

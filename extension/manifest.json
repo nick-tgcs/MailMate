@@ -2,15 +2,31 @@
   "manifest_version": 3,
   "name": "MailMate",
   "version": "0.1.0",
-  "description": "MailMate — local-first learning mail assistant. Phase 1: native host ping skeleton.",
+  "description": "MailMate — local-first learning mail assistant. Phase 10: read/classify/draft/apply over the native host.",
   "browser_specific_settings": {
     "gecko": {
       "id": "mailmate@example.com",
       "strict_min_version": "140.0"
     }
   },
-  "permissions": ["nativeMessaging"],
+  "permissions": [
+    "nativeMessaging",
+    "menus",
+    "messagesRead",
+    "messagesMove",
+    "messagesUpdate",
+    "messagesModify",
+    "accountsRead",
+    "compose",
+    "compose.save"
+  ],
   "background": {
-    "scripts": ["native.js", "background.js"]
+    "scripts": [
+      "native.js",
+      "message_reader.js",
+      "drafts.js",
+      "context_menu.js",
+      "background.js"
+    ]
   }
 }
