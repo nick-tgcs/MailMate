@@ -169,6 +169,8 @@ impl AiRuleCurator {
             rule_draft: dto.rule_draft,
             target_rule_kind: dto.target_rule_kind,
             target_rule_id: dto.target_rule_id,
+            workflow_draft: None,
+            target_workflow_id: None,
             evidence_refs: Vec::new(),
             source_provider: self.source_label.clone(),
             created_at: Timestamp::now(),
@@ -260,15 +262,22 @@ fn clamp_status(risk: RiskLevel, recommended: RuleStatus) -> RuleStatus {
     }
 }
 
-/// Which curator operation a proposal kind belongs to (so a focused request keeps only the
-/// proposal kinds it asked for).
-fn operation_for(kind: ProposalKind) -> CuratorOperation {
+/// Which curator operation a *rule* proposal kind belongs to (so a focused request keeps
+/// only the proposal kinds it asked for). The workflow proposal kinds are not AI
+/// rule-curation operations — they come from the deterministic `workflow_proposal` builder,
+/// not this provider pass — so they map to `None` and an AI DTO claiming one is dropped.
+fn operation_for(kind: ProposalKind) -> Option<CuratorOperation> {
     match kind {
-        ProposalKind::NewRule => CuratorOperation::Propose,
-        ProposalKind::RefineRule => CuratorOperation::Refine,
-        ProposalKind::MergeRules => CuratorOperation::Merge,
-        ProposalKind::SplitRule => CuratorOperation::Split,
-        ProposalKind::RetireRule => CuratorOperation::DetectStale,
+        ProposalKind::NewRule => Some(CuratorOperation::Propose),
+        ProposalKind::RefineRule => Some(CuratorOperation::Refine),
+        ProposalKind::MergeRules => Some(CuratorOperation::Merge),
+        ProposalKind::SplitRule => Some(CuratorOperation::Split),
+        ProposalKind::RetireRule => Some(CuratorOperation::DetectStale),
+        ProposalKind::NewWorkflow
+        | ProposalKind::RefineWorkflowCadence
+        | ProposalKind::RefineWorkflowStopCondition
+        | ProposalKind::SuggestEnrollment
+        | ProposalKind::RetireWorkflow => None,
     }
 }
 
@@ -359,7 +368,7 @@ impl RuleCurator for AiRuleCurator {
             };
 
             for dto in response.proposals {
-                if request.wants(operation_for(dto.proposal_type)) {
+                if operation_for(dto.proposal_type).is_some_and(|op| request.wants(op)) {
                     report.proposals.push(self.persist_proposal(dto).await?);
                 }
             }

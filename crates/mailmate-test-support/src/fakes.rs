@@ -25,17 +25,29 @@ use mailmate_common::error::{
 };
 use mailmate_common::evidence::{EvidenceQuery, RuleEvidence};
 use mailmate_common::features::{CalibratedScores, FeatureValue, FeatureVector, LabeledExample};
-use mailmate_common::feedback::TaskFeedback;
-use mailmate_common::ids::{AdapterId, AuditId, DraftId, FeedbackId, MessageId};
+use mailmate_common::feedback::{
+    FollowUpFeedback, FollowUpFeedbackQuery, FollowUpFeedbackRow, TaskFeedback,
+};
+use mailmate_common::ids::{
+    AdapterId, AuditId, DraftId, FeedbackId, MessageId, PipelineItemId, WorkflowConflictId,
+    WorkflowDefId, WorkflowDefVersionId, WorkflowInstanceId, WorkflowShadowOutcomeId,
+};
 use mailmate_common::mail::{DraftSpec, FetchScope, MailAction, MailEvent, MessageData};
+use mailmate_common::pipeline::{NewPipelineItem, PipelineItem, PipelineItemQuery, PipelineStage};
 use mailmate_common::planning::ActionPlanningInput;
 use mailmate_common::policy::{PolicyCheckResult, PolicyContext, PolicyOutcome};
 use mailmate_common::proposal::{AgentProposal, ProposalStatus, ProposalTrigger};
 use mailmate_common::protocol::Frame;
 use mailmate_common::reply::{DraftedReply, ReplyDraftRequest};
+use mailmate_common::rules::rule::RuleStatus;
 use mailmate_common::secret::{Secret, SecretKey};
 use mailmate_common::stream::{EventStream, FrameStream};
 use mailmate_common::time::Timestamp;
+use mailmate_common::workflow::{
+    NewWorkflowDefVersion, NewWorkflowDefinition, NewWorkflowInstance, WorkflowConflict,
+    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowInstance, WorkflowInstanceStatus,
+    WorkflowShadowOutcome,
+};
 use mailmate_ports::action_planner::ActionPlanner;
 use mailmate_ports::ai_provider::{AiProvider, SupportsAdapters};
 use mailmate_ports::classification_engine::ClassificationEngine;
@@ -48,6 +60,12 @@ use mailmate_ports::proposal_review::ProposalReview;
 use mailmate_ports::reply_drafter::ReplyDrafter;
 use mailmate_ports::rule_curator::RuleCurator;
 use mailmate_ports::secret_store::SecretStore;
+use mailmate_ports::storage::feedback::FeedbackRepository;
+use mailmate_ports::storage::pipeline_items::PipelineItemRepository;
+use mailmate_ports::storage::workflows::{
+    WorkflowConflictRepository, WorkflowInstanceRepository, WorkflowRepository,
+    WorkflowShadowOutcomeRepository,
+};
 use mailmate_ports::storage::AuditRepository;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::training_pipeline::TrainingPipeline;
@@ -882,6 +900,541 @@ impl AuditRepository for FakeAuditRepository {
             matched.truncate(limit);
         }
         Ok(matched)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakePipelineItemRepository
+// ---------------------------------------------------------------------------
+
+/// An in-memory [`PipelineItemRepository`]: enrolls items (stage `open`, `created_by`
+/// `user`), reads them by id/thread, and updates their stage.
+#[derive(Debug, Default)]
+pub struct FakePipelineItemRepository {
+    items: Mutex<Vec<PipelineItem>>,
+}
+
+impl FakePipelineItemRepository {
+    /// A fresh, empty repository.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every item currently stored.
+    #[must_use]
+    pub fn all(&self) -> Vec<PipelineItem> {
+        self.items.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl PipelineItemRepository for FakePipelineItemRepository {
+    async fn insert(&self, item: NewPipelineItem) -> Result<PipelineItemId, StorageError> {
+        let id = PipelineItemId::fresh();
+        let now = Timestamp::now();
+        self.items.lock().unwrap().push(PipelineItem {
+            id: id.clone(),
+            account_id: item.account_id,
+            thread_id: item.thread_id,
+            anchor_message_id: item.anchor_message_id,
+            counterparty_email: item.counterparty_email,
+            counterparty_domain: item.counterparty_domain,
+            title: item.title,
+            item_type: item.item_type,
+            stage: PipelineStage::Open,
+            amount_hint: item.amount_hint,
+            last_activity_at: now,
+            created_by: mailmate_common::actor::Actor::User,
+            created_at: now,
+            updated_at: now,
+        });
+        Ok(id)
+    }
+
+    async fn get(&self, id: &PipelineItemId) -> Result<Option<PipelineItem>, StorageError> {
+        Ok(self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| &i.id == id)
+            .cloned())
+    }
+
+    async fn get_by_thread(
+        &self,
+        thread_id: &mailmate_common::ids::ThreadId,
+    ) -> Result<Vec<PipelineItem>, StorageError> {
+        Ok(self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| &i.thread_id == thread_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn update_stage(
+        &self,
+        id: &PipelineItemId,
+        stage: PipelineStage,
+    ) -> Result<(), StorageError> {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|i| &i.id == id) {
+            item.stage = stage;
+            item.updated_at = Timestamp::now();
+            item.last_activity_at = item.updated_at;
+        }
+        Ok(())
+    }
+
+    async fn query(&self, query: PipelineItemQuery) -> Result<Vec<PipelineItem>, StorageError> {
+        let mut out: Vec<PipelineItem> = self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| {
+                query.account_id.as_ref().is_none_or(|a| &i.account_id == a)
+                    && query.stage.is_none_or(|s| i.stage == s)
+            })
+            .cloned()
+            .collect();
+        out.reverse();
+        if let Some(limit) = query.limit {
+            out.truncate(limit);
+        }
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeWorkflowRepository
+// ---------------------------------------------------------------------------
+
+/// An in-memory [`WorkflowRepository`]: definitions + immutable versions, mirroring the
+/// real adapter's insert-draft / append-version / repoint mechanics.
+#[derive(Debug, Default)]
+pub struct FakeWorkflowRepository {
+    definitions: Mutex<Vec<WorkflowDefinition>>,
+    versions: Mutex<Vec<WorkflowDefinitionVersion>>,
+}
+
+impl FakeWorkflowRepository {
+    /// A fresh, empty repository.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl WorkflowRepository for FakeWorkflowRepository {
+    async fn save_definition_draft(
+        &self,
+        draft: NewWorkflowDefinition,
+    ) -> Result<WorkflowDefId, StorageError> {
+        let workflow_id = WorkflowDefId::fresh();
+        let version_id = WorkflowDefVersionId::fresh();
+        let now = Timestamp::now();
+        self.versions
+            .lock()
+            .unwrap()
+            .push(WorkflowDefinitionVersion {
+                id: version_id.clone(),
+                workflow_id: workflow_id.clone(),
+                version_number: 1,
+                content: draft.initial_version,
+                created_at: now,
+            });
+        self.definitions.lock().unwrap().push(WorkflowDefinition {
+            id: workflow_id.clone(),
+            stable_name: draft.stable_name,
+            scope: draft.scope,
+            applies_to_item_type: draft.applies_to_item_type,
+            status: RuleStatus::Draft,
+            current_version_id: version_id,
+            created_by: draft.created_by,
+            created_at: now,
+            updated_at: now,
+        });
+        Ok(workflow_id)
+    }
+
+    async fn create_version(
+        &self,
+        version: NewWorkflowDefVersion,
+    ) -> Result<WorkflowDefVersionId, StorageError> {
+        let version_id = WorkflowDefVersionId::fresh();
+        let next = self
+            .versions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v.workflow_id == version.workflow_id)
+            .map(|v| v.version_number)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.versions
+            .lock()
+            .unwrap()
+            .push(WorkflowDefinitionVersion {
+                id: version_id.clone(),
+                workflow_id: version.workflow_id.clone(),
+                version_number: next,
+                content: version.content,
+                created_at: Timestamp::now(),
+            });
+        if let Some(def) = self
+            .definitions
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|d| d.id == version.workflow_id)
+        {
+            def.current_version_id = version_id.clone();
+            def.updated_at = Timestamp::now();
+        }
+        Ok(version_id)
+    }
+
+    async fn update_status(
+        &self,
+        id: &WorkflowDefId,
+        status: RuleStatus,
+    ) -> Result<(), StorageError> {
+        if let Some(def) = self
+            .definitions
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|d| &d.id == id)
+        {
+            def.status = status;
+            def.updated_at = Timestamp::now();
+        }
+        Ok(())
+    }
+
+    async fn get_definition(
+        &self,
+        id: &WorkflowDefId,
+    ) -> Result<Option<WorkflowDefinition>, StorageError> {
+        Ok(self
+            .definitions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| &d.id == id)
+            .cloned())
+    }
+
+    async fn get_version(
+        &self,
+        id: &WorkflowDefVersionId,
+    ) -> Result<Option<WorkflowDefinitionVersion>, StorageError> {
+        Ok(self
+            .versions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|v| &v.id == id)
+            .cloned())
+    }
+
+    async fn list_by_status(
+        &self,
+        status: RuleStatus,
+    ) -> Result<Vec<WorkflowDefinition>, StorageError> {
+        Ok(self
+            .definitions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.status == status)
+            .cloned()
+            .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeWorkflowInstanceRepository
+// ---------------------------------------------------------------------------
+
+/// An in-memory [`WorkflowInstanceRepository`]: the mutable-state instances and the
+/// due-drain query.
+#[derive(Debug, Default)]
+pub struct FakeWorkflowInstanceRepository {
+    instances: Mutex<Vec<WorkflowInstance>>,
+}
+
+impl FakeWorkflowInstanceRepository {
+    /// A fresh, empty repository.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every instance currently stored.
+    #[must_use]
+    pub fn all(&self) -> Vec<WorkflowInstance> {
+        self.instances.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl WorkflowInstanceRepository for FakeWorkflowInstanceRepository {
+    async fn arm(&self, instance: NewWorkflowInstance) -> Result<WorkflowInstanceId, StorageError> {
+        let id = WorkflowInstanceId::fresh();
+        let now = Timestamp::now();
+        self.instances.lock().unwrap().push(WorkflowInstance {
+            id: id.clone(),
+            pipeline_item_id: instance.pipeline_item_id,
+            workflow_id: instance.workflow_id,
+            pinned_def_version_id: instance.pinned_def_version_id,
+            thread_id: instance.thread_id,
+            anchor_at: instance.anchor_at,
+            status: instance.status,
+            current_step_index: instance.current_step_index,
+            next_due_at: instance.next_due_at,
+            created_at: now,
+            updated_at: now,
+        });
+        Ok(id)
+    }
+
+    async fn get(&self, id: &WorkflowInstanceId) -> Result<Option<WorkflowInstance>, StorageError> {
+        Ok(self
+            .instances
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| &i.id == id)
+            .cloned())
+    }
+
+    async fn list_due(&self, now: Timestamp) -> Result<Vec<WorkflowInstance>, StorageError> {
+        let mut out: Vec<WorkflowInstance> = self
+            .instances
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.status.is_selectable() && i.next_due_at.is_some_and(|d| d <= now))
+            .cloned()
+            .collect();
+        out.sort_by_key(|i| i.next_due_at);
+        Ok(out)
+    }
+
+    async fn list_active_by_thread(
+        &self,
+        thread_id: &mailmate_common::ids::ThreadId,
+    ) -> Result<Vec<WorkflowInstance>, StorageError> {
+        Ok(self
+            .instances
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| &i.thread_id == thread_id && !i.status.is_terminal())
+            .cloned()
+            .collect())
+    }
+
+    async fn list_by_pipeline_item(
+        &self,
+        pipeline_item_id: &PipelineItemId,
+    ) -> Result<Vec<WorkflowInstance>, StorageError> {
+        Ok(self
+            .instances
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| &i.pipeline_item_id == pipeline_item_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn update_state(
+        &self,
+        id: &WorkflowInstanceId,
+        status: WorkflowInstanceStatus,
+        current_step_index: i64,
+        next_due_at: Option<Timestamp>,
+    ) -> Result<(), StorageError> {
+        if let Some(inst) = self
+            .instances
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|i| &i.id == id)
+        {
+            inst.status = status;
+            inst.current_step_index = current_step_index;
+            inst.next_due_at = next_due_at;
+            inst.updated_at = Timestamp::now();
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeFollowUpFeedbackRepository
+// ---------------------------------------------------------------------------
+
+/// An in-memory [`FeedbackRepository`] for the `followup_feedback` kind.
+#[derive(Debug, Default)]
+pub struct FakeFollowUpFeedbackRepository {
+    rows: Mutex<Vec<FollowUpFeedbackRow>>,
+}
+
+impl FakeFollowUpFeedbackRepository {
+    /// A fresh, empty repository.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every feedback row appended so far, in insertion order.
+    #[must_use]
+    pub fn rows(&self) -> Vec<FollowUpFeedbackRow> {
+        self.rows.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl FeedbackRepository<FollowUpFeedback> for FakeFollowUpFeedbackRepository {
+    async fn append(&self, row: FollowUpFeedbackRow) -> Result<FeedbackId, StorageError> {
+        let id = row.id.clone();
+        self.rows.lock().unwrap().push(row);
+        Ok(id)
+    }
+
+    async fn query(
+        &self,
+        query: FollowUpFeedbackQuery,
+    ) -> Result<Vec<FollowUpFeedbackRow>, StorageError> {
+        let mut out: Vec<FollowUpFeedbackRow> = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                query
+                    .workflow_instance_id
+                    .as_ref()
+                    .is_none_or(|w| &r.workflow_instance_id == w)
+                    && query
+                        .pipeline_item_id
+                        .as_ref()
+                        .is_none_or(|p| &r.pipeline_item_id == p)
+            })
+            .cloned()
+            .collect();
+        out.reverse();
+        if let Some(limit) = query.limit {
+            out.truncate(limit);
+        }
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeWorkflowConflictRepository / FakeWorkflowShadowOutcomeRepository
+// ---------------------------------------------------------------------------
+
+/// An in-memory [`WorkflowConflictRepository`].
+#[derive(Debug, Default)]
+pub struct FakeWorkflowConflictRepository {
+    conflicts: Mutex<Vec<WorkflowConflict>>,
+}
+
+impl FakeWorkflowConflictRepository {
+    /// A fresh, empty repository.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every conflict recorded so far.
+    #[must_use]
+    pub fn all(&self) -> Vec<WorkflowConflict> {
+        self.conflicts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl WorkflowConflictRepository for FakeWorkflowConflictRepository {
+    async fn append(&self, conflict: WorkflowConflict) -> Result<WorkflowConflictId, StorageError> {
+        let id = conflict.id.clone();
+        self.conflicts.lock().unwrap().push(conflict);
+        Ok(id)
+    }
+
+    async fn list_open(&self) -> Result<Vec<WorkflowConflict>, StorageError> {
+        Ok(self
+            .conflicts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.status == mailmate_common::workflow::WorkflowConflictStatus::Open)
+            .cloned()
+            .collect())
+    }
+
+    async fn resolve(&self, id: &WorkflowConflictId) -> Result<(), StorageError> {
+        if let Some(c) = self
+            .conflicts
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|c| &c.id == id)
+        {
+            c.status = mailmate_common::workflow::WorkflowConflictStatus::Resolved;
+        }
+        Ok(())
+    }
+}
+
+/// An in-memory [`WorkflowShadowOutcomeRepository`].
+#[derive(Debug, Default)]
+pub struct FakeWorkflowShadowOutcomeRepository {
+    rows: Mutex<Vec<WorkflowShadowOutcome>>,
+}
+
+impl FakeWorkflowShadowOutcomeRepository {
+    /// A fresh, empty repository.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl WorkflowShadowOutcomeRepository for FakeWorkflowShadowOutcomeRepository {
+    async fn append(
+        &self,
+        row: WorkflowShadowOutcome,
+    ) -> Result<WorkflowShadowOutcomeId, StorageError> {
+        let id = row.id.clone();
+        self.rows.lock().unwrap().push(row);
+        Ok(id)
+    }
+
+    async fn list_for_workflow(
+        &self,
+        workflow_id: &WorkflowDefId,
+    ) -> Result<Vec<WorkflowShadowOutcome>, StorageError> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| &r.workflow_id == workflow_id)
+            .cloned()
+            .collect())
     }
 }
 

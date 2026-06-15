@@ -20,19 +20,24 @@ use mailmate_common::error::ReviewError;
 use mailmate_common::feedback::{PinnedVersions, RuleProposalFeedback, RuleProposalFeedbackRow};
 use mailmate_common::ids::RuleId;
 use mailmate_common::proposal::{AgentProposal, ProposalKind, ProposalStatus};
-use mailmate_common::rules::rule::{HierarchyBand, NewRule, NewRuleVersion, RuleVersionContent};
+use mailmate_common::rules::rule::{
+    HierarchyBand, NewRule, NewRuleVersion, RuleStatus, RuleVersionContent,
+};
 use mailmate_common::time::Timestamp;
+use mailmate_common::workflow::{NewWorkflowDefVersion, NewWorkflowDefinition};
 use mailmate_ports::proposal_review::ProposalReview;
 use mailmate_ports::storage::audit::AuditRepository;
 use mailmate_ports::storage::feedback::FeedbackRepository;
 use mailmate_ports::storage::proposals::ProposalRepository;
 use mailmate_ports::storage::rules::RuleRepository;
+use mailmate_ports::storage::workflows::WorkflowRepository;
 
 /// The default proposal-review adapter, composing the proposal store, the rule store, the
 /// `rule_proposal_feedback` table, and the audit timeline.
 pub struct DefaultProposalReview {
     proposals: Arc<dyn ProposalRepository>,
     rules: Arc<dyn RuleRepository>,
+    workflows: Arc<dyn WorkflowRepository>,
     feedback: Arc<dyn FeedbackRepository<RuleProposalFeedback>>,
     audit: Arc<dyn AuditRepository>,
 }
@@ -43,12 +48,14 @@ impl DefaultProposalReview {
     pub fn new(
         proposals: Arc<dyn ProposalRepository>,
         rules: Arc<dyn RuleRepository>,
+        workflows: Arc<dyn WorkflowRepository>,
         feedback: Arc<dyn FeedbackRepository<RuleProposalFeedback>>,
         audit: Arc<dyn AuditRepository>,
     ) -> Self {
         Self {
             proposals,
             rules,
+            workflows,
             feedback,
             audit,
         }
@@ -146,7 +153,87 @@ impl DefaultProposalReview {
             // Merge/split need a human-specified multi-rule restructure that a single-target
             // proposal cannot express; acceptance records the decision without auto-editing.
             ProposalKind::MergeRules | ProposalKind::SplitRule => Ok(None),
+            ProposalKind::NewWorkflow => {
+                // Review is the only workflow-materialization path: it creates the definition
+                // in its recommended (shadow/pending) status — NEVER active.
+                let draft = proposal
+                    .workflow_draft
+                    .as_ref()
+                    .ok_or_else(|| ReviewError::MissingDraft(proposal.id.to_string()))?;
+                let new_def = NewWorkflowDefinition {
+                    stable_name: format!("curated-wf-{}", proposal.id),
+                    scope: draft.scope,
+                    applies_to_item_type: draft.applies_to_item_type,
+                    created_by: Actor::User,
+                    initial_version: draft.clone().into_version_content(
+                        proposal.title.clone(),
+                        proposal.rationale.clone(),
+                        format!("accepted from proposal {}", proposal.id),
+                        Actor::User,
+                    ),
+                };
+                let workflow_id = self.workflows.save_definition_draft(new_def).await?;
+                self.workflows
+                    .update_status(&workflow_id, proposal.recommended_status)
+                    .await?;
+                self.append_workflow_audit(proposal, workflow_id.as_str())
+                    .await?;
+                Ok(None)
+            }
+            ProposalKind::RefineWorkflowCadence | ProposalKind::RefineWorkflowStopCondition => {
+                // A refine with a draft appends a new immutable version to the target workflow.
+                if let (Some(target), Some(draft)) = (
+                    proposal.target_workflow_id.as_ref(),
+                    proposal.workflow_draft.as_ref(),
+                ) {
+                    self.workflows
+                        .create_version(NewWorkflowDefVersion {
+                            workflow_id: target.clone(),
+                            content: draft.clone().into_version_content(
+                                proposal.title.clone(),
+                                proposal.rationale.clone(),
+                                format!("refined via proposal {}", proposal.id),
+                                Actor::User,
+                            ),
+                        })
+                        .await?;
+                    self.append_workflow_audit(proposal, target.as_str())
+                        .await?;
+                }
+                Ok(None)
+            }
+            ProposalKind::RetireWorkflow => {
+                if let Some(target) = proposal.target_workflow_id.as_ref() {
+                    self.workflows
+                        .update_status(target, RuleStatus::Retired)
+                        .await?;
+                    self.append_workflow_audit(proposal, target.as_str())
+                        .await?;
+                }
+                Ok(None)
+            }
+            // Enrollment is a user action on a pipeline item, not a rule/workflow mutation;
+            // acceptance records the decision (below) without auto-enrolling.
+            ProposalKind::SuggestEnrollment => Ok(None),
         }
+    }
+
+    /// Audit a workflow-status change a review materialized (the workflow analogue of
+    /// [`append_status_audit`](Self::append_status_audit), which is rule-id-typed).
+    async fn append_workflow_audit(
+        &self,
+        proposal: &AgentProposal,
+        workflow_id: &str,
+    ) -> Result<(), ReviewError> {
+        let entry = AuditEntry::new("workflow_status_changed", Actor::User)
+            .with_proposal(proposal.id.clone())
+            .with_payload(json!({
+                "workflow_id": workflow_id,
+                "to": proposal.recommended_status.as_str(),
+                "proposal_type": proposal.proposal_type.as_str(),
+            }));
+        self.audit.append(entry).await?;
+        Ok(())
     }
 
     async fn append_status_audit(

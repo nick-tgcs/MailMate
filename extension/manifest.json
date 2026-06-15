@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MailMate",
   "version": "0.1.0",
-  "description": "MailMate — local-first learning mail assistant. Phase 10: read/classify/draft/apply over the native host.",
+  "description": "MailMate — local-first learning mail assistant. Phase 11: sales pipeline + review-required follow-up workflows over the native host.",
   "browser_specific_settings": {
     "gecko": {
       "id": "mailmate@example.com",
@@ -25,6 +25,7 @@
       "native.js",
       "message_reader.js",
       "drafts.js",
+      "followups.js",
       "context_menu.js",
       "background.js"
     ]

@@ -10,21 +10,28 @@ mod convert;
 mod drafts;
 mod feedback;
 mod messages;
+mod pipeline_items;
 mod proposals;
 mod rules;
 mod senders;
 mod shadow_outcomes;
 mod threads;
 mod training;
+mod workflows;
 
 pub use audit::SqliteAuditRepository;
 pub use conflicts::SqliteConflictRepository;
 pub use drafts::SqliteDraftRepository;
 pub use feedback::SqliteFeedbackRepository;
 pub use messages::SqliteMessageRepository;
+pub use pipeline_items::SqlitePipelineItemRepository;
 pub use proposals::SqliteProposalRepository;
 pub use rules::SqliteRuleRepository;
 pub use senders::SqliteSenderRepository;
 pub use shadow_outcomes::SqliteShadowOutcomeRepository;
 pub use threads::SqliteThreadRepository;
 pub use training::{SqliteAdapterRepository, SqliteDatasetRepository, SqliteEvalRunRepository};
+pub use workflows::{
+    SqliteWorkflowConflictRepository, SqliteWorkflowInstanceRepository, SqliteWorkflowRepository,
+    SqliteWorkflowShadowOutcomeRepository,
+};

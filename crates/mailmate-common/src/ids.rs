@@ -161,6 +161,36 @@ id_newtype!(
     #[doc = "Trainer-backend identity (`trainer_…`)."]
     TrainerId
 );
+id_newtype!(
+    "pli",
+    #[doc = "Sales-pipeline item id (`pli_…`)."]
+    PipelineItemId
+);
+id_newtype!(
+    "wfd",
+    #[doc = "Follow-up workflow-definition id (`wfd_…`)."]
+    WorkflowDefId
+);
+id_newtype!(
+    "wfdv",
+    #[doc = "Immutable workflow-definition-version id (`wfdv_…`)."]
+    WorkflowDefVersionId
+);
+id_newtype!(
+    "wfi",
+    #[doc = "Workflow-instance id (`wfi_…`) — the durable temporal trigger."]
+    WorkflowInstanceId
+);
+id_newtype!(
+    "wcf",
+    #[doc = "Recorded workflow-conflict id (`wcf_…`)."]
+    WorkflowConflictId
+);
+id_newtype!(
+    "wsho",
+    #[doc = "Workflow shadow-outcome row id (`wsho_…`)."]
+    WorkflowShadowOutcomeId
+);
 
 /// Mint a fresh `<prefix>_<uuid-simple>` string with an explicit prefix.
 ///
@@ -246,6 +276,24 @@ mod tests {
         assert!(EvalRunId::fresh().as_str().starts_with("eval_"));
         assert_eq!(TrainerId::PREFIX, "trainer");
         assert!(TrainerId::fresh().as_str().starts_with("trainer_"));
+    }
+
+    #[test]
+    fn phase11_id_kinds_carry_their_prefixes() {
+        assert_eq!(PipelineItemId::PREFIX, "pli");
+        assert!(PipelineItemId::fresh().as_str().starts_with("pli_"));
+        assert_eq!(WorkflowDefId::PREFIX, "wfd");
+        assert!(WorkflowDefId::fresh().as_str().starts_with("wfd_"));
+        assert_eq!(WorkflowDefVersionId::PREFIX, "wfdv");
+        assert!(WorkflowDefVersionId::fresh().as_str().starts_with("wfdv_"));
+        assert_eq!(WorkflowInstanceId::PREFIX, "wfi");
+        assert!(WorkflowInstanceId::fresh().as_str().starts_with("wfi_"));
+        assert_eq!(WorkflowConflictId::PREFIX, "wcf");
+        assert!(WorkflowConflictId::fresh().as_str().starts_with("wcf_"));
+        assert_eq!(WorkflowShadowOutcomeId::PREFIX, "wsho");
+        assert!(WorkflowShadowOutcomeId::fresh()
+            .as_str()
+            .starts_with("wsho_"));
     }
 
     #[test]

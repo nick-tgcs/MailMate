@@ -12,10 +12,14 @@ use mailmate_common::error::StorageError;
 use mailmate_common::features::FeatureVector;
 use mailmate_common::feedback::{
     ClassificationFeedback, ClassificationFeedbackQuery, ClassificationFeedbackRow,
-    FeedbackPolarity, FilingFeedback, FilingFeedbackQuery, FilingFeedbackRow, PinnedVersions,
-    ProposalOutcome, RuleProposalFeedback, RuleProposalFeedbackQuery, RuleProposalFeedbackRow,
+    FeedbackPolarity, FilingFeedback, FilingFeedbackQuery, FilingFeedbackRow, FollowUpFeedback,
+    FollowUpFeedbackQuery, FollowUpFeedbackRow, FollowUpOutcome, PinnedVersions, ProposalOutcome,
+    RuleProposalFeedback, RuleProposalFeedbackQuery, RuleProposalFeedbackRow,
 };
-use mailmate_common::ids::{FeedbackId, FolderId, MessageId, ProposalId, RuleId};
+use mailmate_common::ids::{
+    DraftId, FeedbackId, FolderId, MessageId, PipelineItemId, ProposalId, RuleId,
+    WorkflowInstanceId,
+};
 use mailmate_ports::storage::feedback::FeedbackRepository;
 
 use crate::backend::{map_rusqlite, SqliteBackend};
@@ -42,6 +46,11 @@ fn polarity_from_db(raw: &str) -> Result<FeedbackPolarity, StorageError> {
 fn proposal_outcome_from_db(raw: &str) -> Result<ProposalOutcome, StorageError> {
     ProposalOutcome::from_db_str(raw)
         .ok_or_else(|| StorageError::Serialization(format!("unknown proposal outcome {raw:?}")))
+}
+
+fn followup_outcome_from_db(raw: &str) -> Result<FollowUpOutcome, StorageError> {
+    FollowUpOutcome::from_db_str(raw)
+        .ok_or_else(|| StorageError::Serialization(format!("unknown followup outcome {raw:?}")))
 }
 
 const CLASSIFICATION_COLUMNS: &str = "id, message_id, pinned_versions_json, ai_label, ai_score, \
@@ -107,6 +116,45 @@ fn row_to_filing(row: &Row<'_>) -> Result<FilingFeedbackRow, StorageError> {
         human_chosen_folder: FolderId::from(row.get::<_, String>(5).map_err(map_rusqlite)?),
         basis: row.get(6).map_err(map_rusqlite)?,
         matched_rule_id: matched_rule.map(RuleId::from),
+        polarity: polarity_from_db(&polarity_raw)?,
+        created_at: ts_from_db(&created_at)?,
+    })
+}
+
+const FOLLOWUP_COLUMNS: &str = "id, workflow_instance_id, pipeline_item_id, step_index, draft_id, \
+     pinned_versions_json, ai_scheduled_offset_days, actual_offset_days, \
+     reply_received_before_step, reply_latency_days, outcome, coalesced_from_json, \
+     human_reason_code, human_reason_text, polarity, created_at";
+
+fn row_to_followup(row: &Row<'_>) -> Result<FollowUpFeedbackRow, StorageError> {
+    let draft_raw: Option<String> = row.get(4).map_err(map_rusqlite)?;
+    let pinned_raw: String = row.get(5).map_err(map_rusqlite)?;
+    let reply_before: i64 = row.get(8).map_err(map_rusqlite)?;
+    let outcome_raw: String = row.get(10).map_err(map_rusqlite)?;
+    let coalesced_raw: Option<String> = row.get(11).map_err(map_rusqlite)?;
+    let polarity_raw: String = row.get(14).map_err(map_rusqlite)?;
+    let created_at: String = row.get(15).map_err(map_rusqlite)?;
+    let coalesced_from = match coalesced_raw {
+        Some(s) => json_from_db::<Vec<i64>>(&s)?,
+        None => Vec::new(),
+    };
+    Ok(FollowUpFeedbackRow {
+        id: FeedbackId::from(row.get::<_, String>(0).map_err(map_rusqlite)?),
+        workflow_instance_id: WorkflowInstanceId::from(
+            row.get::<_, String>(1).map_err(map_rusqlite)?,
+        ),
+        pipeline_item_id: PipelineItemId::from(row.get::<_, String>(2).map_err(map_rusqlite)?),
+        step_index: row.get(3).map_err(map_rusqlite)?,
+        draft_id: draft_raw.map(DraftId::from),
+        pinned_versions: json_from_db::<PinnedVersions>(&pinned_raw)?,
+        ai_scheduled_offset_days: row.get(6).map_err(map_rusqlite)?,
+        actual_offset_days: row.get(7).map_err(map_rusqlite)?,
+        reply_received_before_step: reply_before != 0,
+        reply_latency_days: row.get(9).map_err(map_rusqlite)?,
+        outcome: followup_outcome_from_db(&outcome_raw)?,
+        coalesced_from,
+        human_reason_code: row.get(12).map_err(map_rusqlite)?,
+        human_reason_text: row.get(13).map_err(map_rusqlite)?,
         polarity: polarity_from_db(&polarity_raw)?,
         created_at: ts_from_db(&created_at)?,
     })
@@ -312,6 +360,86 @@ impl FeedbackRepository<RuleProposalFeedback> for SqliteFeedbackRepository {
             let mut out = Vec::new();
             while let Some(row) = rows.next().map_err(map_rusqlite)? {
                 out.push(row_to_rule_proposal(row)?);
+            }
+            Ok(out)
+        })
+    }
+}
+
+#[async_trait]
+impl FeedbackRepository<FollowUpFeedback> for SqliteFeedbackRepository {
+    async fn append(&self, row: FollowUpFeedbackRow) -> Result<FeedbackId, StorageError> {
+        let pinned_json = json_to_db(&row.pinned_versions)?;
+        let coalesced_json = if row.coalesced_from.is_empty() {
+            None
+        } else {
+            Some(json_to_db(&row.coalesced_from)?)
+        };
+        let id = row.id.clone();
+        self.backend.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO followup_feedback (id, workflow_instance_id, pipeline_item_id, \
+                 step_index, draft_id, pinned_versions_json, ai_scheduled_offset_days, \
+                 actual_offset_days, reply_received_before_step, reply_latency_days, outcome, \
+                 coalesced_from_json, human_reason_code, human_reason_text, polarity, created_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                params![
+                    row.id.as_str(),
+                    row.workflow_instance_id.as_str(),
+                    row.pipeline_item_id.as_str(),
+                    row.step_index,
+                    row.draft_id.as_ref().map(DraftId::as_str),
+                    pinned_json,
+                    row.ai_scheduled_offset_days,
+                    row.actual_offset_days,
+                    i64::from(row.reply_received_before_step),
+                    row.reply_latency_days,
+                    row.outcome.as_str(),
+                    coalesced_json,
+                    row.human_reason_code,
+                    row.human_reason_text,
+                    row.polarity.as_str(),
+                    ts_to_db(row.created_at),
+                ],
+            )
+            .map_err(map_rusqlite)?;
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    async fn query(
+        &self,
+        query: FollowUpFeedbackQuery,
+    ) -> Result<Vec<FollowUpFeedbackRow>, StorageError> {
+        self.backend.with_conn(|conn| {
+            let mut binds: Vec<String> = Vec::new();
+            let mut predicates: Vec<String> = Vec::new();
+            if let Some(instance_id) = &query.workflow_instance_id {
+                binds.push(instance_id.as_str().to_owned());
+                predicates.push(format!("workflow_instance_id = ?{}", binds.len()));
+            }
+            if let Some(item_id) = &query.pipeline_item_id {
+                binds.push(item_id.as_str().to_owned());
+                predicates.push(format!("pipeline_item_id = ?{}", binds.len()));
+            }
+            let where_sql = if predicates.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", predicates.join(" AND "))
+            };
+            let sql = format!(
+                "SELECT {FOLLOWUP_COLUMNS} FROM followup_feedback {where_sql} \
+                 ORDER BY created_at DESC, id DESC {}",
+                limit_clause(query.limit)
+            );
+            let mut stmt = conn.prepare(&sql).map_err(map_rusqlite)?;
+            let refs: Vec<&dyn rusqlite::ToSql> =
+                binds.iter().map(|b| b as &dyn rusqlite::ToSql).collect();
+            let mut rows = stmt.query(refs.as_slice()).map_err(map_rusqlite)?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().map_err(map_rusqlite)? {
+                out.push(row_to_followup(row)?);
             }
             Ok(out)
         })

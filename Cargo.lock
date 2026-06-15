@@ -429,6 +429,7 @@ dependencies = [
  "mailmate-core",
  "mailmate-ports",
  "mailmate-test-support",
+ "mailmate-workflow",
  "serde",
  "serde_json",
 ]
@@ -518,6 +519,18 @@ dependencies = [
  "mailmate-storage",
  "mailmate-test-support",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mailmate-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "mailmate-common",
+ "mailmate-ports",
+ "mailmate-test-support",
  "serde_json",
 ]
 

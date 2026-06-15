@@ -21,6 +21,7 @@ pub mod curator;
 pub mod engine;
 pub mod evidence;
 pub mod outcomes;
+pub mod promotion;
 pub mod proposals;
 pub mod review;
 pub mod shadow;

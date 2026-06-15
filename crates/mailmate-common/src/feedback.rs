@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use crate::evidence::EvidenceSourceKind;
 use crate::features::FeatureVector;
 use crate::ids::{
-    fresh_prefixed, FeedbackId, FolderId, MessageId, ProposalId, RuleId, RuleVersionId,
+    fresh_prefixed, DraftId, FeedbackId, FolderId, MessageId, PipelineItemId, ProposalId, RuleId,
+    RuleVersionId, WorkflowInstanceId,
 };
 use crate::time::Timestamp;
 
@@ -211,6 +212,104 @@ pub struct RuleProposalFeedbackRow {
     pub created_at: Timestamp,
 }
 
+/// The cadence-only disposition of a fired (or skipped) follow-up step — owned by
+/// `followup_feedback`. It deliberately does **not** re-encode the draft's send
+/// disposition (`sent_asis`/`minor`/`major`/`discarded`); that fact is owned by
+/// `draft_feedback`, reached via `draft_id`. A follow-up step thus produces two rows with
+/// disjoint ownership: was the *body* good (draft) vs. was the *timing/decision to send at
+/// all* good (followup).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpOutcome {
+    /// The step fired and a review-required draft was surfaced.
+    SurfacedForReview,
+    /// The user pushed the step out.
+    Rescheduled,
+    /// The user snoozed the sequence.
+    Snoozed,
+    /// The staleness guard collapsed this step into a later one.
+    StepSkippedCoalesced,
+    /// The sequence stopped (won/lost/cancel/reply).
+    WorkflowStopped,
+    /// Overdue past the abandon horizon; surfaced a nudge, no draft.
+    ExpiredNeedsAttention,
+    /// The user followed up manually, off the scheduled cadence.
+    ManualFollowupOffCadence,
+}
+
+impl FollowUpOutcome {
+    /// The stable snake_case label stored in `followup_feedback.outcome`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SurfacedForReview => "surfaced_for_review",
+            Self::Rescheduled => "rescheduled",
+            Self::Snoozed => "snoozed",
+            Self::StepSkippedCoalesced => "step_skipped_coalesced",
+            Self::WorkflowStopped => "workflow_stopped",
+            Self::ExpiredNeedsAttention => "expired_needs_attention",
+            Self::ManualFollowupOffCadence => "manual_followup_off_cadence",
+        }
+    }
+
+    /// Parse a stored label, or `None` if unrecognized.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "surfaced_for_review" => Some(Self::SurfacedForReview),
+            "rescheduled" => Some(Self::Rescheduled),
+            "snoozed" => Some(Self::Snoozed),
+            "step_skipped_coalesced" => Some(Self::StepSkippedCoalesced),
+            "workflow_stopped" => Some(Self::WorkflowStopped),
+            "expired_needs_attention" => Some(Self::ExpiredNeedsAttention),
+            "manual_followup_off_cadence" => Some(Self::ManualFollowupOffCadence),
+            _ => None,
+        }
+    }
+}
+
+/// `followup_feedback` — the sole owner of the **cadence/timing/stop** signal for a
+/// follow-up step. Workflow-instance-scoped (not message-scoped), like
+/// [`RuleProposalFeedbackRow`]; the draft body's send disposition lives in `draft_feedback`,
+/// reached via [`draft_id`](FollowUpFeedbackRow::draft_id).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct FollowUpFeedbackRow {
+    /// The row id (`flwfb_…`).
+    pub id: FeedbackId,
+    /// The instance this step belongs to.
+    pub workflow_instance_id: WorkflowInstanceId,
+    /// The pipeline item the sequence chases.
+    pub pipeline_item_id: PipelineItemId,
+    /// Which cadence step.
+    pub step_index: i64,
+    /// The surfaced draft, when the step produced one (the send disposition lives in
+    /// `draft_feedback`).
+    pub draft_id: Option<DraftId>,
+    /// Provenance copy-at-event (canonical pin is `workflow_instances.pinned_def_version_id`).
+    pub pinned_versions: PinnedVersions,
+    /// What the cadence scheduled.
+    pub ai_scheduled_offset_days: i64,
+    /// When the user actually followed up (off-cadence signal), if known.
+    pub actual_offset_days: Option<i64>,
+    /// Whether a reply pre-empted this step.
+    pub reply_received_before_step: bool,
+    /// Days from anchor to reply, when known.
+    pub reply_latency_days: Option<i64>,
+    /// The cadence-only disposition.
+    pub outcome: FollowUpOutcome,
+    /// Step indexes the staleness guard collapsed into this one.
+    #[serde(default)]
+    pub coalesced_from: Vec<i64>,
+    /// Why — a chip code, if given.
+    pub human_reason_code: Option<String>,
+    /// Freeform fallback reason.
+    pub human_reason_text: Option<String>,
+    /// Whether the cadence matched real behaviour (`Positive`) or was corrected (`Negative`).
+    pub polarity: FeedbackPolarity,
+    /// When captured.
+    pub created_at: Timestamp,
+}
+
 /// A captured correction, tagged by which table owns it. The learning engine routes each
 /// variant to its single-owner [`FeedbackRepository`](crate placeholder) and derives
 /// evidence from it — it is never re-recorded elsewhere.
@@ -364,6 +463,37 @@ impl RuleProposalFeedback {
     }
 }
 
+/// The follow-up-feedback kind. Lands with the sales-pipeline feature (Phase 11); it plugs
+/// into the same `FeedbackRepository<F>` generic as the message-scoped tables.
+#[derive(Clone, Copy, Debug)]
+pub struct FollowUpFeedback;
+
+/// Query over `followup_feedback`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct FollowUpFeedbackQuery {
+    /// Restrict to one workflow instance.
+    pub workflow_instance_id: Option<WorkflowInstanceId>,
+    /// Restrict to one pipeline item.
+    pub pipeline_item_id: Option<PipelineItemId>,
+    /// Cap the number of rows (newest first).
+    pub limit: Option<usize>,
+}
+
+impl TaskFeedbackKind for FollowUpFeedback {
+    type Row = FollowUpFeedbackRow;
+    type Query = FollowUpFeedbackQuery;
+    const SOURCE_KIND: EvidenceSourceKind = EvidenceSourceKind::FollowUp;
+    const ID_PREFIX: &'static str = "flwfb";
+}
+
+impl FollowUpFeedback {
+    /// Mint a fresh, table-prefixed id (`flwfb_…`).
+    #[must_use]
+    pub fn fresh_id() -> FeedbackId {
+        FeedbackId::from(fresh_prefixed(Self::ID_PREFIX))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +542,53 @@ mod tests {
         assert!(RuleProposalFeedback::fresh_id()
             .as_str()
             .starts_with("rpffb_"));
+    }
+
+    #[test]
+    fn followup_feedback_kind_and_outcomes_are_stable() {
+        assert_eq!(FollowUpFeedback::ID_PREFIX, "flwfb");
+        assert_eq!(FollowUpFeedback::SOURCE_KIND, EvidenceSourceKind::FollowUp);
+        assert!(FollowUpFeedback::fresh_id().as_str().starts_with("flwfb_"));
+        for outcome in [
+            FollowUpOutcome::SurfacedForReview,
+            FollowUpOutcome::Rescheduled,
+            FollowUpOutcome::Snoozed,
+            FollowUpOutcome::StepSkippedCoalesced,
+            FollowUpOutcome::WorkflowStopped,
+            FollowUpOutcome::ExpiredNeedsAttention,
+            FollowUpOutcome::ManualFollowupOffCadence,
+        ] {
+            assert_eq!(
+                FollowUpOutcome::from_db_str(outcome.as_str()),
+                Some(outcome)
+            );
+        }
+        assert_eq!(FollowUpOutcome::from_db_str("nope"), None);
+    }
+
+    #[test]
+    fn followup_feedback_row_round_trips() {
+        let row = FollowUpFeedbackRow {
+            id: FollowUpFeedback::fresh_id(),
+            workflow_instance_id: WorkflowInstanceId::from("wfi_1"),
+            pipeline_item_id: PipelineItemId::from("pli_1"),
+            step_index: 2,
+            draft_id: Some(DraftId::from("draft_1")),
+            pinned_versions: PinnedVersions::default(),
+            ai_scheduled_offset_days: 14,
+            actual_offset_days: None,
+            reply_received_before_step: false,
+            reply_latency_days: None,
+            outcome: FollowUpOutcome::SurfacedForReview,
+            coalesced_from: vec![1],
+            human_reason_code: None,
+            human_reason_text: None,
+            polarity: FeedbackPolarity::Positive,
+            created_at: Timestamp::now(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        let back: FollowUpFeedbackRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
     }
 
     #[test]

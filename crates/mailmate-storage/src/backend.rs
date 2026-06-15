@@ -235,7 +235,7 @@ mod tests {
         let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
         assert_eq!(
             backend.applied_migration_versions().unwrap(),
-            vec![1, 2, 3, 4, 5]
+            vec![1, 2, 3, 4, 5, 6]
         );
     }
 }

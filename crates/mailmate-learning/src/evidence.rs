@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 
 use mailmate_common::evidence::{EvidenceKind, EvidenceSourceKind, RuleEvidence};
-use mailmate_common::feedback::{ClassificationFeedbackRow, FeedbackPolarity, FilingFeedbackRow};
+use mailmate_common::feedback::{
+    ClassificationFeedbackRow, FeedbackPolarity, FilingFeedbackRow, FollowUpFeedbackRow,
+};
 use mailmate_common::ids::{EvidenceId, FolderId};
 
 /// The intrinsic evidence kind of a captured row: an accepted prediction reinforces
@@ -54,6 +56,26 @@ pub fn evidence_from_classification(row: &ClassificationFeedbackRow) -> RuleEvid
         evidence_kind: polarity_to_kind(row.polarity),
         weight: 1.0,
         summary: format!("labeled {}", row.human_label),
+        created_at: row.created_at,
+    }
+}
+
+/// Derive an evidence item from a follow-up-feedback row. A follow-up step is time-triggered
+/// and has no message, so `message_id` is `None`; the cadence signal (was the timing/decision
+/// to follow up at all good?) feeds the curator's workflow proposals.
+#[must_use]
+pub fn evidence_from_followup(row: &FollowUpFeedbackRow) -> RuleEvidence {
+    RuleEvidence {
+        id: EvidenceId::fresh(),
+        rule_kind: None,
+        rule_id: None,
+        proposal_id: None,
+        source_kind: EvidenceSourceKind::FollowUp,
+        source_id: row.id.clone(),
+        message_id: None,
+        evidence_kind: polarity_to_kind(row.polarity),
+        weight: 1.0,
+        summary: format!("followup step {} {}", row.step_index, row.outcome.as_str()),
         created_at: row.created_at,
     }
 }
@@ -239,5 +261,34 @@ mod tests {
         ));
         assert_eq!(neg.evidence_kind, EvidenceKind::Override);
         assert!(neg.summary.contains("spam"));
+    }
+
+    #[test]
+    fn followup_evidence_has_no_message_and_carries_the_cadence_signal() {
+        use mailmate_common::feedback::{FollowUpFeedback, FollowUpFeedbackRow, FollowUpOutcome};
+        use mailmate_common::ids::{PipelineItemId, WorkflowInstanceId};
+        let row = FollowUpFeedbackRow {
+            id: FollowUpFeedback::fresh_id(),
+            workflow_instance_id: WorkflowInstanceId::from("wfi_1"),
+            pipeline_item_id: PipelineItemId::from("pli_1"),
+            step_index: 2,
+            draft_id: None,
+            pinned_versions: PinnedVersions::default(),
+            ai_scheduled_offset_days: 14,
+            actual_offset_days: None,
+            reply_received_before_step: false,
+            reply_latency_days: None,
+            outcome: FollowUpOutcome::SurfacedForReview,
+            coalesced_from: vec![],
+            human_reason_code: None,
+            human_reason_text: None,
+            polarity: FeedbackPolarity::Positive,
+            created_at: Timestamp::now(),
+        };
+        let evidence = evidence_from_followup(&row);
+        assert_eq!(evidence.source_kind, EvidenceSourceKind::FollowUp);
+        assert_eq!(evidence.message_id, None);
+        assert_eq!(evidence.evidence_kind, EvidenceKind::Positive);
+        assert!(evidence.summary.contains("surfaced_for_review"));
     }
 }

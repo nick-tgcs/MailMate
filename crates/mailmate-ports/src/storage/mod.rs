@@ -22,24 +22,31 @@ pub mod conflicts;
 pub mod drafts;
 pub mod feedback;
 pub mod messages;
+pub mod pipeline_items;
 pub mod proposals;
 pub mod rules;
 pub mod senders;
 pub mod shadow_outcomes;
 pub mod threads;
 pub mod training;
+pub mod workflows;
 
 pub use audit::AuditRepository;
 pub use conflicts::ConflictRepository;
 pub use drafts::DraftRepository;
 pub use feedback::FeedbackRepository;
 pub use messages::MessageRepository;
+pub use pipeline_items::PipelineItemRepository;
 pub use proposals::ProposalRepository;
 pub use rules::RuleRepository;
 pub use senders::SenderRepository;
 pub use shadow_outcomes::ShadowOutcomeRepository;
 pub use threads::ThreadRepository;
 pub use training::{AdapterRepository, DatasetRepository, EvalRunRepository};
+pub use workflows::{
+    WorkflowConflictRepository, WorkflowInstanceRepository, WorkflowRepository,
+    WorkflowShadowOutcomeRepository,
+};
 
 /// The SQL dialect a [`StorageBackend`] speaks. The per-dialect SQL fragments live in the
 /// adapter's `dialect` module; this tag is how a backend announces which it is.

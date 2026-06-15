@@ -36,19 +36,48 @@ use mailmate_common::audit::{event_type, AuditEntry};
 use mailmate_common::correction::UserCorrection;
 use mailmate_common::error::TransportError;
 use mailmate_common::features::FeatureVector;
-use mailmate_common::ids::FolderId;
+use mailmate_common::ids::{FolderId, ThreadId};
 use mailmate_common::mail::MailAction;
 use mailmate_common::policy::TriggerKind;
 use mailmate_common::protocol::{Frame, ProtocolVersion};
+use mailmate_common::workflow::ExitEvent;
 use mailmate_core::{CorrectionContext, CorrectionService, DraftService, PlanningService, Ports};
+use mailmate_ports::clock::Clock;
+use mailmate_ports::exit_detector::ExitDetector;
+use mailmate_ports::follow_up_scheduler::FollowUpScheduler;
 use mailmate_ports::mail_client::MailClient;
+use mailmate_ports::storage::pipeline_items::PipelineItemRepository;
 use mailmate_ports::storage::AuditRepository;
 use mailmate_ports::transport::Transport;
+use mailmate_ports::workflow_engine::WorkflowEngine;
 
-use crate::convert::{classification_ready_payload, classify_response_payload};
+use crate::convert::{
+    classification_ready_payload, classify_response_payload, followup_draft_ready_payload,
+    followup_needs_attention_payload,
+};
 use crate::dispatch::{error_response, ok_response, SUPPORTED_PROTOCOL_VERSION};
 use crate::native_stdio::read_frame;
-use crate::protocol_dto::{ClassifyMessagePayload, DraftReplyPayload, RecordUserActionPayload};
+use crate::protocol_dto::{
+    CancelSequencePayload, ClassifyMessagePayload, DraftReplyPayload, EnrollPipelineItemPayload,
+    RecordUserActionPayload, RescheduleFollowupPayload, ReviewFollowupPayload,
+    UpdatePipelineStagePayload,
+};
+
+/// The follow-up engine + repository ports the router needs to serve the sales-pipeline
+/// control requests and drain due steps. They live outside the core's [`Ports`] (the core
+/// never schedules), so the host injects them as a bundle. A router built without them
+/// answers the follow-up request types with `followups_not_configured`.
+#[derive(Clone)]
+pub struct FollowUpSuite {
+    /// The pipeline-item store (enroll / reply-exit lookups).
+    pub pipeline_items: Arc<dyn PipelineItemRepository>,
+    /// Arms instances, reschedules, resolves reviews, detects conflicts.
+    pub workflow_engine: Arc<dyn WorkflowEngine>,
+    /// The catch-up-on-launch drain.
+    pub scheduler: Arc<dyn FollowUpScheduler>,
+    /// Reply / won / lost / cancel exit handling.
+    pub exit_detector: Arc<dyn ExitDetector>,
+}
 
 /// Routes protocol frames into the core and emits the resulting frames.
 #[derive(Clone)]
@@ -58,11 +87,15 @@ pub struct HostRouter {
     draft: DraftService,
     mail_client: Arc<dyn MailClient>,
     audit: Arc<dyn AuditRepository>,
+    clock: Arc<dyn Clock>,
     out: Arc<dyn Transport>,
+    followups: Option<FollowUpSuite>,
 }
 
 impl HostRouter {
     /// Assemble the router from the core [`Ports`], the audit sink, and the output transport.
+    /// The follow-up control requests are inert until [`with_followups`](Self::with_followups)
+    /// supplies the workflow engine/scheduler/exit-detector + pipeline-item store.
     #[must_use]
     pub fn from_ports(
         ports: &Ports,
@@ -75,8 +108,18 @@ impl HostRouter {
             draft: DraftService::from_ports(ports),
             mail_client: ports.mail_client.clone(),
             audit,
+            clock: ports.clock.clone(),
             out,
+            followups: None,
         }
+    }
+
+    /// Wire the follow-up engine suite, enabling the sales-pipeline control requests and the
+    /// [`drain_followups`](Self::drain_followups) sweep.
+    #[must_use]
+    pub fn with_followups(mut self, followups: FollowUpSuite) -> Self {
+        self.followups = Some(followups);
+        self
     }
 
     /// Drive the host loop synchronously: read a frame, [`handle`](Self::handle) it (blocking
@@ -163,6 +206,12 @@ impl HostRouter {
             "new_mail" => self.handle_new_mail(payload).await,
             "draft_reply" => self.handle_draft(request_id, payload).await,
             "record_user_action" => self.handle_record(request_id, payload).await,
+            "enroll_pipeline_item" => self.handle_enroll(request_id, payload).await,
+            "update_pipeline_stage" => self.handle_update_stage(request_id, payload).await,
+            "cancel_sequence" => self.handle_cancel(request_id, payload).await,
+            "reschedule_followup" => self.handle_reschedule(request_id, payload, false).await,
+            "snooze" => self.handle_reschedule(request_id, payload, true).await,
+            "review_followup" => self.handle_review_followup(request_id, payload).await,
             other => self.send(error_response(
                 request_id,
                 "unknown_request_type",
@@ -304,6 +353,284 @@ impl HostRouter {
         }
     }
 
+    /// Enroll a tracked quote/proposal: create a `pipeline_item` and arm a workflow on it.
+    async fn handle_enroll(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(followups) = &self.followups else {
+            return self.send(followups_not_configured(request_id));
+        };
+        let parsed: EnrollPipelineItemPayload = match serde_json::from_value(payload) {
+            Ok(p) => p,
+            Err(e) => return self.send(invalid_payload(request_id, &e)),
+        };
+        let item_id = match followups
+            .pipeline_items
+            .insert(parsed.into_new_item())
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                return self.send(error_response(
+                    request_id,
+                    "enroll_failed",
+                    e.to_string(),
+                    None,
+                ))
+            }
+        };
+        match followups
+            .workflow_engine
+            .arm(item_id.clone(), parsed.workflow_def_id())
+            .await
+        {
+            Ok(instance_id) => {
+                let _ = self
+                    .audit
+                    .append(
+                        AuditEntry::new("pipeline_item_enrolled", Actor::User).with_payload(
+                            json!({
+                                "pipeline_item_id": item_id.as_str(),
+                                "workflow_instance_id": instance_id.as_str(),
+                                "workflow_id": parsed.workflow_id,
+                            }),
+                        ),
+                    )
+                    .await;
+                self.send(ok_response(
+                    request_id,
+                    json!({
+                        "pipeline_item_id": item_id,
+                        "workflow_instance_id": instance_id,
+                    }),
+                ))
+            }
+            Err(e) => self.send(error_response(
+                request_id,
+                "enroll_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
+    /// Mark a deal won/lost (exits the sequence and closes the stage).
+    async fn handle_update_stage(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(followups) = &self.followups else {
+            return self.send(followups_not_configured(request_id));
+        };
+        let parsed: UpdatePipelineStagePayload = match serde_json::from_value(payload) {
+            Ok(p) => p,
+            Err(e) => return self.send(invalid_payload(request_id, &e)),
+        };
+        let Some(event) = parsed.exit_event() else {
+            return self.send(error_response(
+                request_id,
+                "invalid_stage",
+                format!(
+                    "update_pipeline_stage expects won/lost, got {:?}",
+                    parsed.stage
+                ),
+                None,
+            ));
+        };
+        self.exit(request_id, followups, parsed.item_id(), event)
+            .await
+    }
+
+    /// Cancel a sequence on a pipeline item.
+    async fn handle_cancel(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(followups) = &self.followups else {
+            return self.send(followups_not_configured(request_id));
+        };
+        let parsed: CancelSequencePayload = match serde_json::from_value(payload) {
+            Ok(p) => p,
+            Err(e) => return self.send(invalid_payload(request_id, &e)),
+        };
+        self.exit(request_id, followups, parsed.item_id(), ExitEvent::Cancel)
+            .await
+    }
+
+    /// Drive an exit event and answer with the instances it exited.
+    async fn exit(
+        &self,
+        request_id: String,
+        followups: &FollowUpSuite,
+        item: mailmate_common::ids::PipelineItemId,
+        event: ExitEvent,
+    ) -> Result<(), TransportError> {
+        let item_id = item.clone();
+        match followups.exit_detector.on_exit_event(item, event).await {
+            Ok(exited) => {
+                self.audit_exit(&item_id, event, &exited).await;
+                self.send(ok_response(
+                    request_id,
+                    json!({ "exited": exited, "event": event.as_str() }),
+                ))
+            }
+            Err(e) => self.send(error_response(
+                request_id,
+                "exit_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
+    /// Audit a workflow exit (the mutable-state instance's transition is reconstructable from
+    /// the audit timeline — see the data-model's mutable-state exception). Actor by origin: a
+    /// reply is the system observing inbound mail; won/lost/cancel are user decisions.
+    async fn audit_exit(
+        &self,
+        item: &mailmate_common::ids::PipelineItemId,
+        event: ExitEvent,
+        exited: &[mailmate_common::ids::WorkflowInstanceId],
+    ) {
+        let actor = match event {
+            ExitEvent::ReplyReceived => Actor::System,
+            ExitEvent::Won | ExitEvent::Lost | ExitEvent::Cancel => Actor::User,
+        };
+        let _ = self
+            .audit
+            .append(
+                AuditEntry::new("workflow_exited", actor).with_payload(json!({
+                    "pipeline_item_id": item.as_str(),
+                    "event": event.as_str(),
+                    "exited_instances": exited.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
+                })),
+            )
+            .await;
+    }
+
+    /// Push a follow-up's next step out (`reschedule_followup` / `snooze`).
+    async fn handle_reschedule(
+        &self,
+        request_id: String,
+        payload: Value,
+        snooze: bool,
+    ) -> Result<(), TransportError> {
+        let Some(followups) = &self.followups else {
+            return self.send(followups_not_configured(request_id));
+        };
+        let parsed: RescheduleFollowupPayload = match serde_json::from_value(payload) {
+            Ok(p) => p,
+            Err(e) => return self.send(invalid_payload(request_id, &e)),
+        };
+        match followups
+            .workflow_engine
+            .reschedule(parsed.instance_id(), parsed.next_due_at, snooze)
+            .await
+        {
+            Ok(()) => self.send(ok_response(
+                request_id,
+                json!({ "rescheduled": true, "snoozed": snooze }),
+            )),
+            Err(e) => self.send(error_response(
+                request_id,
+                "reschedule_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
+    /// Resolve a surfaced follow-up draft (`review_followup`): advance the cursor. No
+    /// resolution sends — `send` means the human already dispatched the draft.
+    async fn handle_review_followup(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(followups) = &self.followups else {
+            return self.send(followups_not_configured(request_id));
+        };
+        let parsed: ReviewFollowupPayload = match serde_json::from_value(payload) {
+            Ok(p) => p,
+            Err(e) => return self.send(invalid_payload(request_id, &e)),
+        };
+        let Some(resolution) = parsed.resolution() else {
+            return self.send(error_response(
+                request_id,
+                "invalid_resolution",
+                format!(
+                    "review_followup expects send/edit/skip, got {:?}",
+                    parsed.resolution
+                ),
+                None,
+            ));
+        };
+        match followups
+            .workflow_engine
+            .resolve_review(parsed.instance_id(), resolution, self.clock.now())
+            .await
+        {
+            Ok(()) => self.send(ok_response(
+                request_id,
+                json!({ "resolved": true, "resolution": resolution.as_str() }),
+            )),
+            Err(e) => self.send(error_response(
+                request_id,
+                "review_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
+    /// Run the catch-up-on-launch drain: surface a `followup_draft_ready` for each fired step
+    /// (a review-required draft, never sent on arrival) and a `followup_needs_attention` for
+    /// each stale instance. Host-initiated (not a request); `app.rs` calls it at startup and
+    /// on a periodic tick (the production composition root is deferred to Phase 12).
+    ///
+    /// # Errors
+    /// Propagates a [`TransportError`] from emitting a frame. A scheduler/storage failure is
+    /// audited and ends the sweep without erroring the channel.
+    pub async fn drain_followups(&self) -> Result<(), TransportError> {
+        let Some(followups) = &self.followups else {
+            return Ok(());
+        };
+        let report = match followups.scheduler.drain_due(self.clock.now()).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = self
+                    .audit
+                    .append(
+                        AuditEntry::new("followup_drain_failed", Actor::System)
+                            .with_payload(json!({ "error": e.to_string() })),
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
+        for fired in &report.fired {
+            self.send(Frame::Notification {
+                protocol_version: ProtocolVersion::default(),
+                notification_id: format!("ntf_followup_{}", fired.workflow_instance_id),
+                type_: "followup_draft_ready".to_owned(),
+                payload: followup_draft_ready_payload(fired),
+            })?;
+        }
+        for item in &report.needs_attention {
+            self.send(Frame::Notification {
+                protocol_version: ProtocolVersion::default(),
+                notification_id: format!("ntf_attention_{}", item.workflow_instance_id),
+                type_: "followup_needs_attention".to_owned(),
+                payload: followup_needs_attention_payload(item),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Route a recorded user action to its single owner: a correction to its feedback table,
     /// or a provenance/execution fact to the audit log.
     async fn handle_record(
@@ -380,6 +707,9 @@ impl HostRouter {
                     .map_err(|e| e.to_string())?;
                 Ok(("filing_feedback", id.into_string()))
             }
+            // A reply on a tracked thread exits the follow-up sequence (when follow-ups are
+            // wired); otherwise it falls through to the audit arm as plain provenance.
+            "reply_received" if self.followups.is_some() => self.route_reply(payload).await,
             // Everything else is pure provenance / an execution result: audit only.
             other => {
                 // Attribute by origin: an execution result is the extension's; a move that
@@ -399,6 +729,44 @@ impl HostRouter {
                 Ok(("audit", id.into_string()))
             }
         }
+    }
+
+    /// Exit every tracked sequence on the reply's thread (host-side thread identity). The
+    /// guard in `route_recorded` ensures the follow-up suite is present before this is called.
+    async fn route_reply(
+        &self,
+        payload: &RecordUserActionPayload,
+    ) -> Result<(&'static str, String), String> {
+        let followups = self
+            .followups
+            .as_ref()
+            .ok_or("reply_received requires the follow-up suite")?;
+        let thread = payload
+            .thread_id
+            .clone()
+            .ok_or("reply_received requires thread_id")?;
+        let thread_id = ThreadId::from(thread);
+        let items = followups
+            .pipeline_items
+            .get_by_thread(&thread_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut exited = Vec::new();
+        for item in items {
+            let item_id = item.id.clone();
+            let ids = followups
+                .exit_detector
+                .on_exit_event(item.id, ExitEvent::ReplyReceived)
+                .await
+                .map_err(|e| e.to_string())?;
+            self.audit_exit(&item_id, ExitEvent::ReplyReceived, &ids)
+                .await;
+            exited.extend(
+                ids.into_iter()
+                    .map(mailmate_common::ids::WorkflowInstanceId::into_string),
+            );
+        }
+        Ok(("workflow_exit", exited.join(",")))
     }
 
     /// Build the correction context from the wire payload's optional hints.
@@ -422,6 +790,17 @@ fn invalid_payload(request_id: String, err: &serde_json::Error) -> Frame {
         request_id,
         "invalid_payload",
         format!("payload did not match the expected schema: {err}"),
+        None,
+    )
+}
+
+/// The error response for a follow-up request when the suite is not wired (the binary's
+/// composition root that injects it is deferred to Phase 12).
+fn followups_not_configured(request_id: String) -> Frame {
+    error_response(
+        request_id,
+        "followups_not_configured",
+        "the follow-up workflow engine is not wired into this host build",
         None,
     )
 }

@@ -42,12 +42,14 @@ use mailmate_ports::storage::rules::RuleRepository;
 use mailmate_rules::DeterministicRuleEngine;
 use mailmate_storage::{
     open_and_migrate, SqliteAuditRepository, SqliteBackend, SqliteConflictRepository,
-    SqliteFeedbackRepository, SqliteProposalRepository, SqliteRuleRepository, StorageConfig,
+    SqliteFeedbackRepository, SqliteProposalRepository, SqliteRuleRepository,
+    SqliteWorkflowRepository, StorageConfig,
 };
 
 /// The shared real repositories over one migrated backend.
 struct Repos {
     rules: Arc<SqliteRuleRepository>,
+    workflows: Arc<SqliteWorkflowRepository>,
     proposals: Arc<SqliteProposalRepository>,
     conflicts: Arc<SqliteConflictRepository>,
     audit: Arc<SqliteAuditRepository>,
@@ -58,6 +60,7 @@ fn repos() -> Repos {
     let backend: Arc<SqliteBackend> = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
     Repos {
         rules: Arc::new(SqliteRuleRepository::new(Arc::clone(&backend))),
+        workflows: Arc::new(SqliteWorkflowRepository::new(Arc::clone(&backend))),
         proposals: Arc::new(SqliteProposalRepository::new(Arc::clone(&backend))),
         conflicts: Arc::new(SqliteConflictRepository::new(Arc::clone(&backend))),
         audit: Arc::new(SqliteAuditRepository::new(Arc::clone(&backend))),
@@ -94,6 +97,7 @@ fn review(repos: &Repos) -> DefaultProposalReview {
     DefaultProposalReview::new(
         repos.proposals.clone(),
         repos.rules.clone(),
+        repos.workflows.clone(),
         repos.feedback.clone(),
         repos.audit.clone(),
     )
@@ -497,6 +501,8 @@ fn persist_proposal(
         rule_draft,
         target_rule_kind,
         target_rule_id,
+        workflow_draft: None,
+        target_workflow_id: None,
         evidence_refs: Vec::new(),
         source_provider: "test".to_owned(),
         created_at: Timestamp::now(),
@@ -504,6 +510,90 @@ fn persist_proposal(
     };
     block_on(repos.proposals.save(proposal, Vec::new())).unwrap();
     id
+}
+
+/// Persist a `new_workflow` proposal (pending) carrying a candidate cadence.
+fn persist_workflow_proposal(repos: &Repos) -> ProposalId {
+    use mailmate_common::pipeline::ItemType;
+    use mailmate_common::workflow::{
+        ExitCondition, FollowUpStep, Staleness, WorkflowAnchor, WorkflowDraft,
+    };
+    let id = ProposalId::fresh();
+    let proposal = AgentProposal {
+        id: id.clone(),
+        proposal_type: ProposalKind::NewWorkflow,
+        status: ProposalStatus::PendingReview,
+        title: "Standard quote follow-up".to_owned(),
+        rationale: "repeated manual follow-ups at day 3 / 7".to_owned(),
+        risk_level: RiskLevel::Medium,
+        recommended_status: RuleStatus::ShadowMode,
+        rule_draft: None,
+        target_rule_kind: None,
+        target_rule_id: None,
+        workflow_draft: Some(WorkflowDraft {
+            stable_name: "standard-quote-follow-up".to_owned(),
+            scope: RuleScope::Global,
+            applies_to_item_type: ItemType::Quote,
+            anchor: WorkflowAnchor::QuoteSentAt,
+            steps: vec![FollowUpStep {
+                step_index: 0,
+                offset_days: 3,
+                draft_intent: "gentle_check_in".to_owned(),
+                prompt_template_ref: None,
+                forbidden_commitments: vec!["prices".to_owned()],
+            }],
+            exit_conditions: vec![ExitCondition::ReplyReceived],
+            staleness: Staleness::default(),
+            risk_level: RiskLevel::Medium,
+        }),
+        target_workflow_id: None,
+        evidence_refs: Vec::new(),
+        source_provider: "test".to_owned(),
+        created_at: Timestamp::now(),
+        reviewed_at: None,
+    };
+    block_on(repos.proposals.save(proposal, Vec::new())).unwrap();
+    id
+}
+
+#[test]
+fn review_accepting_a_new_workflow_creates_a_shadow_workflow_never_active() {
+    use mailmate_ports::storage::workflows::WorkflowRepository;
+    let repos = repos();
+    let proposal_id = persist_workflow_proposal(&repos);
+
+    let review = review(&repos);
+    let outcome = block_on(review.review(ReviewDecision::accept(proposal_id))).unwrap();
+    assert_eq!(outcome.new_status, ProposalStatus::Accepted);
+    assert!(
+        outcome.created_rule_id.is_none(),
+        "a workflow acceptance creates no rule"
+    );
+
+    // The workflow entered SHADOW, not active.
+    let shadow = block_on(repos.workflows.list_by_status(RuleStatus::ShadowMode)).unwrap();
+    assert_eq!(shadow.len(), 1, "the accepted workflow is shadow-tested");
+    assert!(
+        block_on(repos.workflows.list_by_status(RuleStatus::Active))
+            .unwrap()
+            .is_empty(),
+        "acceptance never activates a workflow directly"
+    );
+    // Its pinned version round-trips the proposed cadence.
+    let def = &shadow[0];
+    let v1 = block_on(repos.workflows.get_version(&def.current_version_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(v1.content.steps.len(), 1);
+    assert_eq!(v1.content.steps[0].offset_days, 3);
+
+    // The materialization was audited as a workflow status change.
+    let audited = block_on(repos.audit.query(AuditQuery {
+        event_type: Some("workflow_status_changed".to_owned()),
+        ..AuditQuery::default()
+    }))
+    .unwrap();
+    assert_eq!(audited.len(), 1);
 }
 
 fn domain_draft(kind: RuleKind, folder: &str) -> RuleDraft {

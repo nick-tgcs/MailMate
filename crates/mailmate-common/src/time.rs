@@ -40,6 +40,38 @@ impl Timestamp {
     pub fn parse_rfc3339(s: &str) -> Result<Self, time::error::Parse> {
         time::OffsetDateTime::parse(s, &Rfc3339).map(Self)
     }
+
+    /// This instant shifted by `days` whole days (negative shifts backward). The follow-up
+    /// cadence counts absolute day-offsets from an anchor, so this is the one place the
+    /// scheduler needs date arithmetic — kept here beside the time representation rather
+    /// than reaching for `time::Duration` in an adapter.
+    #[must_use]
+    pub fn add_days(self, days: i64) -> Self {
+        Self(self.0 + time::Duration::days(days))
+    }
+
+    /// The number of whole days from `earlier` to `self` (negative if `self` precedes
+    /// `earlier`). Used by the staleness guard (`now − due_time ≤ horizon`).
+    #[must_use]
+    pub fn whole_days_since(self, earlier: Self) -> i64 {
+        (self.0 - earlier.0).whole_days()
+    }
+
+    /// This instant with its sub-second component dropped (floored to the whole second).
+    ///
+    /// RFC 3339 renders sub-seconds only when non-zero, so a whole-second value
+    /// (`…00Z`) and a fractional value (`…00.5Z`) within the same second do **not** order
+    /// lexicographically the way they order chronologically. The follow-up scheduler stores
+    /// and compares its day-granular `next_due_at` at whole-second precision (via this
+    /// helper) so the `next_due_at <= now` TEXT comparison is exact.
+    #[must_use]
+    pub fn floor_to_seconds(self) -> Self {
+        Self(
+            self.0
+                .replace_nanosecond(0)
+                .expect("zero nanoseconds is always in range"),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -74,5 +106,35 @@ mod tests {
     #[test]
     fn parse_rejects_garbage() {
         assert!(Timestamp::parse_rfc3339("not-a-timestamp").is_err());
+    }
+
+    #[test]
+    fn add_days_and_whole_days_since_are_inverse() {
+        let anchor = Timestamp(datetime!(2026-06-01 00:00:00 UTC));
+        let due = anchor.add_days(14);
+        assert_eq!(due.to_rfc3339(), "2026-06-15T00:00:00Z");
+        assert_eq!(due.whole_days_since(anchor), 14);
+        assert_eq!(anchor.whole_days_since(due), -14);
+        // A partial day floors toward zero.
+        let plus_partial = anchor.add_days(3);
+        let now = Timestamp(datetime!(2026-06-04 12:00:00 UTC));
+        assert_eq!(now.whole_days_since(plus_partial), 0, "12h is <1 whole day");
+    }
+
+    #[test]
+    fn floor_to_seconds_makes_text_order_match_instant_order() {
+        // A fractional and a whole-second value in the same second DON'T order the same way
+        // lexicographically vs chronologically; flooring both fixes it for TEXT comparison.
+        let frac =
+            Timestamp(datetime!(2026-06-20 00:00:00 UTC) + time::Duration::milliseconds(500));
+        let whole = Timestamp(datetime!(2026-06-20 00:00:00 UTC));
+        assert!(whole.0 <= frac.0, "chronologically whole precedes frac");
+        assert!(
+            whole.to_rfc3339() > frac.to_rfc3339(),
+            "but lexicographically the whole-second string sorts AFTER the fractional one"
+        );
+        // Floored, both render at whole-second precision and the TEXT order is exact.
+        assert_eq!(frac.floor_to_seconds().to_rfc3339(), "2026-06-20T00:00:00Z");
+        assert!(whole.floor_to_seconds().to_rfc3339() <= frac.floor_to_seconds().to_rfc3339());
     }
 }

@@ -6,9 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::evidence::EvidenceSourceKind;
-use crate::ids::{FeedbackId, ProposalId, RuleId};
+use crate::ids::{FeedbackId, ProposalId, RuleId, WorkflowDefId};
 use crate::rules::rule::{RiskLevel, RuleDraft, RuleKind, RuleStatus};
 use crate::time::Timestamp;
+use crate::workflow::WorkflowDraft;
 
 /// What a proposal asks for. Phase 7's learning engine only emits [`NewRule`]; the richer
 /// kinds (`refine`, `merge`, `split`, `retire`) land with the AI curator in Phase 8, but
@@ -28,6 +29,16 @@ pub enum ProposalKind {
     SplitRule,
     /// Retire a stale rule.
     RetireRule,
+    /// Propose a brand-new follow-up workflow cadence (Phase 11).
+    NewWorkflow,
+    /// Refine an existing workflow's cadence offsets.
+    RefineWorkflowCadence,
+    /// Refine an existing workflow's stop/exit conditions.
+    RefineWorkflowStopCondition,
+    /// Suggest enrolling a quote/proposal in a workflow.
+    SuggestEnrollment,
+    /// Retire a stale workflow.
+    RetireWorkflow,
 }
 
 impl ProposalKind {
@@ -40,7 +51,43 @@ impl ProposalKind {
             Self::MergeRules => "merge_rules",
             Self::SplitRule => "split_rule",
             Self::RetireRule => "retire_rule",
+            Self::NewWorkflow => "new_workflow",
+            Self::RefineWorkflowCadence => "refine_workflow_cadence",
+            Self::RefineWorkflowStopCondition => "refine_workflow_stop_condition",
+            Self::SuggestEnrollment => "suggest_enrollment",
+            Self::RetireWorkflow => "retire_workflow",
         }
+    }
+
+    /// Parse a stored label, or `None` if unrecognized.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "new_rule" => Some(Self::NewRule),
+            "refine_rule" => Some(Self::RefineRule),
+            "merge_rules" => Some(Self::MergeRules),
+            "split_rule" => Some(Self::SplitRule),
+            "retire_rule" => Some(Self::RetireRule),
+            "new_workflow" => Some(Self::NewWorkflow),
+            "refine_workflow_cadence" => Some(Self::RefineWorkflowCadence),
+            "refine_workflow_stop_condition" => Some(Self::RefineWorkflowStopCondition),
+            "suggest_enrollment" => Some(Self::SuggestEnrollment),
+            "retire_workflow" => Some(Self::RetireWorkflow),
+            _ => None,
+        }
+    }
+
+    /// Whether this proposal concerns a follow-up workflow rather than a rule.
+    #[must_use]
+    pub fn is_workflow(self) -> bool {
+        matches!(
+            self,
+            Self::NewWorkflow
+                | Self::RefineWorkflowCadence
+                | Self::RefineWorkflowStopCondition
+                | Self::SuggestEnrollment
+                | Self::RetireWorkflow
+        )
     }
 }
 
@@ -129,6 +176,12 @@ pub struct AgentProposal {
     pub target_rule_kind: Option<RuleKind>,
     /// An existing target rule, when the proposal refines/splits/retires one.
     pub target_rule_id: Option<RuleId>,
+    /// The candidate cadence (present for `new_workflow`; `None` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_draft: Option<WorkflowDraft>,
+    /// An existing target workflow, when the proposal refines/retires/enrolls into one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_workflow_id: Option<WorkflowDefId>,
     /// Typed pointers at the feedback rows that justify the proposal.
     pub evidence_refs: Vec<EvidenceRef>,
     /// The provider/learning-engine source label.
@@ -209,6 +262,26 @@ mod tests {
         assert_eq!(t.min_classification_corrections, 2);
         assert_eq!(ProposalTrigger::all().thresholds, t);
         assert_eq!(ProposalTrigger::all().source_kind, None);
+    }
+
+    #[test]
+    fn workflow_proposal_kinds_round_trip_and_classify() {
+        for kind in [
+            ProposalKind::NewWorkflow,
+            ProposalKind::RefineWorkflowCadence,
+            ProposalKind::RefineWorkflowStopCondition,
+            ProposalKind::SuggestEnrollment,
+            ProposalKind::RetireWorkflow,
+        ] {
+            assert_eq!(ProposalKind::from_db_str(kind.as_str()), Some(kind));
+            assert!(kind.is_workflow());
+        }
+        for kind in [ProposalKind::NewRule, ProposalKind::RetireRule] {
+            assert_eq!(ProposalKind::from_db_str(kind.as_str()), Some(kind));
+            assert!(!kind.is_workflow());
+        }
+        assert_eq!(ProposalKind::from_db_str("nope"), None);
+        assert_eq!(ProposalKind::NewWorkflow.as_str(), "new_workflow");
     }
 
     #[test]

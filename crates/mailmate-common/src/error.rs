@@ -380,6 +380,39 @@ impl From<AiError> for TrainingError {
     }
 }
 
+/// Failures from the follow-up workflow engine, scheduler, and exit detector
+/// (`mailmate-workflow`). These drive the existing planner/drafter — they do not plan,
+/// guard, or send themselves — so the taxonomy is storage, drafting, and FSM/state.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowError {
+    /// A referenced workflow definition, version, instance, or pipeline item was absent.
+    #[error("workflow entity not found: {0}")]
+    NotFound(String),
+    /// A storage-seam failure while reading/writing pipeline items, workflows, instances,
+    /// or follow-up feedback.
+    #[error("workflow storage error: {0}")]
+    Storage(String),
+    /// The follow-up drafter (the shared reply-drafter port) failed to produce a body.
+    #[error("workflow drafting error: {0}")]
+    Drafting(String),
+    /// An instance was asked to make a transition its FSM does not permit, or its state
+    /// violated the `next_due_at` non-NULL-iff-active invariant.
+    #[error("invalid workflow state: {0}")]
+    InvalidState(String),
+}
+
+impl From<StorageError> for WorkflowError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(value.to_string())
+    }
+}
+
+impl From<AiError> for WorkflowError {
+    fn from(value: AiError) -> Self {
+        Self::Drafting(value.to_string())
+    }
+}
+
 /// Aggregate error for call sites that prefer one type over per-port enums.
 #[derive(Debug, thiserror::Error)]
 pub enum MailMateError {
@@ -431,6 +464,9 @@ pub enum MailMateError {
     /// A training-pipeline orchestration failure.
     #[error(transparent)]
     Training(#[from] TrainingError),
+    /// A follow-up workflow / scheduler failure.
+    #[error(transparent)]
+    Workflow(#[from] WorkflowError),
 }
 
 #[cfg(test)]
@@ -582,6 +618,19 @@ mod tests {
         assert!(matches!(
             aggregate,
             MailMateError::Training(TrainingError::Evaluation(_))
+        ));
+    }
+
+    #[test]
+    fn workflow_error_folds_storage_and_ai_and_aggregates() {
+        let from_storage: WorkflowError = StorageError::Constraint("fk".to_owned()).into();
+        assert!(matches!(from_storage, WorkflowError::Storage(_)));
+        let from_ai: WorkflowError = AiError::Unavailable("no provider".to_owned()).into();
+        assert!(matches!(from_ai, WorkflowError::Drafting(_)));
+        let aggregate: MailMateError = WorkflowError::NotFound("wfi_x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Workflow(WorkflowError::NotFound(_))
         ));
     }
 }

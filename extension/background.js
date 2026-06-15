@@ -12,7 +12,7 @@
 // from a new message is not missed.
 
 /* global NativeHost, registerContextMenus, readMessageForHost, openDraftFromResponse,
-   executeMailCommand, consumeHostMove, makePing */
+   executeMailCommand, consumeHostMove, makePing, openFollowupDraft, surfaceNeedsAttention */
 
 const host = new NativeHost();
 
@@ -26,6 +26,11 @@ host.onNotification(async (type, payload) => {
   } else if (type === "mail_command") {
     const result = await executeMailCommand(payload);
     host.notifyHost("record_user_action", result);
+  } else if (type === "followup_draft_ready") {
+    // A scheduled follow-up came due: open its review-required draft (never auto-sent).
+    await openFollowupDraft(payload);
+  } else if (type === "followup_needs_attention") {
+    surfaceNeedsAttention(payload);
   } else {
     console.info("[MailMate] notification:", type, payload);
   }

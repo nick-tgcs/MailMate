@@ -18,8 +18,9 @@ use futures::executor::block_on;
 use std::sync::Arc;
 
 /// The full version set a fresh DB reaches today (0001 foundation, 0002 rule versions,
-/// 0003 audit + feedback, 0004 curator conflicts + proposal feedback, 0005 training layer).
-const CURRENT_VERSIONS: &[i64] = &[1, 2, 3, 4, 5];
+/// 0003 audit + feedback, 0004 curator conflicts + proposal feedback, 0005 training layer,
+/// 0006 follow-up pipeline + workflow surface).
+const CURRENT_VERSIONS: &[i64] = &[1, 2, 3, 4, 5, 6];
 
 #[test]
 fn fresh_database_migrates_to_the_current_version_set() {

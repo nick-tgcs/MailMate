@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use mailmate_common::action::{BlockedAction, GuardedActionPlan, PlannedAction};
 use mailmate_common::classification::Classification;
+use mailmate_common::workflow::{FiredStep, NeedsAttentionItem};
 use mailmate_core::PlanningOutcome;
 
 /// The bounded classification view the wire carries.
@@ -120,6 +121,44 @@ pub fn classification_ready_payload(
     })
 }
 
+/// The `followup_draft_ready` notification payload (host → extension). A fired step's
+/// review-required draft, surfaced for human confirmation — never sent on arrival (it
+/// mirrors `classification_ready`). The `guarded_plan` view states the create-draft is
+/// `requires_review`, matching the documented frame shape; `requires_review` on the draft is
+/// pinned `true` by construction upstream.
+#[must_use]
+pub fn followup_draft_ready_payload(fired: &FiredStep) -> Value {
+    json!({
+        "workflow_instance_id": fired.workflow_instance_id,
+        "pipeline_item_id": fired.pipeline_item_id,
+        "thread_id": fired.thread_id,
+        "step_index": fired.step_index,
+        "coalesced_from_step_indexes": fired.coalesced_from,
+        "draft": {
+            "draft_id": fired.draft.draft_id,
+            "subject": fired.draft.subject,
+            "requires_review": fired.draft.requires_human_review,
+            "safety_notes": fired.draft.safety_notes,
+        },
+        "guarded_plan": { "actions": [{ "kind": "create_draft", "policy_outcome": "requires_review" }] },
+        "explanation": {
+            "summary": format!("Follow-up step {} on the tracked deal (review-required).", fired.step_index),
+        },
+    })
+}
+
+/// The `followup_needs_attention` notification payload (host → extension). No draft — the
+/// item went stale past the abandon horizon; the user is nudged to decide manually.
+#[must_use]
+pub fn followup_needs_attention_payload(item: &NeedsAttentionItem) -> Value {
+    json!({
+        "workflow_instance_id": item.workflow_instance_id,
+        "pipeline_item_id": item.pipeline_item_id,
+        "reason": item.reason,
+        "skipped_step_indexes": item.skipped_step_indexes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +245,48 @@ mod tests {
         let value = blocked_action_json(&blocked);
         assert_eq!(value["policy_id"], "never_auto_delete_mail");
         assert_eq!(value["action"]["kind"], "delete");
+    }
+
+    #[test]
+    fn followup_draft_ready_carries_a_review_required_draft_and_no_send() {
+        use mailmate_common::ids::{DraftId, PipelineItemId, ThreadId, WorkflowInstanceId};
+        use mailmate_common::reply::{DraftedReply, ReplyDraft};
+        let fired = FiredStep {
+            workflow_instance_id: WorkflowInstanceId::from("wfi_1"),
+            pipeline_item_id: PipelineItemId::from("pli_1"),
+            thread_id: ThreadId::from("thread_1"),
+            step_index: 2,
+            coalesced_from: vec![1],
+            draft: ReplyDraft::from_drafted(
+                DraftId::from("draft_9"),
+                DraftedReply::new("Re: Acme quote", "Checking in."),
+            ),
+        };
+        let payload = followup_draft_ready_payload(&fired);
+        assert_eq!(payload["workflow_instance_id"], "wfi_1");
+        assert_eq!(payload["step_index"], 2);
+        assert_eq!(payload["coalesced_from_step_indexes"][0], 1);
+        assert_eq!(payload["draft"]["requires_review"], true);
+        assert_eq!(
+            payload["guarded_plan"]["actions"][0]["policy_outcome"],
+            "requires_review"
+        );
+        assert!(!serde_json::to_string(&payload)
+            .unwrap()
+            .contains("\"send\""));
+    }
+
+    #[test]
+    fn followup_needs_attention_carries_the_reason_and_skipped_steps() {
+        use mailmate_common::ids::{PipelineItemId, WorkflowInstanceId};
+        let item = NeedsAttentionItem {
+            workflow_instance_id: WorkflowInstanceId::from("wfi_2"),
+            pipeline_item_id: PipelineItemId::from("pli_2"),
+            reason: "stale_past_horizon".to_owned(),
+            skipped_step_indexes: vec![1, 2, 3],
+        };
+        let payload = followup_needs_attention_payload(&item);
+        assert_eq!(payload["reason"], "stale_past_horizon");
+        assert_eq!(payload["skipped_step_indexes"].as_array().unwrap().len(), 3);
     }
 }

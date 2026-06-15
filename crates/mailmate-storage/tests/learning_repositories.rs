@@ -317,6 +317,8 @@ fn proposal() -> AgentProposal {
         rule_draft: None,
         target_rule_kind: None,
         target_rule_id: None,
+        workflow_draft: None,
+        target_workflow_id: None,
         evidence_refs: vec![EvidenceRef {
             kind: EvidenceSourceKind::Filing,
             id: FeedbackId::from("filfb_1"),

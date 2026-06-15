@@ -28,6 +28,9 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 mailmate-test-support = { path = "../mailmate-test-support" }
+# The real follow-up adapters (DefaultWorkflowEngine / DefaultFollowUpScheduler /
+# DefaultExitDetector) wired over the in-memory fakes in the router's follow-up tests.
+mailmate-workflow = { path = "../mailmate-workflow" }
 
 [[bin]]
 name = "mailmate-native-host"

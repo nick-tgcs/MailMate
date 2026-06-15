@@ -9,10 +9,14 @@
 
 use serde::Deserialize;
 
-use mailmate_common::ids::{AccountId, FolderId, MessageId, ThreadId};
+use mailmate_common::ids::{
+    AccountId, FolderId, MessageId, PipelineItemId, ThreadId, WorkflowDefId, WorkflowInstanceId,
+};
 use mailmate_common::mail::{Attachment, MessageData, MessageHeaders};
+use mailmate_common::pipeline::{ItemType, NewPipelineItem};
 use mailmate_common::reply::ReplyDraftRequest;
 use mailmate_common::time::Timestamp;
+use mailmate_common::workflow::{ExitEvent, ReviewResolution};
 
 /// Mint the internal [`MessageId`] the pipeline uses for a Thunderbird message.
 ///
@@ -128,6 +132,9 @@ pub struct RecordUserActionPayload {
     /// The message it concerns.
     #[serde(default)]
     pub thunderbird_message_id: Option<String>,
+    /// The thread it concerns (a `reply_received` event keys off this to exit follow-ups).
+    #[serde(default)]
+    pub thread_id: Option<String>,
     /// The destination folder of a move.
     #[serde(default)]
     pub to_folder_id: Option<String>,
@@ -167,6 +174,147 @@ impl RecordUserActionPayload {
         self.thunderbird_message_id
             .as_deref()
             .map(internal_message_id)
+    }
+}
+
+/// The `enroll_pipeline_item` control request: tag a quote/proposal → create a
+/// `pipeline_item` and arm a workflow on it. The item is always user-enrolled.
+#[derive(Clone, Debug, Deserialize)]
+pub struct EnrollPipelineItemPayload {
+    /// Owning account.
+    pub account_id: String,
+    /// The outbound quote/proposal thread.
+    pub thread_id: String,
+    /// The sent quote message (Thunderbird id), when known.
+    #[serde(default)]
+    pub anchor_thunderbird_message_id: Option<String>,
+    /// Who we follow up with.
+    pub counterparty_email: String,
+    /// The counterparty domain.
+    #[serde(default)]
+    pub counterparty_domain: String,
+    /// A short human title.
+    #[serde(default)]
+    pub title: String,
+    /// `quote` or `proposal` (defaults to `quote`).
+    #[serde(default)]
+    pub item_type: Option<String>,
+    /// A display-only amount hint.
+    #[serde(default)]
+    pub amount_hint: Option<String>,
+    /// The workflow definition to arm (`wfd_…`).
+    pub workflow_id: String,
+}
+
+impl EnrollPipelineItemPayload {
+    /// Lower the payload into a [`NewPipelineItem`] (the host stamps id/stage/timestamps).
+    #[must_use]
+    pub fn into_new_item(&self) -> NewPipelineItem {
+        NewPipelineItem {
+            account_id: self.account_id.clone(),
+            thread_id: ThreadId::from(self.thread_id.as_str()),
+            anchor_message_id: self
+                .anchor_thunderbird_message_id
+                .as_deref()
+                .map(internal_message_id),
+            counterparty_email: self.counterparty_email.clone(),
+            counterparty_domain: self.counterparty_domain.clone(),
+            title: self.title.clone(),
+            item_type: self
+                .item_type
+                .as_deref()
+                .and_then(ItemType::from_db_str)
+                .unwrap_or(ItemType::Quote),
+            amount_hint: self.amount_hint.clone(),
+        }
+    }
+
+    /// The workflow definition id to arm on.
+    #[must_use]
+    pub fn workflow_def_id(&self) -> WorkflowDefId {
+        WorkflowDefId::from(self.workflow_id.as_str())
+    }
+}
+
+/// The `update_pipeline_stage` control request: mark won/lost (closes the sequence).
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdatePipelineStagePayload {
+    /// The pipeline item to update.
+    pub pipeline_item_id: String,
+    /// `won` or `lost`.
+    pub stage: String,
+}
+
+impl UpdatePipelineStagePayload {
+    /// The item this concerns.
+    #[must_use]
+    pub fn item_id(&self) -> PipelineItemId {
+        PipelineItemId::from(self.pipeline_item_id.as_str())
+    }
+
+    /// The exit event the requested stage implies (`won`/`lost`), or `None` if unrecognized.
+    #[must_use]
+    pub fn exit_event(&self) -> Option<ExitEvent> {
+        match self.stage.as_str() {
+            "won" => Some(ExitEvent::Won),
+            "lost" => Some(ExitEvent::Lost),
+            _ => None,
+        }
+    }
+}
+
+/// The `cancel_sequence` control request: stop the workflow on a pipeline item.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CancelSequencePayload {
+    /// The pipeline item whose sequence to cancel.
+    pub pipeline_item_id: String,
+}
+
+impl CancelSequencePayload {
+    /// The item this concerns.
+    #[must_use]
+    pub fn item_id(&self) -> PipelineItemId {
+        PipelineItemId::from(self.pipeline_item_id.as_str())
+    }
+}
+
+/// The `reschedule_followup` / `snooze` control request: push `next_due_at` out.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RescheduleFollowupPayload {
+    /// The instance to push out.
+    pub workflow_instance_id: String,
+    /// The new due time.
+    pub next_due_at: Timestamp,
+}
+
+impl RescheduleFollowupPayload {
+    /// The instance this concerns.
+    #[must_use]
+    pub fn instance_id(&self) -> WorkflowInstanceId {
+        WorkflowInstanceId::from(self.workflow_instance_id.as_str())
+    }
+}
+
+/// The `review_followup` control request: resolve a surfaced draft (`send`/`edit`/`skip`).
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewFollowupPayload {
+    /// The instance whose surfaced draft is being resolved.
+    pub workflow_instance_id: String,
+    /// `send` / `edit` / `skip`.
+    pub resolution: String,
+}
+
+impl ReviewFollowupPayload {
+    /// The instance this concerns.
+    #[must_use]
+    pub fn instance_id(&self) -> WorkflowInstanceId {
+        WorkflowInstanceId::from(self.workflow_instance_id.as_str())
+    }
+
+    /// The parsed resolution, or `None` if unrecognized.
+    #[must_use]
+    pub fn resolution(&self) -> Option<ReviewResolution> {
+        ReviewResolution::from_db_str(&self.resolution)
     }
 }
 
@@ -216,5 +364,62 @@ mod tests {
         assert_eq!(payload.event_type, "read_changed");
         assert!(payload.message_id().is_none());
         assert!(!payload.user_initiated);
+        assert!(payload.thread_id.is_none());
+    }
+
+    #[test]
+    fn enroll_payload_lowers_into_a_new_item_and_workflow() {
+        let json = serde_json::json!({
+            "account_id": "acct_default",
+            "thread_id": "thread_acme",
+            "anchor_thunderbird_message_id": "tb_9",
+            "counterparty_email": "buyer@acme.test",
+            "counterparty_domain": "acme.test",
+            "title": "Acme quote",
+            "item_type": "proposal",
+            "workflow_id": "wfd_standard"
+        });
+        let payload: EnrollPipelineItemPayload = serde_json::from_value(json).unwrap();
+        let item = payload.into_new_item();
+        assert_eq!(item.item_type, ItemType::Proposal);
+        assert_eq!(item.anchor_message_id, Some(internal_message_id("tb_9")));
+        assert_eq!(item.thread_id, ThreadId::from("thread_acme"));
+        assert_eq!(
+            payload.workflow_def_id(),
+            WorkflowDefId::from("wfd_standard")
+        );
+    }
+
+    #[test]
+    fn enroll_payload_defaults_item_type_to_quote() {
+        let json = serde_json::json!({
+            "account_id": "a",
+            "thread_id": "t",
+            "counterparty_email": "x@y.test",
+            "workflow_id": "wfd_1"
+        });
+        let payload: EnrollPipelineItemPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.into_new_item().item_type, ItemType::Quote);
+    }
+
+    #[test]
+    fn control_payloads_parse_their_discriminators() {
+        let stage: UpdatePipelineStagePayload = serde_json::from_value(
+            serde_json::json!({ "pipeline_item_id": "pli_1", "stage": "won" }),
+        )
+        .unwrap();
+        assert_eq!(stage.exit_event(), Some(ExitEvent::Won));
+        let bad: UpdatePipelineStagePayload = serde_json::from_value(
+            serde_json::json!({ "pipeline_item_id": "pli_1", "stage": "paused" }),
+        )
+        .unwrap();
+        assert_eq!(bad.exit_event(), None);
+
+        let review: ReviewFollowupPayload = serde_json::from_value(
+            serde_json::json!({ "workflow_instance_id": "wfi_1", "resolution": "skip" }),
+        )
+        .unwrap();
+        assert_eq!(review.resolution(), Some(ReviewResolution::Skip));
+        assert_eq!(review.instance_id(), WorkflowInstanceId::from("wfi_1"));
     }
 }

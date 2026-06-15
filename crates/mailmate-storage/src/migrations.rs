@@ -25,7 +25,9 @@ struct Migration {
 /// schema; Phase 7 appends `0002` (rule versions) and `0003` (audit and feedback); Phase 8
 /// appends `0004` (the curator's `rule_conflicts` + `rule_proposal_feedback`); Phase 9
 /// appends `0005` (the training layer's `training_datasets` + `lora_adapters` +
-/// `lora_eval_runs`).
+/// `lora_eval_runs`); Phase 11 appends `0006` (the follow-up surface: `pipeline_items`,
+/// `workflow_definitions`/`*_versions`/`*_instances`, `followup_feedback`,
+/// `workflow_shadow_outcomes`, `workflow_conflicts`).
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -56,6 +58,12 @@ const MIGRATIONS: &[Migration] = &[
         name: "0005_training",
         common: include_str!("../../../migrations/common/0005_training.sql"),
         sqlite: include_str!("../../../migrations/sqlite/0005_training.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "0006_followups",
+        common: include_str!("../../../migrations/common/0006_followups.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0006_followups.sql"),
     },
 ];
 
@@ -167,15 +175,15 @@ mod tests {
         let first = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert_eq!(
             first,
-            vec![1, 2, 3, 4, 5],
-            "fresh DB applies 0001..0005 in order"
+            vec![1, 2, 3, 4, 5, 6],
+            "fresh DB applies 0001..0006 in order"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6]);
 
         // Re-running is a no-op (covers the "migration from prior version" idempotency).
         let second = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert!(second.is_empty(), "re-run applies nothing");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
@@ -195,10 +203,10 @@ mod tests {
         let applied = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert_eq!(
             applied,
-            vec![2, 3, 4, 5],
+            vec![2, 3, 4, 5, 6],
             "only the not-yet-applied migrations run"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
@@ -226,6 +234,13 @@ mod tests {
             "training_datasets",
             "lora_adapters",
             "lora_eval_runs",
+            "pipeline_items",
+            "workflow_definitions",
+            "workflow_definition_versions",
+            "workflow_instances",
+            "followup_feedback",
+            "workflow_shadow_outcomes",
+            "workflow_conflicts",
         ] {
             let count: i64 = conn
                 .query_row(

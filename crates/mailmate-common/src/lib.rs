@@ -29,6 +29,7 @@ pub mod ids;
 pub mod mail;
 pub mod message;
 pub mod outcome;
+pub mod pipeline;
 pub mod planning;
 pub mod policy;
 pub mod proposal;
@@ -44,6 +45,7 @@ pub mod task;
 pub mod thread;
 pub mod time;
 pub mod training;
+pub mod workflow;
 
 /// Returns this crate's package name for smoke tests.
 #[must_use]

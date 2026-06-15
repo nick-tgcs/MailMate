@@ -8,12 +8,14 @@
 //! activation: the human-review and back-test gates still stand between it and a live rule.
 
 use mailmate_common::evidence::{EvidenceKind, EvidenceSourceKind, RuleEvidence};
+use mailmate_common::feedback::FollowUpFeedbackRow;
 use mailmate_common::ids::{EvidenceId, ProposalId};
 use mailmate_common::proposal::{AgentProposal, EvidenceRef, ProposalKind, ProposalStatus};
 use mailmate_common::rules::condition::{Condition, FieldValue, Operator, Predicate};
 use mailmate_common::rules::effect::RuleEffect;
 use mailmate_common::rules::rule::{RiskLevel, RuleDraft, RuleKind, RuleScope, RuleStatus};
 use mailmate_common::time::Timestamp;
+use mailmate_common::workflow::WorkflowDraft;
 
 use crate::evidence::{ClassificationCluster, FilingCluster};
 
@@ -109,6 +111,8 @@ pub fn filing_proposal(
         rule_draft: Some(draft),
         target_rule_kind: None,
         target_rule_id: None,
+        workflow_draft: None,
+        target_workflow_id: None,
         evidence_refs: refs,
         source_provider: source.to_owned(),
         created_at: Timestamp::now(),
@@ -163,12 +167,55 @@ pub fn classification_proposal(
         rule_draft: Some(draft),
         target_rule_kind: None,
         target_rule_id: None,
+        workflow_draft: None,
+        target_workflow_id: None,
         evidence_refs: refs,
         source_provider: source.to_owned(),
         created_at: Timestamp::now(),
         reviewed_at: None,
     };
     (proposal, evidence)
+}
+
+/// Build a `new_workflow` proposal: a candidate follow-up cadence justified by repeated
+/// manual follow-ups (the `followup_feedback` rows). The proposal recommends `shadow_mode`
+/// — the curator may propose, but a human must review/activate, and every surfaced step is
+/// review-required regardless. The risk band comes from the draft (`medium` by default).
+#[must_use]
+pub fn workflow_proposal(
+    draft: WorkflowDraft,
+    title: String,
+    rationale: String,
+    evidence_rows: &[FollowUpFeedbackRow],
+    source: &str,
+) -> AgentProposal {
+    let risk_level = draft.risk_level;
+    let evidence_refs = evidence_rows
+        .iter()
+        .map(|row| EvidenceRef {
+            kind: EvidenceSourceKind::FollowUp,
+            id: row.id.clone(),
+        })
+        .collect();
+    AgentProposal {
+        id: ProposalId::fresh(),
+        proposal_type: ProposalKind::NewWorkflow,
+        status: ProposalStatus::PendingReview,
+        title,
+        rationale,
+        risk_level,
+        // Cautious: a workflow is shadow-tested before any activation, never created active.
+        recommended_status: RuleStatus::ShadowMode,
+        rule_draft: None,
+        target_rule_kind: None,
+        target_rule_id: None,
+        workflow_draft: Some(draft),
+        target_workflow_id: None,
+        evidence_refs,
+        source_provider: source.to_owned(),
+        created_at: Timestamp::now(),
+        reviewed_at: None,
+    }
 }
 
 #[cfg(test)]
@@ -254,5 +301,63 @@ mod tests {
         assert_eq!(proposal.risk_level, RiskLevel::Medium);
         assert_eq!(evidence.len(), 2);
         assert!(proposal.title.contains("phishing"));
+    }
+
+    #[test]
+    fn workflow_proposal_carries_a_draft_and_recommends_shadow_never_active() {
+        use mailmate_common::feedback::{
+            FollowUpFeedback, FollowUpFeedbackRow, FollowUpOutcome, PinnedVersions,
+        };
+        use mailmate_common::ids::{PipelineItemId, WorkflowInstanceId};
+        use mailmate_common::pipeline::ItemType;
+        use mailmate_common::workflow::{ExitCondition, FollowUpStep, Staleness, WorkflowAnchor};
+
+        let evidence_row = FollowUpFeedbackRow {
+            id: FollowUpFeedback::fresh_id(),
+            workflow_instance_id: WorkflowInstanceId::from("wfi_1"),
+            pipeline_item_id: PipelineItemId::from("pli_1"),
+            step_index: 0,
+            draft_id: None,
+            pinned_versions: PinnedVersions::default(),
+            ai_scheduled_offset_days: 3,
+            actual_offset_days: Some(3),
+            reply_received_before_step: false,
+            reply_latency_days: None,
+            outcome: FollowUpOutcome::ManualFollowupOffCadence,
+            coalesced_from: vec![],
+            human_reason_code: None,
+            human_reason_text: None,
+            polarity: FeedbackPolarity::Positive,
+            created_at: Timestamp::now(),
+        };
+        let draft = WorkflowDraft {
+            stable_name: "standard-quote-follow-up".to_owned(),
+            scope: RuleScope::Global,
+            applies_to_item_type: ItemType::Quote,
+            anchor: WorkflowAnchor::QuoteSentAt,
+            steps: vec![FollowUpStep {
+                step_index: 0,
+                offset_days: 3,
+                draft_intent: "gentle_check_in".to_owned(),
+                prompt_template_ref: None,
+                forbidden_commitments: vec!["prices".to_owned()],
+            }],
+            exit_conditions: vec![ExitCondition::ReplyReceived],
+            staleness: Staleness::default(),
+            risk_level: RiskLevel::Medium,
+        };
+        let proposal = workflow_proposal(
+            draft,
+            "Standard quote follow-up: 3 / 7 / 14".to_owned(),
+            "You manually followed up on 6 quotes at ~3 and ~7 days.".to_owned(),
+            std::slice::from_ref(&evidence_row),
+            "learning-engine",
+        );
+        assert_eq!(proposal.proposal_type, ProposalKind::NewWorkflow);
+        assert_eq!(proposal.recommended_status, RuleStatus::ShadowMode);
+        assert!(proposal.rule_draft.is_none());
+        assert!(proposal.workflow_draft.is_some());
+        assert_eq!(proposal.evidence_refs.len(), 1);
+        assert_eq!(proposal.evidence_refs[0].kind, EvidenceSourceKind::FollowUp);
     }
 }

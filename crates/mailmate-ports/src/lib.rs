@@ -9,7 +9,9 @@ pub mod action_planner;
 pub mod ai_provider;
 pub mod classification_engine;
 pub mod clock;
+pub mod exit_detector;
 pub mod feature_extractor;
+pub mod follow_up_scheduler;
 pub mod learning_engine;
 pub mod mail_client;
 pub mod policy_guard;
@@ -22,6 +24,7 @@ pub mod storage;
 pub mod tier2_classifier;
 pub mod training_pipeline;
 pub mod transport;
+pub mod workflow_engine;
 
 /// Returns this crate's package name for smoke tests.
 #[must_use]
