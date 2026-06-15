@@ -1,0 +1,124 @@
+/* compose.css — the composeAction review panel.
+ *
+ * The single review gate between a generated draft and the user's Send button. MailMate never
+ * sends (there is no send path anywhere in the extension); this surface only makes the human's
+ * decision fast and informed — the "never sends" invariant is pinned, the safety verdict is
+ * shown, and the rest annotates the draft already sitting in the compose window. */
+
+:root {
+  color-scheme: light dark;
+  --mm-warn: #b8860b;
+  --mm-good: #2e7d32;
+  --mm-line: rgba(128, 128, 128, 0.25);
+  --mm-soft: rgba(128, 128, 128, 0.1);
+}
+
+body {
+  margin: 0;
+  width: 340px;
+  font: menu;
+  font-size: 13px;
+  line-height: 1.45;
+  color: FieldText;
+  background: Field;
+}
+
+.mm-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--mm-line);
+  font-weight: 600;
+}
+
+.mm-invariant {
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(37, 99, 235, 0.1);
+  border-bottom: 1px solid var(--mm-line);
+  font-size: 12px;
+}
+
+.mm-body {
+  padding: 12px;
+}
+
+.mm-section {
+  margin-bottom: 14px;
+}
+.mm-section__title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.mm-muted {
+  opacity: 0.75;
+}
+
+/* The commitments guard (degraded form: the host's safety_notes listed verbatim under a single
+   heading until the typed four-category breakdown lands). */
+.mm-guard {
+  border: 1px solid var(--mm-line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.mm-guard--flagged {
+  border-color: var(--mm-warn);
+  background: rgba(184, 134, 11, 0.08);
+}
+.mm-guard__badge {
+  font-size: 12px;
+  font-weight: 600;
+}
+.mm-guard__badge--flagged {
+  color: var(--mm-warn);
+}
+.mm-guard__badge--clear {
+  color: var(--mm-good);
+}
+.mm-guard ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.mm-guard li {
+  margin: 2px 0;
+}
+
+.mm-degraded {
+  border: 1px solid var(--mm-warn);
+  border-radius: 6px;
+  padding: 10px;
+  background: rgba(184, 134, 11, 0.08);
+}
+.mm-degraded__title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+button {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--mm-line);
+  background: ButtonFace;
+  color: ButtonText;
+  cursor: pointer;
+}
+button.mm-primary {
+  border-color: transparent;
+  background: #2563eb;
+  color: #fff;
+}
+button:hover {
+  filter: brightness(1.05);
+}
+.mm-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mm-foot {
+  margin-top: 12px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+[hidden] {
+  display: none !important;
+}

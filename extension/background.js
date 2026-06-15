@@ -23,7 +23,7 @@
 
 /* global NativeHost, HOST_PHASE, registerContextMenus, readMessageForHost, applyPlannedAction,
    openDraftFromResponse, executeMailCommand, consumeHostMove, openFollowupDraft,
-   surfaceNeedsAttention, showDesktopNotification */
+   surfaceNeedsAttention, showDesktopNotification, getComposeDraft */
 
 const host = new NativeHost();
 
@@ -93,7 +93,54 @@ const POPUP_HANDLERS = {
     }),
   "mm:settings": () => hostCall("get_settings", {}, (r) => ({ ok: true, settings: r })),
   "mm:setPause": (m) => hostCall("set_pause", { paused: Boolean(m.paused) }),
+  "mm:setSettings": (m) =>
+    hostCall("set_settings", {
+      retention_level: m.retentionLevel,
+      follow_up_tick_seconds: m.followUpTickSeconds,
+      catch_up_on_launch: m.catchUpOnLaunch,
+    }),
+  "mm:setProvider": (m) =>
+    hostCall("set_provider", {
+      provider_id: m.providerId,
+      kind: m.kind,
+      endpoint: m.endpoint,
+      set_default: m.setDefault,
+      remove: m.remove,
+    }),
+  "mm:setSecret": (m) => hostCall("set_secret", { provider_id: m.providerId, secret: m.secret }),
+  // Follow-ups pipeline.
+  "mm:listFollowups": (m) =>
+    hostCall("list_followups", { status_filter: m.statusFilter || null, limit: m.limit || 100 }),
+  "mm:followupReschedule": (m) =>
+    hostCall(m.verb === "snooze" ? "snooze" : "reschedule_followup", {
+      workflow_instance_id: m.workflowInstanceId,
+      next_due_at: m.nextDueAt,
+    }),
+  "mm:followupStage": (m) =>
+    hostCall("update_pipeline_stage", { pipeline_item_id: m.pipelineItemId, stage: m.stage }),
+  "mm:followupReview": (m) =>
+    hostCall("review_followup", { workflow_instance_id: m.workflowInstanceId, resolution: m.resolution }),
+  "mm:followupCancel": (m) => hostCall("cancel_sequence", { pipeline_item_id: m.pipelineItemId }),
+  // Compose review panel: the draft's safety context + the provider posture in one round-trip.
+  "mm:composeContext": (m) => composeContext(m.tabId),
 };
+
+// The composeAction panel's context: the MailMate draft annotation for this compose window (or
+// null for a hand-written compose) plus the provider posture, so the panel can render the
+// rationale + safety verdict and the degraded "drafting needs a provider" state honestly.
+async function composeContext(tabId) {
+  const draft = typeof tabId === "number" ? getComposeDraft(tabId) : null;
+  let providerConfigured = null; // null = unknown (host not ready / no admin)
+  if (host.status.phase === HOST_PHASE.ready) {
+    try {
+      const settings = await host.request("get_settings");
+      providerConfigured = Boolean(settings && settings.default_provider);
+    } catch {
+      /* leave unknown — the panel degrades to a neutral provider line */
+    }
+  }
+  return { ok: true, draft, providerConfigured };
+}
 
 // A guarded host round-trip for the dashboard's read/write requests. Returns the host payload
 // merged onto { ok:true } (or a custom mapper's shape); a disconnected host or a verb this build
@@ -350,10 +397,12 @@ host.onNotification(async (type, payload) => {
     // A scheduled follow-up came due: open its review-required draft (never auto-sent) and ping.
     await openFollowupDraft(payload);
     showDesktopNotification(type, payload);
+    browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "followups" }).catch(() => {});
   } else if (type === "followup_needs_attention") {
     surfaceNeedsAttention(payload);
     await bumpFollowupAttention(payload);
     showDesktopNotification(type, payload);
+    browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "followups" }).catch(() => {});
   } else if (type === "proposal_ready") {
     // The curator promoted a learned behavior to a pending proposal — refresh the badge + ping.
     await recomputeSpaceBadge();

@@ -1,0 +1,185 @@
+/* options.css — the MailMate preferences page (options_ui). System-themed, single column. */
+
+:root {
+  color-scheme: light dark;
+  --mm-accent: #2563eb;
+  --mm-good: #2e7d32;
+  --mm-warn: #b8860b;
+  --mm-risk: #c0392b;
+  --mm-line: rgba(128, 128, 128, 0.25);
+  --mm-soft: rgba(128, 128, 128, 0.08);
+}
+
+body {
+  margin: 0;
+  font: menu;
+  font-size: 13px;
+  line-height: 1.5;
+  color: FieldText;
+  background: Field;
+}
+
+.mm-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+.mm-h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+.mm-sub {
+  opacity: 0.75;
+  margin: 0 0 18px;
+}
+.mm-foot {
+  margin-top: 20px;
+  font-size: 12px;
+  opacity: 0.7;
+  border-top: 1px solid var(--mm-line);
+  padding-top: 12px;
+}
+
+.mm-banner {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(192, 57, 43, 0.1);
+  margin-bottom: 16px;
+}
+
+.mm-section {
+  border: 1px solid var(--mm-line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.mm-section__title {
+  font-weight: 600;
+  font-size: 14px;
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  flex-wrap: wrap;
+}
+.mm-row__label {
+  min-width: 150px;
+  opacity: 0.85;
+}
+.mm-grow {
+  flex: 1;
+}
+.mm-hint {
+  font-size: 12px;
+  opacity: 0.7;
+  margin: 4px 0 0;
+}
+.mm-pill {
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--mm-soft);
+}
+.mm-pill--good {
+  color: var(--mm-good);
+}
+.mm-pill--warn {
+  color: var(--mm-warn);
+}
+
+label.mm-radio,
+label.mm-check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select {
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: Field;
+  color: FieldText;
+}
+input[type="text"],
+input[type="password"] {
+  flex: 1;
+  min-width: 180px;
+}
+
+button {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--mm-line);
+  background: ButtonFace;
+  color: ButtonText;
+  cursor: pointer;
+}
+button.mm-primary {
+  border-color: transparent;
+  background: var(--mm-accent);
+  color: #fff;
+}
+button.mm-danger {
+  color: var(--mm-risk);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button:not(:disabled):hover {
+  filter: brightness(1.05);
+}
+
+.mm-provider {
+  border: 1px solid var(--mm-line);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 8px 0;
+}
+.mm-provider__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mm-provider__name {
+  font-weight: 600;
+}
+.mm-locked {
+  font-size: 12px;
+  opacity: 0.7;
+  border-left: 3px solid var(--mm-line);
+  padding-left: 10px;
+  margin-top: 8px;
+}
+
+.mm-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  padding: 9px 16px;
+  border-radius: 8px;
+  background: rgba(46, 125, 50, 0.95);
+  color: #fff;
+  font-size: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+.mm-toast--err {
+  background: rgba(192, 57, 43, 0.95);
+}
+[hidden] {
+  display: none !important;
+}

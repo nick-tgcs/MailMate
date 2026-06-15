@@ -34,7 +34,8 @@
 //!   label/folder for).
 
 use std::io::Read;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use serde_json::{json, Value};
@@ -48,22 +49,27 @@ use mailmate_common::error::TransportError;
 use mailmate_common::features::FeatureVector;
 use mailmate_common::ids::{FolderId, ProposalId, ThreadId};
 use mailmate_common::mail::MailAction;
+use mailmate_common::pipeline::PipelineItemQuery;
 use mailmate_common::policy::TriggerKind;
 use mailmate_common::proposal::ProposalStatus;
 use mailmate_common::protocol::{Frame, ProtocolVersion};
-use mailmate_common::workflow::ExitEvent;
+use mailmate_common::retention::RetentionLevel;
+use mailmate_common::secret::{Secret, SecretKey};
+use mailmate_common::workflow::{ExitEvent, WorkflowInstanceStatus};
 use mailmate_core::{CorrectionContext, CorrectionService, DraftService, PlanningService, Ports};
 use mailmate_ports::clock::Clock;
 use mailmate_ports::exit_detector::ExitDetector;
 use mailmate_ports::follow_up_scheduler::FollowUpScheduler;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::proposal_review::ProposalReview;
+use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::storage::pipeline_items::PipelineItemRepository;
+use mailmate_ports::storage::workflows::WorkflowInstanceRepository;
 use mailmate_ports::storage::{AuditRepository, ProposalRepository};
 use mailmate_ports::transport::Transport;
 use mailmate_ports::workflow_engine::WorkflowEngine;
 
-use crate::config::SettingsSnapshot;
+use crate::config::{AppConfig, ProviderSettings};
 use crate::convert::{
     classification_ready_payload, classify_response_payload, followup_draft_ready_payload,
     followup_needs_attention_payload,
@@ -72,9 +78,9 @@ use crate::dispatch::{error_response, ok_response, SUPPORTED_PROTOCOL_VERSION};
 use crate::native_stdio::read_frame;
 use crate::protocol_dto::{
     CancelSequencePayload, ClassifyMessagePayload, DraftReplyPayload, EnrollPipelineItemPayload,
-    ExplainDecisionPayload, ListRecentActivityPayload, RecordUserActionPayload,
-    RescheduleFollowupPayload, ReviewFollowupPayload, ReviewRuleProposalPayload,
-    UpdatePipelineStagePayload,
+    ExplainDecisionPayload, ListFollowupsPayload, ListRecentActivityPayload,
+    RecordUserActionPayload, RescheduleFollowupPayload, ReviewFollowupPayload,
+    ReviewRuleProposalPayload, UpdatePipelineStagePayload,
 };
 
 /// The follow-up engine + repository ports the router needs to serve the sales-pipeline
@@ -83,8 +89,11 @@ use crate::protocol_dto::{
 /// answers the follow-up request types with `followups_not_configured`.
 #[derive(Clone)]
 pub struct FollowUpSuite {
-    /// The pipeline-item store (enroll / reply-exit lookups).
+    /// The pipeline-item store (enroll / reply-exit lookups, and the `list_followups` read).
     pub pipeline_items: Arc<dyn PipelineItemRepository>,
+    /// The workflow-instance store — read directly by `list_followups` to join each deal to its
+    /// instance status / next-due step.
+    pub instances: Arc<dyn WorkflowInstanceRepository>,
     /// Arms instances, reschedules, resolves reviews, detects conflicts.
     pub workflow_engine: Arc<dyn WorkflowEngine>,
     /// The catch-up-on-launch drain.
@@ -101,8 +110,52 @@ pub struct FollowUpSuite {
 pub struct AdminSuite {
     /// The agent-proposal store (for the pending-review queue).
     pub proposals: Arc<dyn ProposalRepository>,
-    /// The effective, secret-free settings.
-    pub settings: SettingsSnapshot,
+    /// The live, mutable host config — the source of truth `get_settings` reads and the `set_*`
+    /// writes mutate. Behind a `Mutex` so writes are serialized with reads.
+    pub config: Arc<Mutex<AppConfig>>,
+    /// Where the config persists, if it came from a file (`MAILMATE_CONFIG`). `None` means an
+    /// in-memory/default config: writes still take effect for the session but are not saved, and
+    /// the write responses say so honestly.
+    pub config_path: Option<PathBuf>,
+    /// The 0600 secret store — the only place a provider API key is written (via `set_secret`).
+    pub secret_store: Arc<dyn SecretStore>,
+}
+
+impl AdminSuite {
+    /// The current secret-free settings snapshot, derived live from the mutable config.
+    fn snapshot(&self) -> crate::config::SettingsSnapshot {
+        self.config.lock().unwrap().settings_snapshot()
+    }
+
+    /// The 0600 secret-store key holding a provider's API key.
+    fn secret_key(provider_id: &str) -> SecretKey {
+        SecretKey::from(format!("{provider_id}_api_key").as_str())
+    }
+
+    /// Whether a provider has an API key in the store — presence only, never the value.
+    /// `Some(true/false)` is a clean present/absent answer; `None` means the store could not be
+    /// read (corrupt/unreadable secrets file), which must not be reported as a confident "absent".
+    async fn secret_is_set(&self, provider_id: &str) -> Option<bool> {
+        match self.secret_store.get(Self::secret_key(provider_id)).await {
+            Ok(value) => Some(value.is_some()),
+            Err(_) => None,
+        }
+    }
+
+    /// Persist the live config to disk if it came from a file. `Ok(false)` means an in-memory
+    /// config (the write took effect for the session but was not saved).
+    fn persist(&self) -> Result<bool, String> {
+        match &self.config_path {
+            Some(path) => self
+                .config
+                .lock()
+                .unwrap()
+                .save(path)
+                .map(|()| true)
+                .map_err(|e| e.to_string()),
+            None => Ok(false),
+        }
+    }
 }
 
 /// Routes protocol frames into the core and emits the resulting frames.
@@ -250,11 +303,16 @@ impl HostRouter {
             "reschedule_followup" => self.handle_reschedule(request_id, payload, false).await,
             "snooze" => self.handle_reschedule(request_id, payload, true).await,
             "review_followup" => self.handle_review_followup(request_id, payload).await,
+            "list_followups" => self.handle_list_followups(request_id, payload).await,
             "explain_decision" => self.handle_explain(request_id, payload).await,
             "list_recent_activity" => self.handle_list_recent_activity(request_id, payload).await,
             "list_pending_reviews" => self.handle_list_reviews(request_id).await,
             "review_rule_proposal" => self.handle_review_proposal(request_id, payload).await,
-            "get_settings" => self.handle_get_settings(request_id),
+            "get_settings" => self.handle_get_settings(request_id).await,
+            "set_settings" => self.handle_set_settings(request_id, payload).await,
+            "set_pause" => self.handle_set_pause(request_id, payload).await,
+            "set_secret" => self.handle_set_secret(request_id, payload).await,
+            "set_provider" => self.handle_set_provider(request_id, payload).await,
             other => self.send(error_response(
                 request_id,
                 "unknown_request_type",
@@ -331,7 +389,14 @@ impl HostRouter {
                 return Ok(());
             }
         };
-        let applied = self.apply_allowed(&outcome.guarded_plan).await;
+        // The global pause kill-switch stops auto-applying — a paused host classifies and surfaces
+        // but never acts on its own (the actions still ride the notification's review/blocked
+        // partitions; they are simply not auto-applied).
+        let applied = if self.is_paused() {
+            Vec::new()
+        } else {
+            self.apply_allowed(&outcome.guarded_plan).await
+        };
         let payload = classification_ready_payload(&outcome, &tb_id, &applied, &subject, &from);
         self.send(Frame::Notification {
             protocol_version: ProtocolVersion::default(),
@@ -339,6 +404,13 @@ impl HostRouter {
             type_: "classification_ready".to_owned(),
             payload,
         })
+    }
+
+    /// Whether the global pause kill-switch is engaged (a wired admin surface holds the state).
+    fn is_paused(&self) -> bool {
+        self.admin
+            .as_ref()
+            .is_some_and(|a| a.config.lock().unwrap().paused)
     }
 
     /// Apply every policy-allowed action through the mail client, auditing each, and return
@@ -746,6 +818,91 @@ impl HostRouter {
         }
     }
 
+    /// Render the Follow-ups pipeline on dashboard open: each tracked deal (pipeline item) joined
+    /// to its workflow instance's status + next-due step. Read-only; needs the follow-up suite
+    /// (the instance store lives there, outside the core's [`Ports`]).
+    async fn handle_list_followups(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(followups) = &self.followups else {
+            return self.send(followups_not_configured(request_id));
+        };
+        let parsed: ListFollowupsPayload = serde_json::from_value(payload).unwrap_or_default();
+        let limit = parsed.limit.unwrap_or(100).min(500);
+        let filter = parsed.status_filter.as_deref().filter(|f| *f != "all");
+
+        let items = match followups
+            .pipeline_items
+            .query(PipelineItemQuery {
+                account_id: None,
+                stage: None,
+                limit: Some(limit),
+            })
+            .await
+        {
+            Ok(items) => items,
+            Err(e) => {
+                return self.send(error_response(
+                    request_id,
+                    "list_followups_failed",
+                    e.to_string(),
+                    None,
+                ))
+            }
+        };
+
+        let mut out = Vec::new();
+        for item in &items {
+            // Join the deal to its most relevant instance: a live (non-terminal) one if present,
+            // else the latest. A deal with no instance is still a tracked deal (just unarmed).
+            let instances = followups
+                .instances
+                .list_by_pipeline_item(&item.id)
+                .await
+                .unwrap_or_default();
+            let inst = instances
+                .iter()
+                .find(|i| !i.status.is_terminal())
+                .or_else(|| instances.last());
+            let needs_attention = inst.is_some_and(|i| {
+                matches!(
+                    i.status,
+                    WorkflowInstanceStatus::AwaitingReview | WorkflowInstanceStatus::NeedsAttention
+                )
+            });
+
+            if !followup_status_matches(filter, item.stage, inst.map(|i| i.status), needs_attention)
+            {
+                continue;
+            }
+
+            // The pipeline anchor is an internal id (`msg_tb_<tb>`); recover the Thunderbird id for
+            // the dashboard deep-link.
+            let anchor_tb = item.anchor_message_id.as_ref().map(|m| {
+                m.as_str()
+                    .strip_prefix("msg_tb_")
+                    .unwrap_or(m.as_str())
+                    .to_owned()
+            });
+
+            out.push(json!({
+                "pipeline_item_id": item.id,
+                "title": item.title,
+                "thread_id": item.thread_id,
+                "stage": item.stage.as_str(),
+                "anchor_thunderbird_message_id": anchor_tb,
+                "workflow_instance_id": inst.map(|i| &i.id),
+                "status": inst.map(|i| i.status.as_str()),
+                "next_due_at": inst.and_then(|i| i.next_due_at),
+                "current_step_index": inst.map(|i| i.current_step_index),
+                "needs_attention": needs_attention,
+            }));
+        }
+        self.send(ok_response(request_id, json!({ "followups": out })))
+    }
+
     /// List the agent proposals awaiting human review — the review UI's work queue.
     async fn handle_list_reviews(&self, request_id: String) -> Result<(), TransportError> {
         let Some(admin) = &self.admin else {
@@ -837,13 +994,237 @@ impl HostRouter {
         }
     }
 
-    /// Return the effective, secret-free settings snapshot.
-    fn handle_get_settings(&self, request_id: String) -> Result<(), TransportError> {
+    /// Return the effective, secret-free settings snapshot — derived live from the mutable config,
+    /// enriched with each provider's `configured` flag (a secret-presence read; never the key
+    /// itself). Async because the secret-presence check hits the secret store.
+    async fn handle_get_settings(&self, request_id: String) -> Result<(), TransportError> {
         let Some(admin) = &self.admin else {
             return self.send(admin_not_configured(request_id));
         };
-        let payload = serde_json::to_value(&admin.settings).unwrap_or_else(|_| json!({}));
+        let snapshot = admin.snapshot();
+        let mut payload = serde_json::to_value(&snapshot).unwrap_or_else(|_| json!({}));
+        // Stamp `configured` per provider from the 0600 store (does an API key exist?), so the UI
+        // can render "•••• set" without the host ever returning the secret.
+        if let Some(providers) = payload.get_mut("providers").and_then(Value::as_array_mut) {
+            for entry in providers.iter_mut() {
+                // `null` when the store couldn't be read — never a confident `false` that would
+                // tell the user a real key is absent (which the UI shows as "•••• set" vs "no key").
+                let configured = match entry.get("id").and_then(Value::as_str) {
+                    Some(id) => admin.secret_is_set(id).await,
+                    None => Some(false),
+                };
+                if let Value::Object(map) = entry {
+                    map.insert("configured".to_owned(), json!(configured));
+                }
+            }
+        }
         self.send(ok_response(request_id, payload))
+    }
+
+    /// Write the scalar config fields the snapshot exposes (retention level, follow-up tick,
+    /// catch-up-on-launch). Validates host-side, mutates the live config, persists if it came
+    /// from a file, and returns the fresh snapshot. Never widens the safety posture.
+    async fn handle_set_settings(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(admin) = &self.admin else {
+            return self.send(admin_not_configured(request_id));
+        };
+        // Apply under the lock, validate, then drop the lock before persisting.
+        let validation = {
+            let mut config = admin.config.lock().unwrap();
+            if let Some(level) = payload.get("retention_level").and_then(Value::as_str) {
+                match RetentionLevel::from_db_str(level) {
+                    Some(l) => config.retention.level = l,
+                    None => {
+                        return self.send(error_response(
+                            request_id,
+                            "invalid_payload",
+                            format!("unknown retention_level {level:?}"),
+                            None,
+                        ))
+                    }
+                }
+            }
+            if let Some(tick) = payload
+                .get("follow_up_tick_seconds")
+                .and_then(Value::as_u64)
+            {
+                config.followups.tick_seconds = tick;
+            }
+            if let Some(catch_up) = payload.get("catch_up_on_launch").and_then(Value::as_bool) {
+                config.followups.catch_up_on_launch = catch_up;
+            }
+            config.validate().map_err(|e| e.to_string())
+        };
+        if let Err(e) = validation {
+            return self.send(error_response(request_id, "invalid_payload", e, None));
+        }
+        self.respond_settings_write(request_id, admin)
+    }
+
+    /// Engage/release the global pause kill-switch (host-side state, so it survives reloads and is
+    /// enforced on the `new_mail` apply path — see [`is_paused`](Self::is_paused)).
+    async fn handle_set_pause(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(admin) = &self.admin else {
+            return self.send(admin_not_configured(request_id));
+        };
+        let paused = payload
+            .get("paused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        admin.config.lock().unwrap().paused = paused;
+        // Distinguish a real save failure from the honest in-memory (no-file) case — a swallowed
+        // error would let the user believe a safety-relevant setting survived to disk when it did
+        // not (mirrors respond_settings_write).
+        let persisted = admin.persist();
+        let mut response =
+            json!({ "paused": paused, "persisted": persisted.clone().unwrap_or(false) });
+        if let (Err(e), Value::Object(map)) = (&persisted, &mut response) {
+            map.insert("persist_error".to_owned(), json!(e));
+        }
+        self.send(ok_response(request_id, response))
+    }
+
+    /// Write (overwrite) a provider's API key directly into the 0600 secret store — the only path
+    /// a key reaches disk, and the value is never returned. Clearing a key is not supported (the
+    /// store has no delete); an empty secret is refused rather than stored as a blank key.
+    async fn handle_set_secret(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(admin) = &self.admin else {
+            return self.send(admin_not_configured(request_id));
+        };
+        let Some(provider_id) = payload.get("provider_id").and_then(Value::as_str) else {
+            return self.send(error_response(
+                request_id,
+                "invalid_payload",
+                "set_secret requires provider_id",
+                None,
+            ));
+        };
+        let secret = payload.get("secret").and_then(Value::as_str).unwrap_or("");
+        if secret.is_empty() {
+            return self.send(error_response(
+                request_id,
+                "invalid_payload",
+                "set_secret requires a non-empty secret (clearing a key is not supported)",
+                None,
+            ));
+        }
+        match admin
+            .secret_store
+            .put(AdminSuite::secret_key(provider_id), Secret::new(secret))
+            .await
+        {
+            Ok(()) => self.send(ok_response(
+                request_id,
+                json!({ "stored": true, "provider_id": provider_id, "configured": true }),
+            )),
+            Err(e) => self.send(error_response(
+                request_id,
+                "set_secret_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
+    /// Add / update / remove a provider entry and optionally choose the default. Pairs with
+    /// `set_secret` (this writes only the public endpoint/kind, never the key). Validates the
+    /// provider kind + default-consistency host-side before persisting.
+    async fn handle_set_provider(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(admin) = &self.admin else {
+            return self.send(admin_not_configured(request_id));
+        };
+        let Some(provider_id) = payload.get("provider_id").and_then(Value::as_str) else {
+            return self.send(error_response(
+                request_id,
+                "invalid_payload",
+                "set_provider requires provider_id",
+                None,
+            ));
+        };
+        let remove = payload
+            .get("remove")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let validation = {
+            let mut config = admin.config.lock().unwrap();
+            if remove {
+                config.ai.providers.retain(|p| p.id != provider_id);
+                if config.ai.default_provider.as_deref() == Some(provider_id) {
+                    config.ai.default_provider = None;
+                }
+            } else {
+                let kind = payload.get("kind").and_then(Value::as_str);
+                let endpoint = payload
+                    .get("endpoint")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                match config.ai.providers.iter_mut().find(|p| p.id == provider_id) {
+                    Some(existing) => {
+                        if let Some(kind) = kind {
+                            existing.kind = kind.to_owned();
+                        }
+                        if payload.get("endpoint").is_some() {
+                            existing.endpoint = endpoint;
+                        }
+                    }
+                    None => config.ai.providers.push(ProviderSettings {
+                        id: provider_id.to_owned(),
+                        kind: kind.unwrap_or("openai_compatible").to_owned(),
+                        endpoint,
+                        model: None,
+                    }),
+                }
+                if payload.get("set_default").and_then(Value::as_bool) == Some(true) {
+                    config.ai.default_provider = Some(provider_id.to_owned());
+                }
+            }
+            config.validate().map_err(|e| e.to_string())
+        };
+        if let Err(e) = validation {
+            return self.send(error_response(request_id, "invalid_payload", e, None));
+        }
+        self.respond_settings_write(request_id, admin)
+    }
+
+    /// Persist (best-effort) and answer a config write with the fresh snapshot + whether it saved.
+    fn respond_settings_write(
+        &self,
+        request_id: String,
+        admin: &AdminSuite,
+    ) -> Result<(), TransportError> {
+        let persisted = admin.persist();
+        let snapshot = admin.snapshot();
+        let mut payload = serde_json::to_value(&snapshot).unwrap_or_else(|_| json!({}));
+        if let Value::Object(map) = &mut payload {
+            map.insert("updated".to_owned(), json!(true));
+            map.insert(
+                "persisted".to_owned(),
+                json!(persisted.clone().unwrap_or(false)),
+            );
+        }
+        // A save failure is surfaced (the in-memory write still took effect) rather than hidden.
+        if let Err(e) = persisted {
+            if let Value::Object(map) = &mut payload {
+                map.insert("persist_error".to_owned(), json!(e));
+            }
+        }
+        self.send(ok_response(request_id, json!({ "settings": payload })))
     }
 
     /// Answer the `hello` handshake: a richer-than-`ping` round-trip carrying the host/protocol
@@ -863,20 +1244,23 @@ impl HostRouter {
         ];
         if self.followups.is_some() {
             capabilities.push("followups");
+            capabilities.push("list_followups");
         }
         if self.admin.is_some() {
             capabilities.push("list_pending_reviews");
             capabilities.push("get_settings");
+            capabilities.push("set_settings");
+            capabilities.push("set_pause");
+            capabilities.push("set_secret");
+            capabilities.push("set_provider");
         }
-        // Drafting/retention come from the wired settings snapshot; an unwired admin surface
-        // reports the host's safe local-first defaults (no provider, metadata retention).
+        // Drafting/retention come from the live config; an unwired admin surface reports the
+        // host's safe local-first defaults (no provider, metadata retention).
         let (drafting_available, retention_level) = self.admin.as_ref().map_or_else(
             || (false, "metadata".to_owned()),
             |admin| {
-                (
-                    admin.settings.default_provider.is_some(),
-                    admin.settings.retention_level.clone(),
-                )
+                let snap = admin.snapshot();
+                (snap.default_provider.is_some(), snap.retention_level)
             },
         );
         self.send(ok_response(
@@ -1276,6 +1660,28 @@ fn activity_family_matches(family: Option<&str>, event_type: &str) -> bool {
                 | "workflow_status_changed"
         ),
         // An unknown filter must not blank the stream — show everything.
+        _ => true,
+    }
+}
+
+/// Does a deal match the Follow-ups view's `status_filter`? `None` (or `"all"`, already stripped)
+/// matches everything. `won`/`lost` key on the deal's pipeline stage; `active`/`needs_attention`
+/// key on its workflow-instance status. An unrecognised filter is permissive.
+fn followup_status_matches(
+    filter: Option<&str>,
+    stage: mailmate_common::pipeline::PipelineStage,
+    status: Option<WorkflowInstanceStatus>,
+    needs_attention: bool,
+) -> bool {
+    use mailmate_common::pipeline::PipelineStage;
+    let Some(filter) = filter else {
+        return true;
+    };
+    match filter {
+        "won" => stage == PipelineStage::Won,
+        "lost" => stage == PipelineStage::Lost,
+        "needs_attention" => needs_attention,
+        "active" => status == Some(WorkflowInstanceStatus::Active),
         _ => true,
     }
 }

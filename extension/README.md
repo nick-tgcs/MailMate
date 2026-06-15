@@ -39,6 +39,15 @@ the extension only relays events and applies host-returned safe actions.
   Mail space). Review is built from buffered `classification_ready` decisions; Activity from
   `list_recent_activity`; Proposals (read-only here) from `list_pending_reviews`. Owns no port —
   drives the host through the background's `mm:*` router.
+- `compose.html` / `compose.css` / `compose.js` — the **compose review panel** (`composeAction`
+  popup): the single review gate over a generated draft. It annotates the draft already in the
+  compose window (rationale + the commitments guard, shown as the host's `safety_notes` until the
+  typed breakdown lands) and pins the "MailMate never sends" invariant. The draft context is
+  stashed by `drafts.js` (`getComposeDraft`, keyed by compose tab id) and read via the background.
+- `options.html` / `options.css` / `options.js` — the **preferences page** (`options_ui`): Status
+  (pause), AI provider (add/remove/default + write-only API key via `set_secret`), retention, and
+  follow-up cadence. Reads `get_settings`, writes via `set_settings`/`set_pause`/`set_provider`/
+  `set_secret`, and **re-reads** after every save (never trusts an optimistic copy).
 - `notifications.js` — the ambient desktop-notification layer: maps the three time-driven host
   pushes (`proposal_ready`, `followup_draft_ready`, `followup_needs_attention`) into
   `browser.notifications`, dedups per item, and on click opens the MailMate space focused on the
@@ -106,6 +115,29 @@ activation; promotion is a separate step), so even a high-risk approval only sha
 `list_pending_reviews` summary (title / type / risk / recommended-status / rationale) drives the
 card. The proactive `proposal_ready` push is wired on the client but the host does not emit it yet
 (it needs a curator tick); the Proposals tab stays correct by polling `list_pending_reviews`.
+
+## Milestone 4 UX — Follow-ups, compose review, configuration
+
+The final surfaces. Host additions: `list_followups`, `set_settings`, `set_pause`, `set_secret`,
+`set_provider`, plus `get_settings` read additions (`paused`, per-provider `configured`/`endpoint`).
+
+| Surface | Wire | Status |
+|---|---|---|
+| Follow-ups dashboard tab (pipeline + Snooze/Re-arm/Cancel/Won/Lost) | `list_followups` + the follow-up control verbs | **shipped** (`dashboard.js`) |
+| Compose review panel | `draft_reply` + `safety_notes` (annotates the open draft) | **shipped** (`compose.*`) |
+| Preferences page (pause, retention, cadence, providers, API keys) | `get_settings` + `set_settings`/`set_pause`/`set_provider`/`set_secret` | **shipped** (`options.*`) |
+
+The Pause kill-switch is real host-side state (persisted to config; survives reloads) and is
+enforced on the `new_mail` apply path — a paused host classifies + surfaces but never auto-applies.
+API keys are write-only from the UI (shipped straight to the 0600 store via `set_secret`, rendered
+back only as "•••• set").
+
+Honest M4 deferrals: the compose panel's **typed** four-category commitments guard
+(`commitments_guard`) and **Regenerate/Adjust** (`regenerate_draft`) degrade to listing
+`safety_notes` and omit buttons that can't act; **enrolling** a deal from the dashboard needs a
+workflow picker (no list-workflows endpoint), so enrollment stays in the per-message panel;
+per-category policy + per-account scope are managed in the host config file (a tracked protocol
+addition); `test_provider`/`provider_status` are unwired (the build ships zero real providers).
 
 ## Milestone 1 UX (shipped)
 

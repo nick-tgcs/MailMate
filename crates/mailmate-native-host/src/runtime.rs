@@ -25,7 +25,7 @@
 use std::io::{stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -245,7 +245,7 @@ pub fn build_router(
         mail_client,
         transport: out.clone(),
         clock: clock.clone(),
-        secret_store,
+        secret_store: secret_store.clone(),
         feature_extractor,
         tier2,
         classification_engine,
@@ -261,6 +261,7 @@ pub fn build_router(
     // --- The follow-up suite (lives outside the core's Ports; the core never schedules) ---
     let suite = FollowUpSuite {
         pipeline_items: items.clone(),
+        instances: instances.clone(),
         workflow_engine: Arc::new(DefaultWorkflowEngine::new(
             workflows.clone(),
             instances.clone(),
@@ -280,7 +281,11 @@ pub fn build_router(
 
     let admin = AdminSuite {
         proposals,
-        settings: config.settings_snapshot(),
+        // The live, mutable config the `set_*` writes mutate; seeded from the loaded config.
+        config: Arc::new(Mutex::new(config.clone())),
+        // Persist writes back to the file the config came from (`MAILMATE_CONFIG`), if any.
+        config_path: env_nonempty("MAILMATE_CONFIG").map(PathBuf::from),
+        secret_store,
     };
 
     Ok(HostRouter::from_ports(&ports, audit, out)

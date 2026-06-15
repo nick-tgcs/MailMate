@@ -122,6 +122,7 @@ impl Harness {
     fn suite(&self, drafter: Arc<FakeReplyDrafter>) -> FollowUpSuite {
         FollowUpSuite {
             pipeline_items: self.items.clone(),
+            instances: self.instances.clone(),
             workflow_engine: Arc::new(DefaultWorkflowEngine::new(
                 self.workflows.clone(),
                 self.instances.clone(),
@@ -508,4 +509,49 @@ fn a_reply_without_a_wired_suite_falls_through_to_audit() {
     .unwrap();
     // No follow-up wiring → it is recorded as plain provenance, not a workflow exit.
     assert_eq!(one_ok_response(&h.out)["sink"], "audit");
+}
+
+#[test]
+fn list_followups_joins_each_deal_to_its_instance_status_and_filters() {
+    let h = Harness::new();
+    let wf = h.seed_workflow();
+    let item = h.seed_item();
+    let inst = h.arm_active_now(&item, &wf);
+    let router = h.router();
+
+    // Unfiltered: the deal appears, joined to its active instance.
+    block_on(router.handle(request("list_followups", json!({})))).unwrap();
+    let payload = one_ok_response(&h.out);
+    let followups = payload["followups"].as_array().unwrap();
+    assert_eq!(followups.len(), 1);
+    let deal = &followups[0];
+    assert_eq!(deal["pipeline_item_id"], item.as_str());
+    assert_eq!(deal["title"], "Acme quote");
+    assert_eq!(deal["stage"], "open");
+    assert_eq!(deal["status"], "active");
+    assert_eq!(deal["workflow_instance_id"], inst.as_str());
+    assert_eq!(deal["needs_attention"], false);
+
+    // A `won` filter excludes the open deal.
+    let h2 = Harness::new();
+    let wf2 = h2.seed_workflow();
+    let item2 = h2.seed_item();
+    h2.arm_active_now(&item2, &wf2);
+    let router2 = h2.router();
+    block_on(router2.handle(request("list_followups", json!({ "status_filter": "won" })))).unwrap();
+    assert_eq!(
+        one_ok_response(&h2.out)["followups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn list_followups_without_a_wired_suite_is_followups_not_configured() {
+    let h = Harness::new();
+    let router = h.router_without_followups();
+    block_on(router.handle(request("list_followups", json!({})))).unwrap();
+    assert_eq!(one_error_code(&h.out), "followups_not_configured");
 }

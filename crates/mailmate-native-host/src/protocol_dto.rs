@@ -240,6 +240,19 @@ pub struct ListRecentActivityPayload {
     pub event_type_filter: Option<String>,
 }
 
+/// The `list_followups` request: render the Follow-ups pipeline on dashboard open — the tracked
+/// deals with their workflow status + next-due step. An optional `status_filter` narrows the
+/// view (`active` / `needs_attention` / `won` / `lost` / `all`); `limit` caps the rows.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ListFollowupsPayload {
+    /// `active` | `needs_attention` | `won` | `lost` | `all` (default `all`).
+    #[serde(default)]
+    pub status_filter: Option<String>,
+    /// Cap the number of deals returned.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 /// The `review_rule_proposal` request: a human's accept/reject decision on a pending agent
 /// proposal — the Proposals-tab materialization gate. Acceptance materializes the recommended
 /// rule **in its recommended status** (shadow/pending-review), never directly `active`: the

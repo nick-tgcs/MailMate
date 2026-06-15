@@ -127,6 +127,7 @@ async function enterApp() {
   // Prime the secondary tab badges so a startup with pending work shows the count before the
   // user opens those tabs (the active tab's own render already set its count).
   if (activeTab !== "proposals") refreshProposalCount();
+  if (activeTab !== "followups") refreshFollowupCount();
 }
 
 const FOCUS_TAB_KEY = "mm:focusTab";
@@ -715,18 +716,160 @@ async function reviewProposal(p, decision, card) {
   await renderProposals(); // re-pull so the tab count + any remaining cards are accurate
 }
 
-// --- Tab 2: Follow-ups (live pipeline lands in M4 with list_followups) -----------------
+// --- Tab 2: Follow-ups pipeline -------------------------------------------------------
+
+let followupsSeq = 0;
+
+async function refreshFollowupCount() {
+  const reply = await send({ type: "mm:listFollowups" });
+  const deals = reply.ok ? reply.followups || [] : [];
+  setTabCount("followups", deals.filter(isActionableDeal).length);
+}
+
+function isActionableDeal(d) {
+  // "Needs attention" + live deals are the work; closed (won/lost) deals are history.
+  return d.needs_attention || d.stage === "open" || d.stage === "engaged";
+}
 
 async function renderFollowups() {
+  const myseq = ++followupsSeq;
+  const reply = await send({ type: "mm:listFollowups" });
+  if (myseq !== followupsSeq) return;
   const c = content();
   clear(c);
-  c.appendChild(
-    emptyState("📭", "Follow-ups pipeline", [
-      "The sales-pipeline view (tracked deals, due nudges, review-required follow-up drafts) lands with the list_followups endpoint in Milestone 4.",
-      "Enrolling a deal and the cadence engine already work on the host — this is the view over them.",
-    ]),
+
+  if (!reply.ok) {
+    c.appendChild(emptyState("⚠", "Follow-ups unavailable", [reply.error || "the host didn't answer"]));
+    setTabCount("followups", 0);
+    return;
+  }
+  const deals = reply.followups || [];
+  setTabCount("followups", deals.filter(isActionableDeal).length);
+
+  if (!deals.length) {
+    c.appendChild(
+      emptyState("📭", "No deals tracked yet", [
+        "Send a quote or proposal, then enroll it (from the message's MailMate panel) to have MailMate time the nudges. MailMate drafts the follow-ups for you to review — it never sends them.",
+      ]),
+    );
+    return;
+  }
+
+  const attention = deals.filter((d) => d.needs_attention);
+  const active = deals.filter((d) => !d.needs_attention && (d.stage === "open" || d.stage === "engaged"));
+  const closed = deals.filter((d) => d.stage === "won" || d.stage === "lost");
+
+  if (attention.length) {
+    c.appendChild(el("p", { class: "mm-card__sub mm-muted", text: "NEEDS ATTENTION" }));
+    for (const d of attention) c.appendChild(followupCard(d, true));
+  }
+  if (active.length) {
+    c.appendChild(el("p", { class: "mm-card__sub mm-muted", text: "ACTIVE PIPELINE" }));
+    for (const d of active) c.appendChild(followupCard(d, false));
+  }
+  if (closed.length) {
+    const won = closed.filter((d) => d.stage === "won").length;
+    const lost = closed.filter((d) => d.stage === "lost").length;
+    c.appendChild(el("p", { class: "mm-card__sub mm-muted", text: `Closed — ${won} won · ${lost} lost` }));
+  }
+}
+
+function followupCard(d, attention) {
+  const card = el("div", { class: "mm-card" });
+  const top = el("div", { class: "mm-card__top" }, [
+    el("span", { class: `mm-glyph mm-glyph--${attention ? "high" : "med"}`, text: attention ? "⏳" : "▸" }),
+    el("span", { class: "mm-card__title", text: d.title || "Tracked deal" }),
+    el("span", { class: "mm-card__from", text: followupStatusLine(d) }),
+  ]);
+  if (d.anchor_thunderbird_message_id) {
+    const link = el("button", { class: "mm-deeplink", text: "›", title: "Open the thread" });
+    link.addEventListener("click", () => deepLink(d.anchor_thunderbird_message_id));
+    top.appendChild(link);
+  }
+  card.appendChild(top);
+  card.appendChild(el("hr", { class: "mm-card__hr" }));
+
+  // Only offer actions the workflow engine will actually accept for this instance's status:
+  //  - reschedule (Snooze) is valid ONLY for `active`/`snoozed` instances;
+  //  - an `awaiting_review` draft is advanced with review_followup (Skip), not reschedule;
+  //  - everything can be Marked won/lost or Cancelled.
+  // (Reviewing/sending the actual draft happens in the compose window the follow-up notification
+  // opens — the dashboard offers the cadence-management actions.)
+  const status = d.status || "";
+  const reschedulable = status === "active" || status === "snoozed";
+  const actions = el("div", { class: "mm-card__actions" });
+  if (status === "awaiting_review") {
+    addFollowupAction(actions, "Skip step", () => reviewFollowup(d, "skip", card));
+  }
+  if (reschedulable) {
+    addFollowupAction(actions, "Snooze 1d", () => rescheduleFollowup(d, "snooze", 1, card));
+    addFollowupAction(actions, "Snooze 3d", () => rescheduleFollowup(d, "snooze", 3, card));
+  }
+  addFollowupAction(actions, "Mark won", () => stageFollowup(d, "won", card));
+  addFollowupAction(actions, "Mark lost", () => stageFollowup(d, "lost", card));
+  addFollowupAction(actions, "Cancel sequence", () => cancelFollowup(d, card));
+  card.appendChild(actions);
+  return card;
+}
+
+function addFollowupAction(container, label, fn) {
+  const b = el("button", { class: "mm-btn", text: label });
+  b.addEventListener("click", fn);
+  container.appendChild(b);
+}
+
+function followupStatusLine(d) {
+  const status = d.status ? d.status.replace(/_/g, " ") : "unarmed";
+  const due =
+    d.next_due_at && (d.stage === "open" || d.stage === "engaged")
+      ? ` · next ${relativeDue(d.next_due_at)}`
+      : "";
+  return `${status}${due}`;
+}
+
+function relativeDue(value) {
+  const ms = toMillis(value);
+  if (ms == null) return "";
+  const delta = ms - Date.now();
+  if (delta <= 0) return "due now";
+  const h = Math.round(delta / 3600000);
+  if (h < 24) return `in ${h}h`;
+  return `in ${Math.round(h / 24)}d`;
+}
+
+async function rescheduleFollowup(d, verb, days, card) {
+  if (!d.workflow_instance_id) return;
+  const nextDueAt = new Date(Date.now() + days * 86400000).toISOString();
+  await runFollowupAction(card, { type: "mm:followupReschedule", verb, workflowInstanceId: d.workflow_instance_id, nextDueAt }, "Snoozed");
+}
+
+async function reviewFollowup(d, resolution, card) {
+  if (!d.workflow_instance_id) return;
+  await runFollowupAction(
+    card,
+    { type: "mm:followupReview", workflowInstanceId: d.workflow_instance_id, resolution },
+    resolution === "skip" ? "Step skipped" : "Resolved",
   );
-  setTabCount("followups", 0);
+}
+
+async function stageFollowup(d, stage, card) {
+  await runFollowupAction(card, { type: "mm:followupStage", pipelineItemId: d.pipeline_item_id, stage }, stage === "won" ? "Marked won" : "Marked lost");
+}
+
+async function cancelFollowup(d, card) {
+  await runFollowupAction(card, { type: "mm:followupCancel", pipelineItemId: d.pipeline_item_id }, "Sequence cancelled");
+}
+
+async function runFollowupAction(card, message, okText) {
+  if (card) for (const b of card.querySelectorAll("button")) b.disabled = true;
+  const reply = await send(message);
+  if (!reply.ok) {
+    if (card) for (const b of card.querySelectorAll("button")) b.disabled = false;
+    toast(reply.error || "couldn't do that", true);
+    return;
+  }
+  toast(okText);
+  await renderFollowups();
 }
 
 // --- Onboarding -----------------------------------------------------------------------
@@ -996,6 +1139,10 @@ browser.runtime.onMessage.addListener((message) => {
       // A new proposal arrived — refresh the badge always, rebuild cards only if the tab is open.
       refreshProposalCount();
       if (activeTab === "proposals") renderProposals();
+    } else if (message.event === "followups") {
+      // A follow-up came due / went stale — refresh the badge always, rebuild if the tab is open.
+      refreshFollowupCount();
+      if (activeTab === "followups") renderFollowups();
     } else if (message.event === "focusTab" && VALID_TABS.includes(message.tab)) {
       // A desktop-notification click asked us to focus a specific tab (warm path — the dashboard
       // was already open). Clear the durable stash too so the cold-open consumer can't re-fire it.

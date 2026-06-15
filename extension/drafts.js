@@ -10,7 +10,23 @@
 // These are the "apply safe actions returned by the Rust host" and "open draft replies"
 // capabilities. There is intentionally no send path — drafts are saved for human review.
 
-/* exported openDraftFromResponse, executeMailCommand, applyPlannedAction, consumeHostMove */
+/* exported openDraftFromResponse, executeMailCommand, applyPlannedAction, consumeHostMove,
+   getComposeDraft */
+
+// The MailMate draft context for an open compose window, keyed by compose tab id. The
+// composeAction review panel reads this (the safety verdict + draft id the compose window itself
+// can't show) via the background; it is cleared when the compose tab closes. Body is intentionally
+// NOT stored — it already lives, editable, in the compose window; the panel only annotates it.
+const composeDrafts = new Map();
+
+function getComposeDraft(tabId) {
+  return composeDrafts.get(tabId) || null;
+}
+
+// Forget a compose context when its window closes (no per-tab leak across a session).
+if (typeof browser !== "undefined" && browser.tabs && browser.tabs.onRemoved) {
+  browser.tabs.onRemoved.addListener((tabId) => composeDrafts.delete(tabId));
+}
 
 // Moves MailMate itself just commanded, keyed by the stable RFC Message-ID (which survives a
 // folder move; the numeric Thunderbird id does not). background.js consumes this in its
@@ -48,6 +64,15 @@ async function openDraftFromResponse(payload, inReplyToMessageId) {
   }
   // Persist as a draft for review — the review surface shows payload.safety_notes alongside.
   await browser.compose.saveMessage(tab.id, { mode: "draft" });
+  // Stash the review context so the composeAction panel can annotate this draft (rationale +
+  // safety verdict the compose window can't show on its own).
+  composeDrafts.set(tab.id, {
+    draft_id: payload.draft_id || null,
+    subject: payload.subject || "",
+    safety_notes: payload.safety_notes || [],
+    requires_human_review: payload.requires_human_review !== false, // advisory by construction
+    rationale: payload.rationale || (payload.explanation && payload.explanation.summary) || null,
+  });
   return tab;
 }
 

@@ -64,6 +64,10 @@ pub struct AppConfig {
     pub followups: FollowupSettings,
     /// AI providers (forward-looking; the registry ships empty).
     pub ai: AiSettings,
+    /// The global pause kill-switch: when true, the host stops auto-applying actions and firing
+    /// follow-up drains (the dashboard/options Pause). Host-side state so it survives reloads.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// `[storage]` — where the embedded database lives.
@@ -258,8 +262,10 @@ impl AppConfig {
                 .map(|p| ProviderSummary {
                     id: p.id.clone(),
                     kind: p.kind.clone(),
+                    endpoint: p.endpoint.clone(),
                 })
                 .collect(),
+            paused: self.paused,
         }
     }
 }
@@ -277,17 +283,23 @@ pub struct SettingsSnapshot {
     pub follow_up_tick_seconds: u64,
     /// The provider used for LLM-always tasks, if any.
     pub default_provider: Option<String>,
-    /// The configured providers (id + kind only — no endpoints or keys).
+    /// The configured providers (id + kind + endpoint — never keys).
     pub providers: Vec<ProviderSummary>,
+    /// Whether the global pause kill-switch is engaged.
+    pub paused: bool,
 }
 
-/// A provider's public identity in a [`SettingsSnapshot`].
+/// A provider's public identity in a [`SettingsSnapshot`]. Never carries the API key (those live
+/// only in the 0600 secret store); the UI shows `configured` from a separate secret-presence read.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProviderSummary {
     /// The provider id.
     pub id: String,
     /// The adapter kind.
     pub kind: String,
+    /// The endpoint URL (for network adapters), if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 #[cfg(test)]
@@ -330,6 +342,7 @@ mod tests {
                     model: Some("llama3".to_owned()),
                 }],
             },
+            paused: false,
         };
         let text = config.to_toml().unwrap();
         let back: AppConfig = toml::from_str(&text).unwrap();

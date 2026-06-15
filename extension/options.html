@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self'"
+    />
+    <title>MailMate — Preferences</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="mm-page">
+      <h1 class="mm-h1">MailMate — Preferences</h1>
+      <p class="mm-sub">
+        The host owns the truth; this page is a view + editor. Every change is written to the host
+        and then re-read to confirm the effective state.
+      </p>
+      <div id="mm-status-banner" class="mm-banner" hidden></div>
+      <div id="mm-sections"></div>
+      <p class="mm-foot">
+        Sending and deleting are never automated and cannot be enabled here — a guarantee, not a
+        missing feature.
+      </p>
+    </main>
+    <div id="mm-toast" class="mm-toast" hidden></div>
+    <script src="options.js"></script>
+  </body>
+</html>

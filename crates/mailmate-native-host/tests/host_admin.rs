@@ -57,9 +57,16 @@ fn one_error_code(out: &FakeTransport) -> String {
     }
 }
 
-/// A fresh in-memory backend + a router built over it (with admin + follow-ups wired).
+/// A fresh in-memory backend + a router built over it (with admin + follow-ups wired). Each call
+/// gets a UNIQUE, clean secrets file so `set_secret` writes never leak across tests or runs.
 fn router_over(backend: &Arc<SqliteBackend>, out: Arc<FakeTransport>) -> HostRouter {
-    let secrets = std::env::temp_dir().join("mailmate-admin-test-secrets.json");
+    static SECRET_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SECRET_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let secrets = std::env::temp_dir().join(format!(
+        "mailmate-admin-secrets-{}-{n}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&secrets); // start clean
     build_router(&AppConfig::default(), backend, out, secrets).unwrap()
 }
 
@@ -247,4 +254,121 @@ fn neutral() -> mailmate_common::classification::Classification {
         needs_review: false,
         provenance: ClassificationProvenance::tier1(vec![]),
     }
+}
+
+// The settings-write tests share one router (so the in-memory config persists across calls) and
+// read the LATEST response frame each time.
+fn last_ok(out: &FakeTransport) -> Value {
+    match out.sent_frames().last().expect("a frame") {
+        Frame::Response {
+            status: ResponseStatus::Ok,
+            payload: Some(payload),
+            ..
+        } => payload.clone(),
+        other => panic!("expected an ok response, got {other:?}"),
+    }
+}
+
+fn last_error_code(out: &FakeTransport) -> String {
+    match out.sent_frames().last().expect("a frame") {
+        Frame::Response {
+            status: ResponseStatus::Error,
+            error: Some(e),
+            ..
+        } => e.code.clone(),
+        other => panic!("expected an error response, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_pause_engages_the_kill_switch_and_get_settings_reflects_it() {
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    let router = router_over(&backend, out.clone());
+
+    block_on(router.handle(request("set_pause", json!({ "paused": true })))).unwrap();
+    assert_eq!(last_ok(&out)["paused"], true);
+
+    block_on(router.handle(request("get_settings", json!({})))).unwrap();
+    assert_eq!(last_ok(&out)["paused"], true);
+}
+
+#[test]
+fn set_settings_writes_retention_and_rejects_an_unknown_level() {
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    let router = router_over(&backend, out.clone());
+
+    block_on(router.handle(request(
+        "set_settings",
+        json!({ "retention_level": "summaries", "follow_up_tick_seconds": 600 }),
+    )))
+    .unwrap();
+    let payload = last_ok(&out);
+    assert_eq!(payload["settings"]["retention_level"], "summaries");
+    assert_eq!(payload["settings"]["follow_up_tick_seconds"], 600);
+    assert_eq!(payload["settings"]["updated"], true);
+
+    block_on(router.handle(request(
+        "set_settings",
+        json!({ "retention_level": "telepathic" }),
+    )))
+    .unwrap();
+    assert_eq!(last_error_code(&out), "invalid_payload");
+}
+
+#[test]
+fn set_provider_then_set_secret_surface_in_get_settings_without_the_key() {
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    let router = router_over(&backend, out.clone());
+
+    block_on(router.handle(request(
+        "set_provider",
+        json!({ "provider_id": "local", "kind": "ollama", "endpoint": "http://127.0.0.1:11434", "set_default": true }),
+    )))
+    .unwrap();
+    let payload = last_ok(&out);
+    assert_eq!(payload["settings"]["default_provider"], "local");
+    assert_eq!(payload["settings"]["providers"][0]["id"], "local");
+    assert_eq!(
+        payload["settings"]["providers"][0]["endpoint"],
+        "http://127.0.0.1:11434"
+    );
+
+    // No key yet → not configured.
+    block_on(router.handle(request("get_settings", json!({})))).unwrap();
+    assert_eq!(last_ok(&out)["providers"][0]["configured"], false);
+
+    // Writing the key flips configured to true, and the key is never echoed back.
+    block_on(router.handle(request(
+        "set_secret",
+        json!({ "provider_id": "local", "secret": "sk-super-secret" }),
+    )))
+    .unwrap();
+    let stored = last_ok(&out);
+    assert_eq!(stored["stored"], true);
+    assert!(!serde_json::to_string(&stored)
+        .unwrap()
+        .contains("sk-super-secret"));
+
+    block_on(router.handle(request("get_settings", json!({})))).unwrap();
+    let settings = last_ok(&out);
+    assert_eq!(settings["providers"][0]["configured"], true);
+    assert!(!serde_json::to_string(&settings)
+        .unwrap()
+        .contains("sk-super-secret"));
+}
+
+#[test]
+fn set_secret_refuses_an_empty_value() {
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    let router = router_over(&backend, out.clone());
+    block_on(router.handle(request(
+        "set_secret",
+        json!({ "provider_id": "local", "secret": "" }),
+    )))
+    .unwrap();
+    assert_eq!(last_error_code(&out), "invalid_payload");
 }

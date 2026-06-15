@@ -17,6 +17,14 @@
     "default_title": "MailMate",
     "default_popup": "panel.html"
   },
+  "compose_action": {
+    "default_title": "MailMate",
+    "default_popup": "compose.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
   "permissions": [
     "nativeMessaging",
     "menus",
