@@ -33,6 +33,27 @@ impl RetentionLevel {
     pub fn retains_summaries(self) -> bool {
         matches!(self, Self::Summaries)
     }
+
+    /// The stable snake_case label stored in a `TEXT` column.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::Bodies => "bodies",
+            Self::Summaries => "summaries",
+        }
+    }
+
+    /// Parse a stored label, or `None` if unrecognized.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "metadata" => Some(Self::Metadata),
+            "bodies" => Some(Self::Bodies),
+            "summaries" => Some(Self::Summaries),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -68,5 +89,17 @@ mod tests {
         );
         let back: RetentionLevel = serde_json::from_str("\"bodies\"").unwrap();
         assert_eq!(back, RetentionLevel::Bodies);
+    }
+
+    #[test]
+    fn db_labels_round_trip() {
+        for level in [
+            RetentionLevel::Metadata,
+            RetentionLevel::Bodies,
+            RetentionLevel::Summaries,
+        ] {
+            assert_eq!(RetentionLevel::from_db_str(level.as_str()), Some(level));
+        }
+        assert_eq!(RetentionLevel::from_db_str("nope"), None);
     }
 }

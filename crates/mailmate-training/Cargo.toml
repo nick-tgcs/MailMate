@@ -1,0 +1,31 @@
+[package]
+name = "mailmate-training"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The on-device training-layer crate. It OWNS the `TrainerBackend` trait (the swappable
+# weight-crunching seam) and the whole orchestration above it: deriving examples from the
+# per-task feedback tables, redaction + privacy enforcement, dataset assembly, the four
+# JSONL export views, adapter metadata import + compatibility, the evaluation gate, and
+# `DefaultTrainingPipeline` (the TrainingPipeline port). It is a DOMAIN crate — it names no
+# backend (no burn/tokio/rusqlite); the Burn trainer impl lives in `mailmate-ml` and
+# DEPENDS ON this crate's trait, never the reverse. A mock + a subprocess trainer ship here
+# so no test needs a GPU or an external tool.
+[dependencies]
+mailmate-common = { path = "../mailmate-common" }
+mailmate-ports = { path = "../mailmate-ports" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Real SQLite repositories wired into the pipeline integration tests (no GPU, no network).
+mailmate-storage = { path = "../mailmate-storage" }
+mailmate-test-support = { path = "../mailmate-test-support" }
+futures.workspace = true

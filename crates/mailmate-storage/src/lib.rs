@@ -21,7 +21,8 @@ pub mod repositories;
 
 pub use backend::{open_and_migrate, open_backend, SqliteBackend, StorageConfig, StoragePath};
 pub use repositories::{
-    SqliteAuditRepository, SqliteConflictRepository, SqliteDraftRepository,
+    SqliteAdapterRepository, SqliteAuditRepository, SqliteConflictRepository,
+    SqliteDatasetRepository, SqliteDraftRepository, SqliteEvalRunRepository,
     SqliteFeedbackRepository, SqliteMessageRepository, SqliteProposalRepository,
     SqliteRuleRepository, SqliteSenderRepository, SqliteShadowOutcomeRepository,
     SqliteThreadRepository,

@@ -14,7 +14,7 @@ use mailmate_core::Ports;
 use mailmate_test_support::fakes::{
     FakeActionPlanner, FakeClassificationEngine, FakeClock, FakeLearningEngine, FakeMailClient,
     FakePolicyGuard, FakeProposalReview, FakeRuleCurator, FakeSecretStore, FakeTier2Classifier,
-    FakeTransport, StubFeatureExtractor,
+    FakeTrainingPipeline, FakeTransport, StubFeatureExtractor,
 };
 
 fn neutral_classification() -> Classification {
@@ -47,6 +47,7 @@ fn core_ports_compose_from_fakes_and_route_calls() {
         learning_engine: Arc::new(FakeLearningEngine::new()),
         rule_curator: Arc::new(FakeRuleCurator::new()),
         proposal_review: Arc::new(FakeProposalReview::new()),
+        training_pipeline: Arc::new(FakeTrainingPipeline::new()),
     };
 
     // A call made through the boxed port reaches the concrete fake behind it.

@@ -83,7 +83,7 @@ fn data_survives_a_full_close_and_reopen() {
         let backend = open_backend(&StorageConfig::sqlite_file(&temp.path)).unwrap();
         assert_eq!(
             backend.applied_migration_versions().unwrap(),
-            vec![1, 2, 3, 4],
+            vec![1, 2, 3, 4, 5],
             "schema persisted across reopen"
         );
         let repo = SqliteMessageRepository::new(backend);

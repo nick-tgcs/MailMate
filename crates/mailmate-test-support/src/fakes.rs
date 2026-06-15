@@ -10,17 +10,23 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use mailmate_common::action::{ActionPlan, BlockedAction, GuardedActionPlan, ProposedAction};
+use mailmate_common::adapter::{
+    check_compatibility, AdapterCompatibility, AdapterSpec, BaseModelTarget,
+};
+use mailmate_common::ai::{
+    ProviderCapabilities, ProviderId, StructuredRequest, StructuredResponse,
+};
 use mailmate_common::audit::AuditEntry;
 use mailmate_common::classification::{Classification, ClassificationInput};
 use mailmate_common::curator::{CuratorReport, CuratorRequest, ReviewDecision, ReviewOutcome};
 use mailmate_common::error::{
-    ActionPlanningError, ClassificationError, CuratorError, LearningError, MailError, MlError,
-    PolicyError, ReviewError, SecretError,
+    ActionPlanningError, AiError, ClassificationError, CuratorError, LearningError, MailError,
+    MlError, PolicyError, ReviewError, SecretError, TrainingError,
 };
 use mailmate_common::evidence::{EvidenceQuery, RuleEvidence};
 use mailmate_common::features::{CalibratedScores, FeatureValue, FeatureVector, LabeledExample};
 use mailmate_common::feedback::TaskFeedback;
-use mailmate_common::ids::{AuditId, DraftId, FeedbackId, MessageId};
+use mailmate_common::ids::{AdapterId, AuditId, DraftId, FeedbackId, MessageId};
 use mailmate_common::mail::{DraftSpec, FetchScope, MailAction, MailEvent, MessageData};
 use mailmate_common::planning::ActionPlanningInput;
 use mailmate_common::policy::{PolicyCheckResult, PolicyContext, PolicyOutcome};
@@ -30,6 +36,7 @@ use mailmate_common::secret::{Secret, SecretKey};
 use mailmate_common::stream::{EventStream, FrameStream};
 use mailmate_common::time::Timestamp;
 use mailmate_ports::action_planner::ActionPlanner;
+use mailmate_ports::ai_provider::{AiProvider, SupportsAdapters};
 use mailmate_ports::classification_engine::ClassificationEngine;
 use mailmate_ports::clock::Clock;
 use mailmate_ports::feature_extractor::FeatureExtractor;
@@ -40,7 +47,10 @@ use mailmate_ports::proposal_review::ProposalReview;
 use mailmate_ports::rule_curator::RuleCurator;
 use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::tier2_classifier::Tier2Classifier;
+use mailmate_ports::training_pipeline::TrainingPipeline;
 use mailmate_ports::transport::Transport;
+
+use mailmate_common::training::{TrainingPipelineReport, TrainingPipelineRequest};
 
 // ---------------------------------------------------------------------------
 // FakeMailClient
@@ -637,6 +647,136 @@ impl ProposalReview for FakeProposalReview {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FakeTrainingPipeline
+// ---------------------------------------------------------------------------
+
+/// A `TrainingPipeline` that records the requests it was given and returns a pre-seeded
+/// report — so a use-case test can prove the training step was driven without wiring the real
+/// pipeline, trainer backend, and repositories. With no seeded report it returns a benign
+/// export error (an empty feedback corpus produces nothing to train on).
+#[derive(Debug, Default)]
+pub struct FakeTrainingPipeline {
+    report: Option<TrainingPipelineReport>,
+    seen: Mutex<Vec<TrainingPipelineRequest>>,
+}
+
+impl FakeTrainingPipeline {
+    /// A pipeline that records requests and returns an "empty corpus" error.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A pipeline that returns `report` for every run.
+    #[must_use]
+    pub fn returning(report: TrainingPipelineReport) -> Self {
+        Self {
+            report: Some(report),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The requests it was given, in order.
+    #[must_use]
+    pub fn requests(&self) -> Vec<TrainingPipelineRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TrainingPipeline for FakeTrainingPipeline {
+    async fn run(
+        &self,
+        request: TrainingPipelineRequest,
+    ) -> Result<TrainingPipelineReport, TrainingError> {
+        self.seen.lock().unwrap().push(request);
+        match &self.report {
+            Some(report) => Ok(report.clone()),
+            None => Err(TrainingError::Export(
+                "fake: no eligible examples".to_owned(),
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeAdapterProvider
+// ---------------------------------------------------------------------------
+
+/// An `AiProvider` that also `SupportsAdapters`, for proving a LoRA-adapted provider is still
+/// just a provider: it refuses an incompatible adapter (no silent activation), and whatever
+/// it returns after an adapter is loaded is the *same* `StructuredResponse` every other
+/// provider returns — so it still flows through validation → rules → policy and cannot bypass
+/// them. The response it returns is fixed at construction (so a test can make it emit a
+/// policy-forbidden suggestion and prove the guard still blocks it).
+#[derive(Debug)]
+pub struct FakeAdapterProvider {
+    target: BaseModelTarget,
+    response: StructuredResponse,
+    loaded: Mutex<Vec<AdapterId>>,
+}
+
+impl FakeAdapterProvider {
+    /// A provider whose base model is `target` and which always returns `response`.
+    #[must_use]
+    pub fn new(target: BaseModelTarget, response: StructuredResponse) -> Self {
+        Self {
+            target,
+            response,
+            loaded: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The adapters currently loaded.
+    #[must_use]
+    pub fn loaded_adapters(&self) -> Vec<AdapterId> {
+        self.loaded.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AiProvider for FakeAdapterProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::from("prov_adapter_fake")
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+
+    async fn complete_structured(
+        &self,
+        _request: StructuredRequest,
+    ) -> Result<StructuredResponse, AiError> {
+        Ok(self.response.clone())
+    }
+}
+
+#[async_trait]
+impl SupportsAdapters for FakeAdapterProvider {
+    fn can_load_adapter(&self, adapter: &AdapterSpec) -> AdapterCompatibility {
+        check_compatibility(adapter, &self.target)
+    }
+
+    async fn load_adapter(&self, adapter: AdapterSpec) -> Result<(), AiError> {
+        // An incompatible adapter is REFUSED — it cannot attach to a base it does not match.
+        if check_compatibility(&adapter, &self.target).is_incompatible() {
+            return Err(AiError::Validation(format!(
+                "refusing to load incompatible adapter {}",
+                adapter.adapter_id
+            )));
+        }
+        self.loaded.lock().unwrap().push(adapter.adapter_id);
+        Ok(())
+    }
+
+    async fn unload_adapter(&self, adapter_id: AdapterId) -> Result<(), AiError> {
+        self.loaded.lock().unwrap().retain(|id| id != &adapter_id);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,5 +1017,66 @@ mod tests {
         assert_eq!(outcome.new_status, ProposalStatus::Rejected);
         assert_eq!(review.decisions().len(), 2);
         assert!(block_on(review.pending()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fake_training_pipeline_records_requests_and_reports_empty_by_default() {
+        let pipeline = FakeTrainingPipeline::new();
+        let err = block_on(pipeline.run(TrainingPipelineRequest::new("d", "p"))).unwrap_err();
+        assert!(matches!(err, TrainingError::Export(_)));
+        assert_eq!(pipeline.requests().len(), 1);
+    }
+
+    #[test]
+    fn fake_adapter_provider_refuses_incompatible_adapters_but_still_returns_a_response() {
+        use mailmate_common::training::AdapterType;
+        let target = BaseModelTarget {
+            family: "llama".to_owned(),
+            tokenizer_hash: Some("tok_a".to_owned()),
+            chat_template_hash: None,
+        };
+        let response = StructuredResponse {
+            raw_text: "ok".to_owned(),
+            parsed_json: serde_json::json!({"text": "ok"}),
+            schema_validated_by: None,
+        };
+        let provider = FakeAdapterProvider::new(target, response);
+
+        let incompatible = AdapterSpec {
+            adapter_id: AdapterId::from("lora_qwen"),
+            path: "/x".to_owned(),
+            adapter_type: AdapterType::Lora,
+            base_model_family: "qwen".to_owned(),
+            tokenizer_hash: Some("tok_a".to_owned()),
+            chat_template_hash: None,
+        };
+        assert!(provider.can_load_adapter(&incompatible).is_incompatible());
+        assert!(block_on(provider.load_adapter(incompatible)).is_err());
+        assert!(
+            provider.loaded_adapters().is_empty(),
+            "incompatible adapter never loads"
+        );
+
+        let compatible = AdapterSpec {
+            adapter_id: AdapterId::from("lora_llama"),
+            path: "/y".to_owned(),
+            adapter_type: AdapterType::Lora,
+            base_model_family: "llama".to_owned(),
+            tokenizer_hash: Some("tok_a".to_owned()),
+            chat_template_hash: None,
+        };
+        block_on(provider.load_adapter(compatible)).unwrap();
+        assert_eq!(provider.loaded_adapters().len(), 1);
+        // Even with an adapter loaded, the provider returns a plain StructuredResponse.
+        let out = block_on(provider.complete_structured(StructuredRequest {
+            messages: vec![],
+            json_schema: None,
+            grammar: None,
+            sampling: Default::default(),
+        }))
+        .unwrap();
+        assert_eq!(out.raw_text, "ok");
+        block_on(provider.unload_adapter(AdapterId::from("lora_llama"))).unwrap();
+        assert!(provider.loaded_adapters().is_empty());
     }
 }

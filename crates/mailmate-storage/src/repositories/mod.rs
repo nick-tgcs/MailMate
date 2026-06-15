@@ -15,6 +15,7 @@ mod rules;
 mod senders;
 mod shadow_outcomes;
 mod threads;
+mod training;
 
 pub use audit::SqliteAuditRepository;
 pub use conflicts::SqliteConflictRepository;
@@ -26,3 +27,4 @@ pub use rules::SqliteRuleRepository;
 pub use senders::SqliteSenderRepository;
 pub use shadow_outcomes::SqliteShadowOutcomeRepository;
 pub use threads::SqliteThreadRepository;
+pub use training::{SqliteAdapterRepository, SqliteDatasetRepository, SqliteEvalRunRepository};

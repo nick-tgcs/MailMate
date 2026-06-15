@@ -14,5 +14,7 @@ workspace = true
 [dev-dependencies]
 mailmate-core = { path = "../mailmate-core" }
 mailmate-common = { path = "../mailmate-common" }
+mailmate-ports = { path = "../mailmate-ports" }
 mailmate-test-support = { path = "../mailmate-test-support" }
 futures.workspace = true
+serde_json.workspace = true

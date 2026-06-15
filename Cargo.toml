@@ -26,6 +26,7 @@ members = [
     "crates/mailmate-ml",
     "crates/mailmate-planner",
     "crates/mailmate-learning",
+    "crates/mailmate-training",
     "crates/mailmate-test-support",
     "crates/mailmate-core-tests",
     "crates/mailmate-arch-test",

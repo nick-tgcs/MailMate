@@ -290,6 +290,96 @@ impl From<StorageError> for ReviewError {
     }
 }
 
+/// Failures from deriving and rendering a training dataset on export.
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    /// A privacy ceiling was violated: an example required a level the export forbids, and
+    /// it could not be redacted down to the ceiling.
+    #[error("export privacy violation: {0}")]
+    Privacy(String),
+    /// No example was eligible for the requested view (a dataset would be empty).
+    #[error("no eligible examples for export: {0}")]
+    Empty(String),
+    /// A storage-seam failure while reading feedback or persisting a dataset record.
+    #[error("export storage error: {0}")]
+    Storage(String),
+    /// A row could not be rendered to its serialized form.
+    #[error("export serialization error: {0}")]
+    Serialization(String),
+}
+
+impl From<StorageError> for ExportError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(value.to_string())
+    }
+}
+
+/// Failures from a `TrainerBackend` implementation (the swappable weight-crunching seam).
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum TrainerError {
+    /// The job asked for a capability the backend does not advertise (e.g. a LoRA job on a
+    /// backend whose `capabilities().lora` is false). The honest-capabilities guard.
+    #[error("trainer does not support this job: {0}")]
+    Unsupported(String),
+    /// The job itself was malformed (e.g. an empty dataset, an unknown objective).
+    #[error("invalid training job: {0}")]
+    InvalidJob(String),
+    /// A backend-internal failure (compute error, external tool failure, …).
+    #[error("trainer backend error: {0}")]
+    Backend(String),
+}
+
+/// Failures from the training-pipeline orchestration (`TrainingPipeline` port): export →
+/// train → import → evaluate → gate.
+#[derive(Debug, thiserror::Error)]
+pub enum TrainingError {
+    /// The export stage failed.
+    #[error("training export error: {0}")]
+    Export(String),
+    /// The trainer backend failed.
+    #[error("training backend error: {0}")]
+    Trainer(String),
+    /// The evaluation stage failed.
+    #[error("training evaluation error: {0}")]
+    Evaluation(String),
+    /// The candidate adapter was not metadata-compatible with the target base model.
+    #[error("training compatibility error: {0}")]
+    Compatibility(String),
+    /// A storage-seam failure while persisting datasets/adapters/eval runs.
+    #[error("training storage error: {0}")]
+    Storage(String),
+    /// An AI-provider failure during evaluation.
+    #[error("training provider error: {0}")]
+    Provider(String),
+}
+
+impl From<ExportError> for TrainingError {
+    fn from(value: ExportError) -> Self {
+        match value {
+            ExportError::Storage(msg) => Self::Storage(msg),
+            other => Self::Export(other.to_string()),
+        }
+    }
+}
+
+impl From<TrainerError> for TrainingError {
+    fn from(value: TrainerError) -> Self {
+        Self::Trainer(value.to_string())
+    }
+}
+
+impl From<StorageError> for TrainingError {
+    fn from(value: StorageError) -> Self {
+        Self::Storage(value.to_string())
+    }
+}
+
+impl From<AiError> for TrainingError {
+    fn from(value: AiError) -> Self {
+        Self::Provider(value.to_string())
+    }
+}
+
 /// Aggregate error for call sites that prefer one type over per-port enums.
 #[derive(Debug, thiserror::Error)]
 pub enum MailMateError {
@@ -332,6 +422,15 @@ pub enum MailMateError {
     /// A proposal-review failure.
     #[error(transparent)]
     Review(#[from] ReviewError),
+    /// A training-dataset export failure.
+    #[error(transparent)]
+    Export(#[from] ExportError),
+    /// A trainer-backend failure.
+    #[error(transparent)]
+    Trainer(#[from] TrainerError),
+    /// A training-pipeline orchestration failure.
+    #[error(transparent)]
+    Training(#[from] TrainingError),
 }
 
 #[cfg(test)]
@@ -442,6 +541,47 @@ mod tests {
         assert!(matches!(
             aggregate,
             MailMateError::Review(ReviewError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn training_errors_fold_from_leaf_errors_and_into_the_aggregate() {
+        // Export folds storage to storage, everything else to export.
+        let from_storage: ExportError = StorageError::Backend("disk".to_owned()).into();
+        assert!(matches!(from_storage, ExportError::Storage(_)));
+        let privacy = ExportError::Privacy("body above ceiling".to_owned());
+        assert!(privacy.to_string().contains("privacy"));
+
+        // TrainerError reports the honest-capabilities case.
+        let unsupported = TrainerError::Unsupported("lora not advertised".to_owned());
+        assert!(unsupported.to_string().contains("does not support"));
+
+        // TrainingError folds from each stage's leaf error.
+        let from_export: TrainingError = ExportError::Empty("no rows".to_owned()).into();
+        assert!(matches!(from_export, TrainingError::Export(_)));
+        let from_export_storage: TrainingError = ExportError::Storage("disk".to_owned()).into();
+        assert!(matches!(from_export_storage, TrainingError::Storage(_)));
+        let from_trainer: TrainingError = TrainerError::Backend("compute".to_owned()).into();
+        assert!(matches!(from_trainer, TrainingError::Trainer(_)));
+        let from_storage: TrainingError = StorageError::Constraint("fk".to_owned()).into();
+        assert!(matches!(from_storage, TrainingError::Storage(_)));
+        let from_provider: TrainingError = AiError::Unavailable("no model".to_owned()).into();
+        assert!(matches!(from_provider, TrainingError::Provider(_)));
+
+        let aggregate: MailMateError = ExportError::Empty("x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Export(ExportError::Empty(_))
+        ));
+        let aggregate: MailMateError = TrainerError::InvalidJob("x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Trainer(TrainerError::InvalidJob(_))
+        ));
+        let aggregate: MailMateError = TrainingError::Evaluation("x".to_owned()).into();
+        assert!(matches!(
+            aggregate,
+            MailMateError::Training(TrainingError::Evaluation(_))
         ));
     }
 }

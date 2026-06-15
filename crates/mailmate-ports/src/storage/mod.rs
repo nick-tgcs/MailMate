@@ -27,6 +27,7 @@ pub mod rules;
 pub mod senders;
 pub mod shadow_outcomes;
 pub mod threads;
+pub mod training;
 
 pub use audit::AuditRepository;
 pub use conflicts::ConflictRepository;
@@ -38,6 +39,7 @@ pub use rules::RuleRepository;
 pub use senders::SenderRepository;
 pub use shadow_outcomes::ShadowOutcomeRepository;
 pub use threads::ThreadRepository;
+pub use training::{AdapterRepository, DatasetRepository, EvalRunRepository};
 
 /// The SQL dialect a [`StorageBackend`] speaks. The per-dialect SQL fragments live in the
 /// adapter's `dialect` module; this tag is how a backend announces which it is.

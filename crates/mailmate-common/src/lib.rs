@@ -12,6 +12,7 @@
 
 pub mod action;
 pub mod actor;
+pub mod adapter;
 pub mod ai;
 pub mod audit;
 pub mod classification;
@@ -23,6 +24,7 @@ pub mod error;
 pub mod evidence;
 pub mod features;
 pub mod feedback;
+pub mod hashing;
 pub mod ids;
 pub mod mail;
 pub mod message;
@@ -40,6 +42,7 @@ pub mod stream;
 pub mod task;
 pub mod thread;
 pub mod time;
+pub mod training;
 
 /// Returns this crate's package name for smoke tests.
 #[must_use]

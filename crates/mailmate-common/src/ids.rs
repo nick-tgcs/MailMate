@@ -141,6 +141,26 @@ id_newtype!(
     #[doc = "Recorded rule-conflict id (`conf_…`)."]
     ConflictId
 );
+id_newtype!(
+    "ds",
+    #[doc = "Derived training-dataset id (`ds_…`)."]
+    DatasetId
+);
+id_newtype!(
+    "lora",
+    #[doc = "Registered adapter id (`lora_…`)."]
+    AdapterId
+);
+id_newtype!(
+    "eval",
+    #[doc = "Adapter evaluation-run id (`eval_…`)."]
+    EvalRunId
+);
+id_newtype!(
+    "trainer",
+    #[doc = "Trainer-backend identity (`trainer_…`)."]
+    TrainerId
+);
 
 /// Mint a fresh `<prefix>_<uuid-simple>` string with an explicit prefix.
 ///
@@ -214,6 +234,18 @@ mod tests {
     fn phase8_id_kinds_carry_their_prefixes() {
         assert_eq!(ConflictId::PREFIX, "conf");
         assert!(ConflictId::fresh().as_str().starts_with("conf_"));
+    }
+
+    #[test]
+    fn phase9_id_kinds_carry_their_prefixes() {
+        assert_eq!(DatasetId::PREFIX, "ds");
+        assert!(DatasetId::fresh().as_str().starts_with("ds_"));
+        assert_eq!(AdapterId::PREFIX, "lora");
+        assert!(AdapterId::fresh().as_str().starts_with("lora_"));
+        assert_eq!(EvalRunId::PREFIX, "eval");
+        assert!(EvalRunId::fresh().as_str().starts_with("eval_"));
+        assert_eq!(TrainerId::PREFIX, "trainer");
+        assert!(TrainerId::fresh().as_str().starts_with("trainer_"));
     }
 
     #[test]

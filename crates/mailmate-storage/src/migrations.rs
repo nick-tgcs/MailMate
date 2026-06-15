@@ -23,7 +23,9 @@ struct Migration {
 
 /// Every embedded migration, in ascending version order. Phase 2 ships the foundational
 /// schema; Phase 7 appends `0002` (rule versions) and `0003` (audit and feedback); Phase 8
-/// appends `0004` (the curator's `rule_conflicts` + `rule_proposal_feedback`).
+/// appends `0004` (the curator's `rule_conflicts` + `rule_proposal_feedback`); Phase 9
+/// appends `0005` (the training layer's `training_datasets` + `lora_adapters` +
+/// `lora_eval_runs`).
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -48,6 +50,12 @@ const MIGRATIONS: &[Migration] = &[
         name: "0004_curator",
         common: include_str!("../../../migrations/common/0004_curator.sql"),
         sqlite: include_str!("../../../migrations/sqlite/0004_curator.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "0005_training",
+        common: include_str!("../../../migrations/common/0005_training.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0005_training.sql"),
     },
 ];
 
@@ -159,15 +167,15 @@ mod tests {
         let first = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert_eq!(
             first,
-            vec![1, 2, 3, 4],
-            "fresh DB applies 0001..0004 in order"
+            vec![1, 2, 3, 4, 5],
+            "fresh DB applies 0001..0005 in order"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5]);
 
         // Re-running is a no-op (covers the "migration from prior version" idempotency).
         let second = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert!(second.is_empty(), "re-run applies nothing");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -187,10 +195,10 @@ mod tests {
         let applied = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert_eq!(
             applied,
-            vec![2, 3, 4],
+            vec![2, 3, 4, 5],
             "only the not-yet-applied migrations run"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -215,6 +223,9 @@ mod tests {
             "agent_proposals",
             "rule_conflicts",
             "rule_proposal_feedback",
+            "training_datasets",
+            "lora_adapters",
+            "lora_eval_runs",
         ] {
             let count: i64 = conn
                 .query_row(

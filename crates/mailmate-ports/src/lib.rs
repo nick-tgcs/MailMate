@@ -19,6 +19,7 @@ pub mod rule_engine;
 pub mod secret_store;
 pub mod storage;
 pub mod tier2_classifier;
+pub mod training_pipeline;
 pub mod transport;
 
 /// Returns this crate's package name for smoke tests.
