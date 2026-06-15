@@ -399,6 +399,64 @@ fn suggestion_dismissed_is_audited_not_a_fabricated_correction() {
 }
 
 #[test]
+fn action_undone_of_a_move_without_a_target_folder_is_a_record_failed_error() {
+    let learning = Arc::new(FakeLearningEngine::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.learning_engine = learning.clone();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+    // A reverted move must carry the folder it was put back to; without it the undo cannot
+    // become a filing correction, so it must error rather than fabricate one.
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "action_undone",
+            "action_kind": "move",
+            "thunderbird_message_id": "tb_42",
+            "from_folder_id": "Promotions",
+            "user_initiated": true
+        }),
+    )))
+    .unwrap();
+    assert_eq!(error_code(&out), "record_failed");
+    assert!(
+        learning.recorded_feedback().is_empty(),
+        "no filing feedback is fabricated from a missing reverted-to folder"
+    );
+}
+
+#[test]
+fn new_mail_never_auto_applies_a_require_review_action_in_the_allowed_list() {
+    let mail = Arc::new(FakeMailClient::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.mail_client = mail.clone();
+    // FakePolicyGuard projects every action into allowed_actions; a RequireReview landing
+    // there must still be skipped by apply_allowed — it is a surfaced flag, never a mutation.
+    ports.action_planner = Arc::new(FakeActionPlanner::returning(vec![
+        ProposedAction::RequireReview {
+            target: "msg_tb_tb_42".to_owned(),
+        },
+    ]));
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    block_on(router.handle(request("new_mail", classify_payload("tb_42")))).unwrap();
+
+    // Nothing reached the mail client, and nothing is listed as applied.
+    assert!(
+        mail.applied_actions().is_empty(),
+        "RequireReview is never auto-applied"
+    );
+    assert!(mail.created_drafts().is_empty());
+    match &out.sent_frames()[0] {
+        Frame::Notification { payload, .. } => {
+            assert_eq!(payload["applied_actions"].as_array().unwrap().len(), 0);
+        }
+        other => panic!("got {other:?}"),
+    }
+}
+
+#[test]
 fn new_mail_applies_allowed_actions_and_pushes_classification_ready() {
     let mail = Arc::new(FakeMailClient::new());
     let audit = Arc::new(FakeAuditRepository::new());
