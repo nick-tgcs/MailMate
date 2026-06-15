@@ -23,7 +23,7 @@
 
 /* global NativeHost, HOST_PHASE, registerContextMenus, readMessageForHost, applyPlannedAction,
    openDraftFromResponse, executeMailCommand, consumeHostMove, openFollowupDraft,
-   surfaceNeedsAttention */
+   surfaceNeedsAttention, showDesktopNotification */
 
 const host = new NativeHost();
 
@@ -85,6 +85,12 @@ const POPUP_HANDLERS = {
   "mm:listActivity": (m) =>
     hostCall("list_recent_activity", { limit: m.limit || 80, event_type_filter: m.eventTypeFilter || null }),
   "mm:listProposals": () => hostCall("list_pending_reviews", {}),
+  "mm:reviewProposal": (m) =>
+    hostCall("review_rule_proposal", {
+      proposal_id: m.proposalId,
+      decision: m.decision,
+      reason_code: m.reasonCode || null,
+    }),
   "mm:settings": () => hostCall("get_settings", {}, (r) => ({ ok: true, settings: r })),
   "mm:setPause": (m) => hostCall("set_pause", { paused: Boolean(m.paused) }),
 };
@@ -341,11 +347,18 @@ host.onNotification(async (type, payload) => {
     const result = await executeMailCommand(payload);
     host.notifyHost("record_user_action", result);
   } else if (type === "followup_draft_ready") {
-    // A scheduled follow-up came due: open its review-required draft (never auto-sent).
+    // A scheduled follow-up came due: open its review-required draft (never auto-sent) and ping.
     await openFollowupDraft(payload);
+    showDesktopNotification(type, payload);
   } else if (type === "followup_needs_attention") {
     surfaceNeedsAttention(payload);
     await bumpFollowupAttention(payload);
+    showDesktopNotification(type, payload);
+  } else if (type === "proposal_ready") {
+    // The curator promoted a learned behavior to a pending proposal — refresh the badge + ping.
+    await recomputeSpaceBadge();
+    browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "proposals" }).catch(() => {});
+    showDesktopNotification(type, payload);
   } else {
     console.info("[MailMate] notification:", type, payload);
   }

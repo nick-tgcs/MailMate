@@ -39,6 +39,10 @@ the extension only relays events and applies host-returned safe actions.
   Mail space). Review is built from buffered `classification_ready` decisions; Activity from
   `list_recent_activity`; Proposals (read-only here) from `list_pending_reviews`. Owns no port —
   drives the host through the background's `mm:*` router.
+- `notifications.js` — the ambient desktop-notification layer: maps the three time-driven host
+  pushes (`proposal_ready`, `followup_draft_ready`, `followup_needs_attention`) into
+  `browser.notifications`, dedups per item, and on click opens the MailMate space focused on the
+  right tab. Never acts on mail. (Quiet-hours + batching are honest deferrals.)
 - `icons/mailmate.svg` — the spaces-toolbar button icon (fixed mid-tone fills legible on both
   light and dark themes, with the brand-blue spark; a space icon is an image resource, so it does
   not theme-tint).
@@ -78,12 +82,30 @@ wires (`classification_ready` buffering for Review, `list_pending_reviews` for P
 | Onboarding walkthrough + connection banner + empty states | `storage.local` `mm:onboarded`; `HostStatus` | **shipped** |
 | Aggregate space badge | `review + needs-attention follow-ups + pending proposals`, via `spaces.update` | **shipped** |
 
-Honest M2 boundaries: the **Proposals** tab is read-only (approve/reject/edit + conflict review
-land with `review_rule_proposal` in Milestone 3); the **Follow-ups** tab is a placeholder until
-`list_followups` (Milestone 4); **Pause** and **Settings** call their real host endpoints
-(`set_pause`, `options_ui`) and degrade with an explicit message until those land in Milestone 4;
-the Review buffer is volatile across a browser restart (the durable `list_review_queue` reopen is
-the documented future addition).
+Honest M2 boundaries: the **Follow-ups** tab is a placeholder until `list_followups` (Milestone
+4); **Pause** and **Settings** call their real host endpoints (`set_pause`, `options_ui`) and
+degrade with an explicit message until those land in Milestone 4; the Review buffer is volatile
+across a browser restart (the durable `list_review_queue` reopen is the documented future
+addition).
+
+## Milestone 3 UX — Proposals gate + notifications
+
+The **Proposals** tab becomes the live materialization gate, and the desktop-notification layer
+lands. Host addition: `review_rule_proposal` (accept/reject through the always-present
+`ProposalReview` port).
+
+| Surface | Wire | Status |
+|---|---|---|
+| Proposals tab (Approve → shadow / Reject) | `list_pending_reviews` + `review_rule_proposal` | **shipped** (`dashboard.js`) |
+| Desktop notifications (deep-link into the space) | `proposal_ready` / `followup_draft_ready` / `followup_needs_attention` → `browser.notifications` | **shipped** (`notifications.js`) |
+
+Honest M3 boundaries: every approval materializes the rule to its **recommended status** (shadow /
+pending-review) — there is no one-click "→ active" (the `ProposalReview` port performs no direct
+activation; promotion is a separate step), so even a high-risk approval only shadows. Rule
+**editing** and live **conflict-overlap** detail (`get_proposal_detail`) are deferred — the
+`list_pending_reviews` summary (title / type / risk / recommended-status / rationale) drives the
+card. The proactive `proposal_ready` push is wired on the client but the host does not emit it yet
+(it needs a curator tick); the Proposals tab stays correct by polling `list_pending_reviews`.
 
 ## Milestone 1 UX (shipped)
 

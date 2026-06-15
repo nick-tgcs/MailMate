@@ -27,7 +27,8 @@
     "accountsRead",
     "compose",
     "compose.save",
-    "storage"
+    "storage",
+    "notifications"
   ],
   "background": {
     "scripts": [
@@ -36,6 +37,7 @@
       "drafts.js",
       "followups.js",
       "context_menu.js",
+      "notifications.js",
       "background.js"
     ]
   }

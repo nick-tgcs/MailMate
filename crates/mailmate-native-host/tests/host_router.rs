@@ -290,6 +290,54 @@ fn list_recent_activity_returns_newest_first_and_filters_by_family() {
 }
 
 #[test]
+fn review_rule_proposal_applies_the_decision_through_the_review_port() {
+    let review = Arc::new(FakeProposalReview::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.proposal_review = review.clone();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    // Accept → materializes to the recommended status (the fake synthesizes `accepted`).
+    block_on(router.handle(request(
+        "review_rule_proposal",
+        json!({ "proposal_id": "prop_1", "decision": "accept_for_shadow_mode" }),
+    )))
+    .unwrap();
+    let payload = one_ok_response(&out);
+    assert_eq!(payload["reviewed"], true);
+    assert_eq!(payload["proposal_id"], "prop_1");
+    assert_eq!(payload["resulting_status"], "accepted");
+    assert_eq!(review.decisions().len(), 1);
+
+    // Reject → the curator's negative signal is recorded.
+    let out2 = Arc::new(FakeTransport::new());
+    let router2 =
+        HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out2.clone());
+    block_on(router2.handle(request(
+        "review_rule_proposal",
+        json!({ "proposal_id": "prop_2", "decision": "reject", "reason_code": "too_broad" }),
+    )))
+    .unwrap();
+    assert_eq!(one_ok_response(&out2)["resulting_status"], "rejected");
+    assert_eq!(review.decisions().len(), 2);
+}
+
+#[test]
+fn review_rule_proposal_rejects_an_unknown_decision() {
+    let out = Arc::new(FakeTransport::new());
+    let ports = base_ports();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    block_on(router.handle(request(
+        "review_rule_proposal",
+        json!({ "proposal_id": "prop_1", "decision": "delete_everything" }),
+    )))
+    .unwrap();
+
+    assert_eq!(error_code(&out), "invalid_decision");
+}
+
+#[test]
 fn classification_corrected_routes_a_wrong_category_to_classification_feedback() {
     let learning = Arc::new(FakeLearningEngine::new());
     let out = Arc::new(FakeTransport::new());

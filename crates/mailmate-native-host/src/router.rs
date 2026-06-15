@@ -43,9 +43,10 @@ use mailmate_common::action::{GuardedActionPlan, PlannedAction};
 use mailmate_common::actor::Actor;
 use mailmate_common::audit::{event_type, AuditEntry, AuditQuery};
 use mailmate_common::correction::UserCorrection;
+use mailmate_common::curator::ReviewDecision;
 use mailmate_common::error::TransportError;
 use mailmate_common::features::FeatureVector;
-use mailmate_common::ids::{FolderId, ThreadId};
+use mailmate_common::ids::{FolderId, ProposalId, ThreadId};
 use mailmate_common::mail::MailAction;
 use mailmate_common::policy::TriggerKind;
 use mailmate_common::proposal::ProposalStatus;
@@ -56,6 +57,7 @@ use mailmate_ports::clock::Clock;
 use mailmate_ports::exit_detector::ExitDetector;
 use mailmate_ports::follow_up_scheduler::FollowUpScheduler;
 use mailmate_ports::mail_client::MailClient;
+use mailmate_ports::proposal_review::ProposalReview;
 use mailmate_ports::storage::pipeline_items::PipelineItemRepository;
 use mailmate_ports::storage::{AuditRepository, ProposalRepository};
 use mailmate_ports::transport::Transport;
@@ -71,7 +73,8 @@ use crate::native_stdio::read_frame;
 use crate::protocol_dto::{
     CancelSequencePayload, ClassifyMessagePayload, DraftReplyPayload, EnrollPipelineItemPayload,
     ExplainDecisionPayload, ListRecentActivityPayload, RecordUserActionPayload,
-    RescheduleFollowupPayload, ReviewFollowupPayload, UpdatePipelineStagePayload,
+    RescheduleFollowupPayload, ReviewFollowupPayload, ReviewRuleProposalPayload,
+    UpdatePipelineStagePayload,
 };
 
 /// The follow-up engine + repository ports the router needs to serve the sales-pipeline
@@ -111,6 +114,7 @@ pub struct HostRouter {
     mail_client: Arc<dyn MailClient>,
     audit: Arc<dyn AuditRepository>,
     clock: Arc<dyn Clock>,
+    proposal_review: Arc<dyn ProposalReview>,
     out: Arc<dyn Transport>,
     followups: Option<FollowUpSuite>,
     admin: Option<AdminSuite>,
@@ -133,6 +137,7 @@ impl HostRouter {
             mail_client: ports.mail_client.clone(),
             audit,
             clock: ports.clock.clone(),
+            proposal_review: ports.proposal_review.clone(),
             out,
             followups: None,
             admin: None,
@@ -248,6 +253,7 @@ impl HostRouter {
             "explain_decision" => self.handle_explain(request_id, payload).await,
             "list_recent_activity" => self.handle_list_recent_activity(request_id, payload).await,
             "list_pending_reviews" => self.handle_list_reviews(request_id).await,
+            "review_rule_proposal" => self.handle_review_proposal(request_id, payload).await,
             "get_settings" => self.handle_get_settings(request_id),
             other => self.send(error_response(
                 request_id,
@@ -778,6 +784,59 @@ impl HostRouter {
         }
     }
 
+    /// Apply a human's accept/reject decision to a pending agent proposal — the Proposals-tab
+    /// materialization gate. Acceptance is the **only** path that creates the recommended rule,
+    /// and even then it enters its recommended status (shadow / pending-review), never directly
+    /// `active`: both `accept_*` decisions materialize to that recommended status (forcing a
+    /// rule straight to `active` is a separate promotion the review port does not perform), and
+    /// a rejection records the curator's negative signal. Served through the always-present
+    /// proposal-review port, so it needs no admin wiring.
+    async fn handle_review_proposal(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let parsed: ReviewRuleProposalPayload = match serde_json::from_value(payload) {
+            Ok(p) => p,
+            Err(e) => return self.send(invalid_payload(request_id, &e)),
+        };
+        let proposal_id = ProposalId::from(parsed.proposal_id.as_str());
+        let decision = match parsed.decision.as_str() {
+            "accept_for_shadow_mode" | "accept_active" => ReviewDecision::accept(proposal_id),
+            "reject" => ReviewDecision::reject(
+                proposal_id,
+                parsed.reason_code.unwrap_or_else(|| "rejected".to_owned()),
+            ),
+            other => {
+                return self.send(error_response(
+                    request_id,
+                    "invalid_decision",
+                    format!(
+                        "decision must be accept_for_shadow_mode | accept_active | reject, got {other:?}"
+                    ),
+                    None,
+                ));
+            }
+        };
+        match self.proposal_review.review(decision).await {
+            Ok(outcome) => self.send(ok_response(
+                request_id,
+                json!({
+                    "reviewed": true,
+                    "proposal_id": outcome.proposal_id,
+                    "resulting_status": outcome.new_status.as_str(),
+                    "rule_id": outcome.created_rule_id,
+                }),
+            )),
+            Err(e) => self.send(error_response(
+                request_id,
+                "review_proposal_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
     /// Return the effective, secret-free settings snapshot.
     fn handle_get_settings(&self, request_id: String) -> Result<(), TransportError> {
         let Some(admin) = &self.admin else {
@@ -800,6 +859,7 @@ impl HostRouter {
             "record_user_action",
             "explain_decision",
             "list_recent_activity",
+            "review_rule_proposal",
         ];
         if self.followups.is_some() {
             capabilities.push("followups");

@@ -158,6 +158,7 @@ pub fn followup_draft_ready_payload(fired: &FiredStep) -> Value {
         "draft": {
             "draft_id": fired.draft.draft_id,
             "subject": fired.draft.subject,
+            "body": fired.draft.body,
             "requires_review": fired.draft.requires_human_review,
             "safety_notes": fired.draft.safety_notes,
         },
@@ -307,6 +308,8 @@ mod tests {
         assert_eq!(payload["step_index"], 2);
         assert_eq!(payload["coalesced_from_step_indexes"][0], 1);
         assert_eq!(payload["draft"]["requires_review"], true);
+        // The generated body rides along so the review compose window opens populated, not blank.
+        assert_eq!(payload["draft"]["body"], "Checking in.");
         assert_eq!(
             payload["guarded_plan"]["actions"][0]["policy_outcome"],
             "requires_review"

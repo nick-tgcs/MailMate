@@ -114,12 +114,42 @@ async function boot() {
 async function enterApp() {
   $("mm-onboarding").hidden = true;
   $("mm-app").hidden = false;
+  // A notification click can request a tab durably via storage.session, which survives a cold
+  // space-open that races the fire-and-forget focusTab message. Consume it once before painting.
+  const wanted = await consumeFocusTab();
+  if (wanted) setActiveTabSelection(wanted);
   const reply = await send({ type: "mm:getStatus" });
   const status = reply.status || { phase: PHASE.disconnected, reason: reply.error };
   lastPhase = status.phase;
   renderBanner(status);
   await refreshSettings();
   await renderTab(activeTab);
+  // Prime the secondary tab badges so a startup with pending work shows the count before the
+  // user opens those tabs (the active tab's own render already set its count).
+  if (activeTab !== "proposals") refreshProposalCount();
+}
+
+const FOCUS_TAB_KEY = "mm:focusTab";
+const VALID_TABS = ["review", "followups", "proposals", "activity"];
+
+// Read + clear the deep-link tab a notification click stashed, returning a valid tab or null.
+async function consumeFocusTab() {
+  try {
+    const got = await browser.storage.session.get(FOCUS_TAB_KEY);
+    const tab = got[FOCUS_TAB_KEY];
+    if (tab !== undefined) await browser.storage.session.remove(FOCUS_TAB_KEY);
+    return VALID_TABS.includes(tab) ? tab : null;
+  } catch {
+    return null;
+  }
+}
+
+// Move the tab-bar selection to `name` without rendering (used before the first paint).
+function setActiveTabSelection(name) {
+  activeTab = name;
+  for (const t of document.querySelectorAll(".mm-tab")) {
+    t.setAttribute("aria-selected", String(t.dataset.tab === name));
+  }
 }
 
 async function isOnboarded() {
@@ -581,10 +611,23 @@ function explainInActivity(tbId) {
   if (tbId) toast("Showing recent activity");
 }
 
-// --- Tab 3: Proposals (read-only in M2; approve/reject lands in M3) --------------------
+// --- Tab 3: Proposals — the materialization gate --------------------------------------
+
+let proposalsSeq = 0;
+
+// Refresh just the Proposals tab badge without rebuilding the cards — so the count stays right
+// even when the user is on another tab (mirrors refreshReviewCount for the Review tab).
+async function refreshProposalCount() {
+  const reply = await send({ type: "mm:listProposals" });
+  setTabCount("proposals", reply.ok ? (reply.pending_reviews || []).length : 0);
+}
 
 async function renderProposals() {
+  // Sequence guard (mirrors renderActivity): only the newest re-pull paints, so overlapping
+  // renders from a review action + a proposal_ready event can't interleave or show a stale count.
+  const myseq = ++proposalsSeq;
   const reply = await send({ type: "mm:listProposals" });
+  if (myseq !== proposalsSeq) return;
   const c = content();
   clear(c);
 
@@ -611,27 +654,65 @@ async function renderProposals() {
     return;
   }
 
-  for (const p of proposals) {
-    const risk = (p.risk_level || "low").toLowerCase();
-    const card = el("div", { class: "mm-card" });
-    card.appendChild(
-      el("div", { class: "mm-card__top" }, [
-        el("span", { class: `mm-glyph mm-glyph--${risk === "high" ? "high" : risk === "medium" ? "med" : "low"}`, text: "◆" }),
-        el("span", { class: "mm-card__title", text: p.title || p.proposal_type }),
-        el("span", { class: "mm-card__from", text: `${p.proposal_type} · ${risk} risk` }),
-      ]),
+  for (const p of proposals) c.appendChild(proposalCard(p));
+}
+
+function proposalCard(p) {
+  const risk = (p.risk_level || "low").toLowerCase();
+  const card = el("div", { class: "mm-card" });
+  card.appendChild(
+    el("div", { class: "mm-card__top" }, [
+      el("span", { class: `mm-glyph mm-glyph--${risk === "high" ? "high" : risk === "medium" ? "med" : "low"}`, text: "◆" }),
+      el("span", { class: "mm-card__title", text: p.title || p.proposal_type }),
+      el("span", { class: "mm-card__from", text: `${p.proposal_type} · ${risk} risk` }),
+    ]),
+  );
+  card.appendChild(el("p", { class: "mm-card__sub", text: p.rationale || "" }));
+  card.appendChild(
+    el("p", { class: "mm-card__sub mm-muted", text: `Recommended: ${p.recommended_status || "review"}` }),
+  );
+  card.appendChild(el("hr", { class: "mm-card__hr" }));
+
+  // Every approval materializes the rule into its recommended status (shadow / pending-review) —
+  // a rule that runs and logs but never acts on its own until you later promote it. There is no
+  // one-click "→ active": activation is a separate, deliberate step, so even a HIGH-risk approval
+  // here is safe (the rule shadows, it does not act). Rejection feeds the curator's negative signal.
+  const actions = el("div", { class: "mm-card__actions" });
+  const approve = el("button", { class: "mm-btn mm-btn--primary", text: "Approve → shadow" });
+  approve.title = "Materialize as a shadow rule (runs + logs, never acts until you promote it)";
+  approve.addEventListener("click", () => reviewProposal(p, "accept_for_shadow_mode", card));
+  const reject = el("button", { class: "mm-btn", text: "Reject" });
+  reject.addEventListener("click", () => reviewProposal(p, "reject", card));
+  actions.appendChild(approve);
+  actions.appendChild(reject);
+  if (risk === "high") {
+    actions.appendChild(
+      el("span", { class: "mm-note", text: "high-risk — approval shadows only; promotion to active is a separate step" }),
     );
-    card.appendChild(el("p", { class: "mm-card__sub", text: p.rationale || "" }));
-    card.appendChild(el("hr", { class: "mm-card__hr" }));
-    // Approve/reject/edit + conflict review arrive in Milestone 3 (review_rule_proposal). Until
-    // then the queue is honestly read-only — we don't show a button that can't act.
-    card.appendChild(
-      el("div", { class: "mm-card__actions" }, [
-        el("span", { class: "mm-note", text: `Recommended: ${p.recommended_status || "review"} · approve/reject lands with the proposal-review endpoint` }),
-      ]),
-    );
-    content().appendChild(card);
   }
+  card.appendChild(actions);
+  return card;
+}
+
+async function reviewProposal(p, decision, card) {
+  for (const b of card.querySelectorAll("button")) b.disabled = true;
+  const reply = await send({
+    type: "mm:reviewProposal",
+    proposalId: p.id,
+    decision,
+    reasonCode: decision === "reject" ? "user_rejected" : null,
+  });
+  if (!reply.ok) {
+    for (const b of card.querySelectorAll("button")) b.disabled = false;
+    toast(reply.error || "couldn't apply that decision", true);
+    return;
+  }
+  card.remove();
+  // The rule lands in the proposal's *recommended* status (shadow / pending-review); the host's
+  // resulting_status is the proposal disposition ("accepted"), not the rule mode, so show the
+  // mode the card promised.
+  toast(decision === "reject" ? "Rejected" : `Approved → ${p.recommended_status || "shadow"}`);
+  await renderProposals(); // re-pull so the tab count + any remaining cards are accurate
 }
 
 // --- Tab 2: Follow-ups (live pipeline lands in M4 with list_followups) -----------------
@@ -906,11 +987,20 @@ browser.runtime.onMessage.addListener((message) => {
     return false;
   }
   if (message.type === "mm:dashboardEvent") {
-    // A new classification_ready / needs_attention landed — refresh counts always, and coalesce
-    // a Review re-render so a burst of new mail can't yank a card out mid-interaction.
     if (message.event === "review") {
+      // Refresh counts always, and coalesce a Review re-render so a burst of new mail can't yank
+      // a card out mid-interaction.
       refreshReviewCount();
       if (activeTab === "review") scheduleReviewRefresh();
+    } else if (message.event === "proposals") {
+      // A new proposal arrived — refresh the badge always, rebuild cards only if the tab is open.
+      refreshProposalCount();
+      if (activeTab === "proposals") renderProposals();
+    } else if (message.event === "focusTab" && VALID_TABS.includes(message.tab)) {
+      // A desktop-notification click asked us to focus a specific tab (warm path — the dashboard
+      // was already open). Clear the durable stash too so the cold-open consumer can't re-fire it.
+      browser.storage.session.remove(FOCUS_TAB_KEY).catch(() => {});
+      selectTab(message.tab);
     }
     return false;
   }

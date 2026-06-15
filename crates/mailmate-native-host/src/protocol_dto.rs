@@ -240,6 +240,23 @@ pub struct ListRecentActivityPayload {
     pub event_type_filter: Option<String>,
 }
 
+/// The `review_rule_proposal` request: a human's accept/reject decision on a pending agent
+/// proposal — the Proposals-tab materialization gate. Acceptance materializes the recommended
+/// rule **in its recommended status** (shadow/pending-review), never directly `active`: the
+/// `decision` distinguishes the user's intent (`accept_for_shadow_mode` / `accept_active` /
+/// `reject`), but forcing a rule straight to `active` is a separate promotion the review port
+/// does not perform — so both accept variants materialize to the proposal's recommended status.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewRuleProposalPayload {
+    /// The proposal being decided.
+    pub proposal_id: String,
+    /// `accept_for_shadow_mode` | `accept_active` | `reject`.
+    pub decision: String,
+    /// A reason chip code for a rejection (the curator learns not to re-propose).
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
 /// The `enroll_pipeline_item` control request: tag a quote/proposal → create a
 /// `pipeline_item` and arm a workflow on it. The item is always user-enrolled.
 #[derive(Clone, Debug, Deserialize)]
