@@ -1,0 +1,116 @@
+/* action.css — the toolbar popup (connection mini-hub / recovery card).
+ *
+ * Deliberately small and system-themed: the popup's whole job in Milestone 1 is to make the
+ * connection state legible and offer a one-click Retry when the host is down. */
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  width: 280px;
+  font: menu;
+  font-size: 13px;
+  line-height: 1.45;
+  color: FieldText;
+  background: Field;
+}
+
+.mm-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+}
+
+.mm-title {
+  font-weight: 600;
+}
+
+.mm-phase {
+  margin-left: auto;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.mm-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #9e9e9e;
+}
+
+.mm-dot--ready {
+  background: #2e7d32;
+}
+.mm-dot--connecting {
+  background: #9e9e9e;
+}
+.mm-dot--disconnected {
+  background: #c0392b;
+}
+.mm-dot--version_mismatch {
+  background: #e67e22;
+}
+
+.mm-body {
+  padding: 12px;
+}
+
+.mm-body p {
+  margin: 0 0 8px;
+}
+
+.mm-muted {
+  opacity: 0.75;
+}
+
+.mm-meta {
+  font-size: 12px;
+  opacity: 0.7;
+  margin-top: 6px;
+}
+
+.mm-reason {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  opacity: 0.7;
+  word-break: break-word;
+}
+
+.mm-footer {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+button {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: ButtonFace;
+  color: ButtonText;
+  cursor: pointer;
+}
+
+button.mm-primary {
+  border-color: transparent;
+  background: #2563eb;
+  color: #fff;
+}
+
+button:hover {
+  filter: brightness(1.05);
+}
+
+.mm-toast {
+  padding: 8px 12px;
+  margin: 0 12px 12px;
+  border-radius: 6px;
+  background: rgba(46, 125, 50, 0.15);
+  color: #2e7d32;
+  font-size: 12px;
+}

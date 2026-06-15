@@ -9,8 +9,15 @@ the extension only relays events and applies host-returned safe actions.
 - `manifest.json` — MV3 manifest; permissions for native messaging, menus, message
   read/move/update, accounts, and compose; background event page.
 - `native.js` — host name, the `ping` envelope, and `NativeHost`: a long-lived port with
-  request/response correlation **and** an unsolicited-notification fan-out (the host pushes
-  `classification_ready` / `mail_command` at any time).
+  request/response correlation, an unsolicited-notification fan-out (the host pushes
+  `classification_ready` / `mail_command` at any time), **and the single source-of-truth
+  `HostStatus`** — on connect it runs the `hello` handshake (host/protocol version,
+  capabilities, the secret-free drafting/retention posture), heartbeats with `ping`, and
+  exposes `onStatusChange` + `reconnect()`.
+- `action.html` / `action.css` / `action.js` — the toolbar button popup: the connection
+  mini-hub / **recovery card**. Reads `HostStatus` from the background, renders
+  connected / connecting / offline / version-mismatch, and offers a one-click Retry when the
+  host is down. (The popup owns no port — it drives the host through the background.)
 - `message_reader.js` — read a Thunderbird message into the host's `classify_message` /
   `new_mail` wire shape (headers always; body only when retention allows; remote content
   never loaded for classification).
@@ -19,11 +26,12 @@ the extension only relays events and applies host-returned safe actions.
 - `drafts.js` — open review-required draft replies (`compose.beginReply` →
   `compose.saveMessage({mode:'draft'})`, **never sent**) and execute the host's
   `mail_command` safe actions (tag/move/junk/read/flag), reporting each result back.
-- `background.js` — the event page: `messages.onNewMailReceived` intake (registered
-  synchronously), notification routing, context menus, `messages.onMoved` filing capture,
-  and the startup `ping`.
+- `background.js` — the event page and **single native-port owner**:
+  `messages.onNewMailReceived` intake (registered synchronously), notification routing,
+  context menus, `messages.onMoved` filing capture, the `HostStatus` → toolbar-badge wiring,
+  and the popup ↔ host message router (`mm:getStatus` / `mm:reconnect`).
 
-## The six Phase-10 capabilities
+## The Phase-10 capabilities
 
 | # | Capability | Wire |
 |---|---|---|
@@ -33,6 +41,17 @@ the extension only relays events and applies host-returned safe actions.
 | 4 | Open draft replies | `draft_reply` response → `compose` draft (review-required) |
 | 5 | Apply safe actions | `classification_ready` / `mail_command` → `drafts.js` |
 | 6 | Record actions & results | `record_user_action` (corrections → feedback; results → audit) |
+
+## Milestone 1 UX (in progress)
+
+The Thunderbird UX from [`../interaction-design.md`](../interaction-design.md). The host
+protocol it needs (`hello`, the per-action `apply_state` field, the `classification_corrected`
+/ `action_undone` / `suggestion_dismissed` discriminants) is live in the host.
+
+| Surface | Wire | Status |
+|---|---|---|
+| Connection health (`HostStatus`, toolbar badge, recovery card) | `hello` handshake + `ping` heartbeat; popup ↔ background `mm:getStatus` / `mm:reconnect` | **shipped** (`native.js`, `background.js`, `action.*`) |
+| Per-message panel (`messageDisplayAction`) | cached `classify_message` + `apply_state`; corrections via the new discriminants | next |
 
 ## Wire contract & testing
 

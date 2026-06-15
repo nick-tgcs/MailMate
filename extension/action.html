@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'" />
+    <title>MailMate</title>
+    <link rel="stylesheet" href="action.css" />
+  </head>
+  <body>
+    <header class="mm-header">
+      <span class="mm-title">MailMate</span>
+      <span id="mm-dot" class="mm-dot mm-dot--connecting" aria-hidden="true"></span>
+      <span id="mm-phase" class="mm-phase">Connecting…</span>
+    </header>
+
+    <!-- The body is rendered by action.js from the single HostStatus. -->
+    <main id="mm-body" class="mm-body">
+      <p class="mm-muted">Checking the connection…</p>
+    </main>
+
+    <footer id="mm-footer" class="mm-footer"></footer>
+
+    <script src="action.js"></script>
+  </body>
+</html>

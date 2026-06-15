@@ -2,12 +2,16 @@
   "manifest_version": 3,
   "name": "MailMate",
   "version": "0.1.0",
-  "description": "MailMate — local-first learning mail assistant. Phase 11: sales pipeline + review-required follow-up workflows over the native host.",
+  "description": "MailMate — local-first learning mail assistant. A Thunderbird UX over the native host: connection health today; the per-message panel and dashboard space follow.",
   "browser_specific_settings": {
     "gecko": {
       "id": "mailmate@example.com",
       "strict_min_version": "140.0"
     }
+  },
+  "action": {
+    "default_title": "MailMate",
+    "default_popup": "action.html"
   },
   "permissions": [
     "nativeMessaging",
