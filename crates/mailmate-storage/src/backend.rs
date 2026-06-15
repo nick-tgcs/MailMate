@@ -39,6 +39,17 @@ impl SqliteBackend {
     /// # Errors
     /// [`StorageError::Backend`] if the file cannot be opened or the connection configured.
     pub fn open(path: &Path) -> Result<Self, StorageError> {
+        // SQLite's `Connection::open` does not create missing parent directories: on a fresh
+        // machine `<data_dir>/mailmate.db`'s directory does not exist yet, so it would fail
+        // with "unable to open database file". Create it first (as `backup_to`/
+        // `restore_database` already do for their destinations) so the host starts cleanly.
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    StorageError::Backend(format!("creating database directory: {e}"))
+                })?;
+            }
+        }
         let conn = Connection::open(path).map_err(backend_err)?;
         Self::from_connection(conn)
     }
@@ -344,6 +355,26 @@ mod tests {
             backend.applied_migration_versions().unwrap(),
             vec![1, 2, 3, 4, 5, 6]
         );
+    }
+
+    #[test]
+    fn open_creates_a_missing_parent_directory_on_first_run() {
+        // First run points at `<data_dir>/mailmate.db` where `<data_dir>` does not exist yet.
+        // SQLite's own `Connection::open` would fail with "unable to open database file"; the
+        // backend must create the directory so the host starts cleanly on a fresh machine.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir
+            .path()
+            .join("does")
+            .join("not")
+            .join("exist")
+            .join("mailmate.db");
+        let backend = open_and_migrate(&StorageConfig::sqlite_file(&nested)).unwrap();
+        assert_eq!(
+            backend.applied_migration_versions().unwrap(),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+        assert!(nested.exists(), "the database file was created");
     }
 
     /// Seed a tiny throwaway table so a backup/restore can be proven to carry *data*, not
