@@ -177,6 +177,35 @@ impl RecordUserActionPayload {
     }
 }
 
+/// The `explain_decision` request: which message's audit timeline to return. The caller may
+/// pass the internal `message_id` directly, or the `thunderbird_message_id` the host derives
+/// it from (the same derivation `classify`/`record` use), plus an optional cap.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExplainDecisionPayload {
+    /// The internal message id (`msg_tb_…`), if the caller already has it.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// The Thunderbird message id, lowered into the internal id when `message_id` is absent.
+    #[serde(default)]
+    pub thunderbird_message_id: Option<String>,
+    /// Cap the number of (newest-first) timeline entries returned.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+impl ExplainDecisionPayload {
+    /// The internal message id to explain: the explicit id if given, else the one derived
+    /// from the Thunderbird id, else `None`.
+    #[must_use]
+    pub fn message_id(&self) -> Option<MessageId> {
+        self.message_id.as_deref().map(MessageId::from).or_else(|| {
+            self.thunderbird_message_id
+                .as_deref()
+                .map(internal_message_id)
+        })
+    }
+}
+
 /// The `enroll_pipeline_item` control request: tag a quote/proposal → create a
 /// `pipeline_item` and arm a workflow on it. The item is always user-enrolled.
 #[derive(Clone, Debug, Deserialize)]

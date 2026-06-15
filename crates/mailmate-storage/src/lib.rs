@@ -19,7 +19,9 @@ pub mod dialect;
 pub mod migrations;
 pub mod repositories;
 
-pub use backend::{open_and_migrate, open_backend, SqliteBackend, StorageConfig, StoragePath};
+pub use backend::{
+    open_and_migrate, open_backend, restore_database, SqliteBackend, StorageConfig, StoragePath,
+};
 pub use repositories::{
     SqliteAdapterRepository, SqliteAuditRepository, SqliteConflictRepository,
     SqliteDatasetRepository, SqliteDraftRepository, SqliteEvalRunRepository,

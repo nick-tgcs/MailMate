@@ -1,67 +1,145 @@
 //! The MailMate native messaging host binary.
 //!
 //! Usage:
-//! - (no args) — run the native-messaging loop on stdin/stdout (how Thunderbird
-//!   launches it via `runtime.connectNative`).
+//! - (no args) — run the native-messaging loop on stdin/stdout (how Thunderbird launches it
+//!   via `runtime.connectNative`), serving the **fully-wired** router (Phase 12).
 //! - `manifest` — print the host manifest JSON for the installer.
+//! - `config` — print the effective configuration and the resolved data directory.
+//! - `backup <file>` / `restore <file>` — snapshot or restore the embedded database.
+//! - `export-rules <file>` / `import-rules <file> [name-prefix]` — portable rule manifests.
+//! - `simulate <scenario.json>` — run a what-if scenario through the decision spine.
+//! - `bench [iterations]` — micro-benchmark the hot paths.
 //!
-//! All real logic lives in the library modules (`native_stdio`, `dispatch`,
-//! `manifest`), which are unit/integration/e2e tested; `main` is thin wiring.
+//! Configuration comes from `MAILMATE_CONFIG` (a TOML file) or the safe defaults; the data
+//! directory from `MAILMATE_DATA_DIR` / `$XDG_DATA_HOME` / `$HOME`. `main` is thin wiring over
+//! the library modules ([`runtime`](mailmate_native_host::runtime),
+//! [`simulation`](mailmate_native_host::simulation),
+//! [`benchmark`](mailmate_native_host::benchmark)), which are unit/integration/e2e tested.
 
-use std::io::{stdin, stdout};
+use std::error::Error;
+use std::path::Path;
 use std::process::ExitCode;
 
-use mailmate_native_host::dispatch::run_loop;
+use mailmate_native_host::benchmark::run_default_suite;
 use mailmate_native_host::manifest::NativeHostManifest;
-use mailmate_native_host::native_stdio::FrameWriter;
+use mailmate_native_host::runtime::{self, resolve_config, resolve_data_dir};
+use mailmate_native_host::simulation::{run_simulation, Scenario};
+
+/// The default per-operation iteration count for `bench`.
+const DEFAULT_BENCH_ITERATIONS: u32 = 200;
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tail = args.get(1..).unwrap_or(&[]);
+    let result = match args.first().map(String::as_str) {
         None => serve(),
         Some("manifest") => print_manifest(),
-        Some(other) => {
-            eprintln!("mailmate-native-host: unknown subcommand {other:?} (expected `manifest` or no args)");
+        Some("config") => show_config(),
+        Some("backup") => backup(tail),
+        Some("restore") => restore(tail),
+        Some("export-rules") => export_rules(tail),
+        Some("import-rules") => import_rules(tail),
+        Some("simulate") => simulate(tail),
+        Some("bench") => bench(tail),
+        Some(other) => Err(format!(
+            "unknown subcommand {other:?} (expected one of: manifest, config, backup, \
+             restore, export-rules, import-rules, simulate, bench, or no args to serve)"
+        )
+        .into()),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("mailmate-native-host: {e}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// Run the native-messaging loop until Thunderbird closes the channel.
-///
-/// This currently drives the Phase-1 ping/protocol loop ([`run_loop`]). The Phase-10
-/// [`HostRouter`](mailmate_native_host::router::HostRouter) — which routes `classify_message`,
-/// `new_mail`, `draft_reply`, and `record_user_action` into the core use-cases — is not mounted
-/// here yet: doing so requires the production composition root (the real classification cascade,
-/// AI provider, and storage injected into a `Ports`), which is deferred to Phase 12 hardening.
-/// Until then the shipped binary answers `unknown_request_type` to the Phase-10 request types;
-/// the router and its handlers are exercised by `tests/host_router.rs` against the fakes.
-fn serve() -> ExitCode {
-    let writer = FrameWriter::new(stdout().lock());
-    let mut reader = stdin().lock();
-    match run_loop(&mut reader, &writer) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("mailmate-native-host: loop ended with error: {e}");
-            ExitCode::FAILURE
-        }
+/// Resolve config + data dir and run the native-messaging serve loop.
+fn serve() -> Result<(), Box<dyn Error>> {
+    let config = resolve_config()?;
+    let data_dir = resolve_data_dir();
+    runtime::serve(config, &data_dir)?;
+    Ok(())
+}
+
+/// Print the effective configuration as TOML, prefixed with the resolved data directory.
+fn show_config() -> Result<(), Box<dyn Error>> {
+    let config = resolve_config()?;
+    println!("# data directory: {}", resolve_data_dir().display());
+    print!("{}", config.to_toml()?);
+    Ok(())
+}
+
+/// `backup <dest>` — snapshot the configured database.
+fn backup(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let dest = args.first().ok_or("usage: backup <dest-file>")?;
+    runtime::backup(&resolve_config()?, &resolve_data_dir(), Path::new(dest))?;
+    println!("backed up the database to {dest}");
+    Ok(())
+}
+
+/// `restore <src>` — replace the configured database from a snapshot.
+fn restore(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let src = args.first().ok_or("usage: restore <backup-file>")?;
+    runtime::restore(&resolve_config()?, &resolve_data_dir(), Path::new(src))?;
+    println!("restored the database from {src}");
+    Ok(())
+}
+
+/// `export-rules <dest>` — write the operative rule set as a JSON manifest.
+fn export_rules(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let dest = args.first().ok_or("usage: export-rules <dest-file>")?;
+    let count = runtime::export_rules(&resolve_config()?, &resolve_data_dir(), Path::new(dest))?;
+    println!("exported {count} rule(s) to {dest}");
+    Ok(())
+}
+
+/// `import-rules <src> [name-prefix]` — create draft rules from a JSON manifest.
+fn import_rules(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let src = args
+        .first()
+        .ok_or("usage: import-rules <src-file> [name-prefix]")?;
+    let prefix = args.get(1).map_or("imported", String::as_str);
+    let (imported, skipped) = runtime::import_rules(
+        &resolve_config()?,
+        &resolve_data_dir(),
+        Path::new(src),
+        prefix,
+    )?;
+    println!("imported {imported} rule(s) as drafts, skipped {skipped}");
+    Ok(())
+}
+
+/// `simulate <scenario.json>` — run a what-if scenario and print the JSON report.
+fn simulate(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let path = args.first().ok_or("usage: simulate <scenario-file.json>")?;
+    let text = std::fs::read_to_string(path)?;
+    let scenario: Scenario = serde_json::from_str(&text)?;
+    let report = run_simulation(scenario);
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// `bench [iterations]` — micro-benchmark the hot paths and print a one-line-per-op report.
+fn bench(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let iterations = args
+        .first()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_BENCH_ITERATIONS);
+    for result in run_default_suite(iterations) {
+        println!("{}", result.summary());
     }
+    Ok(())
 }
 
 /// Print the native-messaging host manifest for the current executable path.
-fn print_manifest() -> ExitCode {
+fn print_manifest() -> Result<(), Box<dyn Error>> {
     let path = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "mailmate-native-host".to_owned());
     let manifest = NativeHostManifest::new(path, Vec::new());
-    match serde_json::to_string_pretty(&manifest) {
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("mailmate-native-host: failed to render manifest: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    println!("{}", serde_json::to_string_pretty(&manifest)?);
+    Ok(())
 }

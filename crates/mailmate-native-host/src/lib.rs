@@ -18,18 +18,31 @@
 //! - [`thunderbird`] — [`ThunderbirdMailClient`](thunderbird::ThunderbirdMailClient), the
 //!   `MailClient` adapter over native messaging, and `WriterTransport`, the stdio `Transport`.
 //!
-//! The router names only ports and core use-cases; the concrete engines/providers/storage are
-//! injected by the composition root (deferred to Phase 12 hardening), and the router is tested
-//! here against the in-memory fakes. The envelope types live in `mailmate-common` (so the host
-//! and the core share one definition); this crate owns the framing, the loop, and the wire
-//! shape.
+//! Phase 12 lands the **composition root** the earlier phases deferred: the host now wires the
+//! real engines/providers/storage into a live [`HostRouter`] and serves it.
+//! - [`config`] — the `[storage]`/`[retention]`/`[followups]`/`[ai]` TOML configuration.
+//! - [`clock`] / [`secret_store`] — the production `Clock` and `SecretStore` leaf adapters.
+//! - [`runtime`] — `build_app` (assemble the full `Ports` + follow-up suite over SQLite) and
+//!   `serve` (catch-up drain → the stdio loop), plus the maintenance operations
+//!   (backup/restore, rule import/export).
+//! - [`simulation`] — the deterministic what-if runner over the rule/cascade/policy spine.
+//! - [`benchmark`] — a dependency-free timing harness for the hot paths.
+//!
+//! The envelope types live in `mailmate-common` (so the host and the core share one
+//! definition); this crate owns the framing, the loop, the wire shape, and the wiring.
 //!
 //! [native messaging]: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/Native_messaging
 
+pub mod benchmark;
+pub mod clock;
+pub mod config;
 pub mod convert;
 pub mod dispatch;
 pub mod manifest;
 pub mod native_stdio;
 pub mod protocol_dto;
 pub mod router;
+pub mod runtime;
+pub mod secret_store;
+pub mod simulation;
 pub mod thunderbird;

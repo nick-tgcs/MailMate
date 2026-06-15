@@ -7,11 +7,9 @@
 //! provenance into. Every output frame leaves through one injected [`Transport`], so the
 //! single-writer guard keeps responses, notifications, and mail commands from interleaving.
 //!
-//! The router names only ports and use-cases — no concrete engine, provider, or backend — so it
-//! is *intended* to be wired to the real adapters in production (the composition root that injects
-//! them is deferred to Phase 12 hardening) and is exercised here against the in-memory fakes, with
-//! no change to the code here. The shipped binary still runs the Phase-1 ping loop until that
-//! wiring lands; see [`crate::dispatch`] and `main.rs`.
+//! The router names only ports and use-cases — no concrete engine, provider, or backend. The
+//! Phase-12 composition root ([`crate::runtime`]) injects the real adapters in production; the
+//! same router is exercised here against the in-memory fakes, with no change to the code here.
 //!
 //! ## What each request does
 //! - `ping` — liveness echo (the Phase-1 contract, now served here too).
@@ -32,13 +30,14 @@ use serde_json::{json, Value};
 
 use mailmate_common::action::{GuardedActionPlan, PlannedAction};
 use mailmate_common::actor::Actor;
-use mailmate_common::audit::{event_type, AuditEntry};
+use mailmate_common::audit::{event_type, AuditEntry, AuditQuery};
 use mailmate_common::correction::UserCorrection;
 use mailmate_common::error::TransportError;
 use mailmate_common::features::FeatureVector;
 use mailmate_common::ids::{FolderId, ThreadId};
 use mailmate_common::mail::MailAction;
 use mailmate_common::policy::TriggerKind;
+use mailmate_common::proposal::ProposalStatus;
 use mailmate_common::protocol::{Frame, ProtocolVersion};
 use mailmate_common::workflow::ExitEvent;
 use mailmate_core::{CorrectionContext, CorrectionService, DraftService, PlanningService, Ports};
@@ -47,10 +46,11 @@ use mailmate_ports::exit_detector::ExitDetector;
 use mailmate_ports::follow_up_scheduler::FollowUpScheduler;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::storage::pipeline_items::PipelineItemRepository;
-use mailmate_ports::storage::AuditRepository;
+use mailmate_ports::storage::{AuditRepository, ProposalRepository};
 use mailmate_ports::transport::Transport;
 use mailmate_ports::workflow_engine::WorkflowEngine;
 
+use crate::config::SettingsSnapshot;
 use crate::convert::{
     classification_ready_payload, classify_response_payload, followup_draft_ready_payload,
     followup_needs_attention_payload,
@@ -59,8 +59,8 @@ use crate::dispatch::{error_response, ok_response, SUPPORTED_PROTOCOL_VERSION};
 use crate::native_stdio::read_frame;
 use crate::protocol_dto::{
     CancelSequencePayload, ClassifyMessagePayload, DraftReplyPayload, EnrollPipelineItemPayload,
-    RecordUserActionPayload, RescheduleFollowupPayload, ReviewFollowupPayload,
-    UpdatePipelineStagePayload,
+    ExplainDecisionPayload, RecordUserActionPayload, RescheduleFollowupPayload,
+    ReviewFollowupPayload, UpdatePipelineStagePayload,
 };
 
 /// The follow-up engine + repository ports the router needs to serve the sales-pipeline
@@ -79,6 +79,18 @@ pub struct FollowUpSuite {
     pub exit_detector: Arc<dyn ExitDetector>,
 }
 
+/// The read-only management surface the host exposes for the review/explanation UI: the
+/// proposal store (pending reviews) and a secret-free settings snapshot. Like the follow-up
+/// suite, it lives outside the core's [`Ports`] and is injected by the composition root; a
+/// router without it answers the admin request types with `admin_not_configured`.
+#[derive(Clone)]
+pub struct AdminSuite {
+    /// The agent-proposal store (for the pending-review queue).
+    pub proposals: Arc<dyn ProposalRepository>,
+    /// The effective, secret-free settings.
+    pub settings: SettingsSnapshot,
+}
+
 /// Routes protocol frames into the core and emits the resulting frames.
 #[derive(Clone)]
 pub struct HostRouter {
@@ -90,6 +102,7 @@ pub struct HostRouter {
     clock: Arc<dyn Clock>,
     out: Arc<dyn Transport>,
     followups: Option<FollowUpSuite>,
+    admin: Option<AdminSuite>,
 }
 
 impl HostRouter {
@@ -111,6 +124,7 @@ impl HostRouter {
             clock: ports.clock.clone(),
             out,
             followups: None,
+            admin: None,
         }
     }
 
@@ -119,6 +133,13 @@ impl HostRouter {
     #[must_use]
     pub fn with_followups(mut self, followups: FollowUpSuite) -> Self {
         self.followups = Some(followups);
+        self
+    }
+
+    /// Wire the management surface, enabling `list_pending_reviews` and `get_settings`.
+    #[must_use]
+    pub fn with_admin(mut self, admin: AdminSuite) -> Self {
+        self.admin = Some(admin);
         self
     }
 
@@ -212,6 +233,9 @@ impl HostRouter {
             "reschedule_followup" => self.handle_reschedule(request_id, payload, false).await,
             "snooze" => self.handle_reschedule(request_id, payload, true).await,
             "review_followup" => self.handle_review_followup(request_id, payload).await,
+            "explain_decision" => self.handle_explain(request_id, payload).await,
+            "list_pending_reviews" => self.handle_list_reviews(request_id).await,
+            "get_settings" => self.handle_get_settings(request_id),
             other => self.send(error_response(
                 request_id,
                 "unknown_request_type",
@@ -587,6 +611,106 @@ impl HostRouter {
         }
     }
 
+    /// Explain a decision: return the audit timeline for one message (the classification,
+    /// the applied/blocked actions, the corrections — the data any review/explanation UI
+    /// renders). Uses the always-present audit store, so it needs no admin wiring.
+    async fn handle_explain(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let parsed: ExplainDecisionPayload = match serde_json::from_value(payload) {
+            Ok(p) => p,
+            Err(e) => return self.send(invalid_payload(request_id, &e)),
+        };
+        let Some(message_id) = parsed.message_id() else {
+            return self.send(error_response(
+                request_id,
+                "invalid_payload",
+                "explain_decision requires message_id or thunderbird_message_id",
+                None,
+            ));
+        };
+        let query = AuditQuery {
+            message_id: Some(message_id.clone()),
+            limit: parsed.limit,
+            ..AuditQuery::default()
+        };
+        match self.audit.query(query).await {
+            Ok(entries) => {
+                let timeline: Vec<Value> = entries
+                    .iter()
+                    .map(|entry| {
+                        json!({
+                            "id": entry.id,
+                            "event_type": entry.event_type,
+                            "actor": entry.actor.as_str(),
+                            "created_at": entry.created_at,
+                            "payload": entry.payload,
+                        })
+                    })
+                    .collect();
+                self.send(ok_response(
+                    request_id,
+                    json!({ "message_id": message_id, "timeline": timeline }),
+                ))
+            }
+            Err(e) => self.send(error_response(
+                request_id,
+                "explain_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
+    /// List the agent proposals awaiting human review — the review UI's work queue.
+    async fn handle_list_reviews(&self, request_id: String) -> Result<(), TransportError> {
+        let Some(admin) = &self.admin else {
+            return self.send(admin_not_configured(request_id));
+        };
+        match admin
+            .proposals
+            .list_by_status(ProposalStatus::PendingReview)
+            .await
+        {
+            Ok(proposals) => {
+                let pending: Vec<Value> = proposals
+                    .iter()
+                    .map(|p| {
+                        json!({
+                            "id": p.id,
+                            "title": p.title,
+                            "proposal_type": p.proposal_type.as_str(),
+                            "recommended_status": p.recommended_status.as_str(),
+                            "risk_level": p.risk_level.as_str(),
+                            "rationale": p.rationale,
+                        })
+                    })
+                    .collect();
+                self.send(ok_response(
+                    request_id,
+                    json!({ "pending_reviews": pending }),
+                ))
+            }
+            Err(e) => self.send(error_response(
+                request_id,
+                "list_reviews_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
+    /// Return the effective, secret-free settings snapshot.
+    fn handle_get_settings(&self, request_id: String) -> Result<(), TransportError> {
+        let Some(admin) = &self.admin else {
+            return self.send(admin_not_configured(request_id));
+        };
+        let payload = serde_json::to_value(&admin.settings).unwrap_or_else(|_| json!({}));
+        self.send(ok_response(request_id, payload))
+    }
+
     /// Run the catch-up-on-launch drain: surface a `followup_draft_ready` for each fired step
     /// (a review-required draft, never sent on arrival) and a `followup_needs_attention` for
     /// each stale instance. Host-initiated (not a request); `app.rs` calls it at startup and
@@ -801,6 +925,16 @@ fn followups_not_configured(request_id: String) -> Frame {
         request_id,
         "followups_not_configured",
         "the follow-up workflow engine is not wired into this host build",
+        None,
+    )
+}
+
+/// The error response for an admin request when the management surface is not wired.
+fn admin_not_configured(request_id: String) -> Frame {
+    error_response(
+        request_id,
+        "admin_not_configured",
+        "the management surface (proposals/settings) is not wired into this host build",
         None,
     )
 }

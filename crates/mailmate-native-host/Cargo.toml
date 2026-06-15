@@ -9,28 +9,37 @@ publish = false
 [lints]
 workspace = true
 
-# The native host is an EDGE adapter (outside the hexagon): it is allowed to know
-# the wire format and serde, and — from Phase 10 — to depend on `mailmate-core`'s
-# use-cases and the `mailmate-ports` traits so it can route protocol frames into the
-# core. It still depends on NO backend (the no-backend-leakage guard scans only
-# core/-ports/-common). The stdio framing here is the production adapter behind the
-# `Transport` port; `ThunderbirdMailClient` is the production adapter behind the
-# `MailClient` port. Concrete engines/storage are injected by the composition root
-# (deferred to Phase 12 hardening); the router is tested here against the fakes.
+# The native host is an EDGE adapter (outside the hexagon): it knows the wire format and
+# serde, depends on `mailmate-core`'s use-cases and the `mailmate-ports` traits, and — from
+# Phase 12 — is the **composition root** that injects the concrete adapters. So it depends on
+# every adapter crate (storage / policy / rules / ai / ml / planner / learning / training /
+# workflow). It is OUTSIDE the hexagon, so the no-backend-leakage guard (which scans only
+# core/-ports/-common) is unaffected: it stays clean to wire `rusqlite`-backed storage here.
+# The stdio framing is the production `Transport`; `ThunderbirdMailClient` the production
+# `MailClient`; `runtime` assembles them with the real engines into a live `HostRouter`.
 [dependencies]
 mailmate-common = { path = "../mailmate-common" }
 mailmate-core = { path = "../mailmate-core" }
 mailmate-ports = { path = "../mailmate-ports" }
+mailmate-storage = { path = "../mailmate-storage" }
+mailmate-policy = { path = "../mailmate-policy" }
+mailmate-rules = { path = "../mailmate-rules" }
+mailmate-ai = { path = "../mailmate-ai" }
+mailmate-ml = { path = "../mailmate-ml" }
+mailmate-planner = { path = "../mailmate-planner" }
+mailmate-learning = { path = "../mailmate-learning" }
+mailmate-training = { path = "../mailmate-training" }
+mailmate-workflow = { path = "../mailmate-workflow" }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 mailmate-test-support = { path = "../mailmate-test-support" }
-# The real follow-up adapters (DefaultWorkflowEngine / DefaultFollowUpScheduler /
-# DefaultExitDetector) wired over the in-memory fakes in the router's follow-up tests.
-mailmate-workflow = { path = "../mailmate-workflow" }
+tempfile = { workspace = true }
 
 [[bin]]
 name = "mailmate-native-host"

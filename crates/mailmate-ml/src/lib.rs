@@ -7,10 +7,16 @@
 //! backend (and a Burn `AiProvider`) stay reserved behind the `burn` cargo feature until an
 //! on-device LoRA target is real, so the default build stays light. `mailmate-core` never
 //! depends on this crate; it sees only the ports.
+//!
+//! Phase 12 adds the production [`DeterministicFeatureExtractor`] — the real, pure
+//! `FeatureExtractor` adapter the cascade feeds into Tier 2 (it lives here, beside the model
+//! that consumes its output).
 
+pub mod features;
 pub mod logreg;
 pub mod trainer;
 
+pub use features::DeterministicFeatureExtractor;
 pub use logreg::LogisticRegressionClassifier;
 pub use trainer::InProcessTrainer;
 

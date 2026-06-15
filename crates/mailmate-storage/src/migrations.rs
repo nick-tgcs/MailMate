@@ -146,6 +146,14 @@ pub fn applied_versions(conn: &Connection) -> Result<Vec<i64>, StorageError> {
     Ok(versions)
 }
 
+/// The highest embedded migration version — the schema head a fully-migrated database
+/// reports as its last applied version. Restore validation uses it to refuse a snapshot
+/// from a newer, unknown schema (which a downgrade could corrupt).
+#[must_use]
+pub fn latest_version() -> i64 {
+    MIGRATIONS.last().map_or(0, |m| m.version)
+}
+
 fn is_applied(conn: &Connection, version: i64) -> Result<bool, StorageError> {
     let count: i64 = conn
         .query_row(

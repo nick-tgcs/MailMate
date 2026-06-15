@@ -5,13 +5,11 @@
 //! until the peer hangs up. [`emit`] enforces the oversize-frame guard (a too-large
 //! response becomes a small structured error, never a partial write).
 //!
-//! This module serves only the Phase-1 `ping` request plus the protocol-level errors
-//! (version / kind / unknown-type); its `ok_response` / `error_response` / `emit` helpers are
-//! the shared frame builders. The Phase-10 request types (`classify_message`, `new_mail`,
-//! `draft_reply`, `record_user_action`) are NOT new arms here — they are routed by
-//! [`crate::router::HostRouter`], which drives the core use-cases. The shipped binary still runs
-//! this ping-only [`run_loop`] until the production composition root (real engines / provider /
-//! storage injected into a `Ports`) is wired in Phase 12; see `main.rs`.
+//! This module's `ok_response` / `error_response` / `emit` helpers are the shared frame
+//! builders the [`crate::router::HostRouter`] reuses, plus a standalone Phase-1 `ping`
+//! [`dispatch`] / [`run_loop`] kept as the minimal protocol reference (and its own tests). The
+//! shipped binary serves the *fully-wired* router via [`crate::runtime::serve`]; this ping-only
+//! loop is no longer the production path.
 
 use std::io::{Read, Write};
 

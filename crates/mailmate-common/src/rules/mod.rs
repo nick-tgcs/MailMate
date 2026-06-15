@@ -6,4 +6,5 @@
 pub mod condition;
 pub mod effect;
 pub mod evaluation;
+pub mod manifest;
 pub mod rule;

@@ -10,11 +10,13 @@
 pub mod correction;
 pub mod curation;
 pub mod draft;
+pub mod import_export;
 pub mod planning;
 pub mod training;
 
 pub use correction::{CorrectionContext, CorrectionService};
 pub use curation::{CurationService, ReviewService};
 pub use draft::DraftService;
+pub use import_export::{ImportExportService, ImportSummary, SkippedRule};
 pub use planning::{PlanningOutcome, PlanningService};
 pub use training::TrainingService;

@@ -26,8 +26,8 @@ use mailmate_ports::transport::Transport;
 pub mod usecases;
 
 pub use usecases::{
-    CorrectionContext, CorrectionService, CurationService, DraftService, PlanningOutcome,
-    PlanningService, ReviewService, TrainingService,
+    CorrectionContext, CorrectionService, CurationService, DraftService, ImportExportService,
+    ImportSummary, PlanningOutcome, PlanningService, ReviewService, SkippedRule, TrainingService,
 };
 
 /// The set of adapters the core's use-cases run against — the dependency-injection
