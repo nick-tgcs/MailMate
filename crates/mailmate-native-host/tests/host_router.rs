@@ -208,11 +208,85 @@ fn hello_reports_versions_safe_defaults_and_core_capabilities() {
     assert!(caps.contains(&"classify_message"));
     assert!(caps.contains(&"record_user_action"));
     assert!(caps.contains(&"explain_decision"));
+    // The Activity tab's global stream rides the always-present audit store, so it is a core
+    // capability even with no admin surface wired.
+    assert!(caps.contains(&"list_recent_activity"));
     assert!(
         !caps.contains(&"followups"),
         "follow-ups are not wired here"
     );
     assert!(!caps.contains(&"get_settings"), "admin is not wired here");
+}
+
+#[test]
+fn list_recent_activity_returns_newest_first_and_filters_by_family() {
+    use mailmate_common::actor::Actor;
+    use mailmate_common::audit::AuditEntry;
+    use mailmate_ports::storage::AuditRepository;
+
+    let audit = Arc::new(FakeAuditRepository::new());
+    // Seed a few entries across families, oldest → newest. The scheduler-authored
+    // `followup_step_fired` and the extension's `action_failed` exercise the family arms that
+    // group events from outside this router.
+    block_on(audit.append(AuditEntry::new("action_applied", Actor::System))).unwrap();
+    block_on(audit.append(AuditEntry::new("action_failed", Actor::Extension))).unwrap();
+    block_on(audit.append(AuditEntry::new("action_blocked_by_policy", Actor::System))).unwrap();
+    block_on(audit.append(AuditEntry::new("followup_step_fired", Actor::System))).unwrap();
+    block_on(audit.append(AuditEntry::new("suggestion_dismissed", Actor::User))).unwrap();
+
+    let ports = base_ports();
+
+    // Unfiltered: newest-first, every event.
+    let out = Arc::new(FakeTransport::new());
+    let router = HostRouter::from_ports(&ports, audit.clone(), out.clone());
+    block_on(router.handle(request("list_recent_activity", json!({ "limit": 10 })))).unwrap();
+    let payload = one_ok_response(&out);
+    let events = payload["events"].as_array().unwrap();
+    assert_eq!(events.len(), 5);
+    assert_eq!(events[0]["event_type"], "suggestion_dismissed"); // newest first
+
+    // The `applied` family groups both a success and the async `action_failed` failure spelling.
+    let out2 = Arc::new(FakeTransport::new());
+    let router2 = HostRouter::from_ports(&ports, audit.clone(), out2.clone());
+    block_on(router2.handle(request(
+        "list_recent_activity",
+        json!({ "event_type_filter": "applied" }),
+    )))
+    .unwrap();
+    let p2 = one_ok_response(&out2);
+    let applied = p2["events"].as_array().unwrap();
+    assert_eq!(applied.len(), 2);
+    let applied_types: Vec<&str> = applied
+        .iter()
+        .map(|e| e["event_type"].as_str().unwrap())
+        .collect();
+    assert!(applied_types.contains(&"action_applied"));
+    assert!(applied_types.contains(&"action_failed"));
+
+    // The `follow_up` family includes the scheduler's per-step lifecycle events.
+    let out4 = Arc::new(FakeTransport::new());
+    let router4 = HostRouter::from_ports(&ports, audit.clone(), out4.clone());
+    block_on(router4.handle(request(
+        "list_recent_activity",
+        json!({ "event_type_filter": "follow_up" }),
+    )))
+    .unwrap();
+    let p4 = one_ok_response(&out4);
+    let followups = p4["events"].as_array().unwrap();
+    assert_eq!(followups.len(), 1);
+    assert_eq!(followups[0]["event_type"], "followup_step_fired");
+
+    // The "corrected" family captures a dismissal; an empty payload is a valid "all" request.
+    let out3 = Arc::new(FakeTransport::new());
+    let router3 = HostRouter::from_ports(&ports, audit, out3.clone());
+    block_on(router3.handle(request(
+        "list_recent_activity",
+        json!({ "event_type_filter": "corrected" }),
+    )))
+    .unwrap();
+    let p3 = one_ok_response(&out3);
+    assert_eq!(p3["events"].as_array().unwrap().len(), 1);
+    assert_eq!(p3["events"][0]["event_type"], "suggestion_dismissed");
 }
 
 #[test]
@@ -481,6 +555,9 @@ fn new_mail_applies_allowed_actions_and_pushes_classification_ready() {
         Frame::Notification { type_, payload, .. } => {
             assert_eq!(type_, "classification_ready");
             assert_eq!(payload["applied_actions"][0]["kind"], "tag");
+            // Header metadata rides along so the dashboard Review card shows the real identity.
+            assert_eq!(payload["headers"]["subject"], "Invoice update");
+            assert_eq!(payload["headers"]["from"], "sender@example.test");
         }
         other => panic!("expected a notification, got {other:?}"),
     }

@@ -70,8 +70,8 @@ use crate::dispatch::{error_response, ok_response, SUPPORTED_PROTOCOL_VERSION};
 use crate::native_stdio::read_frame;
 use crate::protocol_dto::{
     CancelSequencePayload, ClassifyMessagePayload, DraftReplyPayload, EnrollPipelineItemPayload,
-    ExplainDecisionPayload, RecordUserActionPayload, RescheduleFollowupPayload,
-    ReviewFollowupPayload, UpdatePipelineStagePayload,
+    ExplainDecisionPayload, ListRecentActivityPayload, RecordUserActionPayload,
+    RescheduleFollowupPayload, ReviewFollowupPayload, UpdatePipelineStagePayload,
 };
 
 /// The follow-up engine + repository ports the router needs to serve the sales-pipeline
@@ -246,6 +246,7 @@ impl HostRouter {
             "snooze" => self.handle_reschedule(request_id, payload, true).await,
             "review_followup" => self.handle_review_followup(request_id, payload).await,
             "explain_decision" => self.handle_explain(request_id, payload).await,
+            "list_recent_activity" => self.handle_list_recent_activity(request_id, payload).await,
             "list_pending_reviews" => self.handle_list_reviews(request_id).await,
             "get_settings" => self.handle_get_settings(request_id),
             other => self.send(error_response(
@@ -305,6 +306,11 @@ impl HostRouter {
         };
         let tb_id = parsed.thunderbird_message_id.clone();
         let message = parsed.into_message_data();
+        // Capture the header metadata before the message is consumed, so the dashboard Review
+        // card can show the real subject/sender (header metadata, always within `metadata`
+        // retention — never body content).
+        let subject = message.headers.subject.clone();
+        let from = message.headers.from.clone();
         let outcome = match self.planning.handle_new_mail(message).await {
             Ok(o) => o,
             Err(e) => {
@@ -320,7 +326,7 @@ impl HostRouter {
             }
         };
         let applied = self.apply_allowed(&outcome.guarded_plan).await;
-        let payload = classification_ready_payload(&outcome, &tb_id, &applied);
+        let payload = classification_ready_payload(&outcome, &tb_id, &applied, &subject, &from);
         self.send(Frame::Notification {
             protocol_version: ProtocolVersion::default(),
             notification_id: format!("ntf_classify_{tb_id}"),
@@ -676,6 +682,64 @@ impl HostRouter {
         }
     }
 
+    /// Power the dashboard Activity tab's cross-message **global** stream. `explain_decision` is
+    /// per-message (it requires and keys on one `message_id`); this drops that constraint and
+    /// reads the newest audit entries, optionally narrowed to one of the six event-type
+    /// *families* the UI's filter chips expose. Family matching happens here because the audit
+    /// store keys on a single exact `event_type` (one family spans several event types), so we
+    /// over-read when a filter is present and cap to `limit` after grouping. Read-only, served
+    /// from the always-present audit store — no admin wiring required.
+    async fn handle_list_recent_activity(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        // A missing/empty payload is a valid "everything, default limit" request.
+        let parsed: ListRecentActivityPayload = serde_json::from_value(payload).unwrap_or_default();
+        let limit = parsed.limit.unwrap_or(50).min(500);
+        let family = parsed.event_type_filter.as_deref().filter(|f| *f != "all");
+        // The store filters by exact event_type only, so when narrowing to a multi-type family
+        // we over-read and group here. Bound the over-read so a pathological filter can't scan
+        // the whole log.
+        let fetch = if family.is_some() {
+            limit.saturating_mul(8).min(2000)
+        } else {
+            limit
+        };
+        let query = AuditQuery {
+            limit: Some(fetch),
+            ..AuditQuery::default()
+        };
+        match self.audit.query(query).await {
+            Ok(entries) => {
+                let events: Vec<Value> = entries
+                    .iter()
+                    .filter(|e| activity_family_matches(family, &e.event_type))
+                    .take(limit)
+                    .map(|e| {
+                        json!({
+                            "id": e.id,
+                            "event_type": e.event_type,
+                            "actor": e.actor.as_str(),
+                            "message_id": e.message_id,
+                            "rule_id": e.rule_id,
+                            "proposal_id": e.proposal_id,
+                            "created_at": e.created_at,
+                            "payload": e.payload,
+                        })
+                    })
+                    .collect();
+                self.send(ok_response(request_id, json!({ "events": events })))
+            }
+            Err(e) => self.send(error_response(
+                request_id,
+                "list_activity_failed",
+                e.to_string(),
+                None,
+            )),
+        }
+    }
+
     /// List the agent proposals awaiting human review — the review UI's work queue.
     async fn handle_list_reviews(&self, request_id: String) -> Result<(), TransportError> {
         let Some(admin) = &self.admin else {
@@ -735,6 +799,7 @@ impl HostRouter {
             "draft_reply",
             "record_user_action",
             "explain_decision",
+            "list_recent_activity",
         ];
         if self.followups.is_some() {
             capabilities.push("followups");
@@ -1090,6 +1155,69 @@ fn admin_not_configured(request_id: String) -> Frame {
         "the management surface (proposals/settings) is not wired into this host build",
         None,
     )
+}
+
+/// Does an audit entry's exact `event_type` belong to the requested Activity-tab *family*?
+/// `None` (or the sentinel `"all"`, already stripped by the caller) matches everything. The
+/// families mirror the dashboard's filter chips and group the host's concrete event types — a
+/// failure variant lives with its family (a failed apply is still "applied"; a rejected
+/// classification is still "classified") so the stream never silently hides a real event. An
+/// unrecognised family is permissive (matches all) rather than blanking the view.
+fn activity_family_matches(family: Option<&str>, event_type: &str) -> bool {
+    let Some(family) = family else {
+        return true;
+    };
+    match family {
+        "classified" => matches!(
+            event_type,
+            "classified" | "classification_failed" | "new_mail_rejected"
+        ),
+        // Every spelling a failed apply can arrive under lives with the family: the host's own
+        // `action_apply_failed` (over-the-wire send error) and the extension's `action_failed`
+        // (the async Thunderbird-layer failure, the common case) — never hide a real failure.
+        "applied" => matches!(
+            event_type,
+            "action_applied" | "action_apply_failed" | "action_failed"
+        ),
+        // A discarded model output is a refused action — it belongs with the policy-blocked family.
+        "blocked" => matches!(
+            event_type,
+            "action_blocked_by_policy" | "provider_response_rejected"
+        ),
+        "corrected" => matches!(
+            event_type,
+            "suggestion_dismissed"
+                | "classification_corrected"
+                | "action_undone"
+                | "junk_changed"
+                | "message_moved"
+        ),
+        // Enrollment + exit (router-authored) AND the scheduler's per-step lifecycle events,
+        // which share the same audit store — so a fired/coalesced/stale/failed step is never
+        // dropped from the Follow-ups view.
+        "follow_up" => matches!(
+            event_type,
+            "pipeline_item_enrolled"
+                | "workflow_exited"
+                | "followup_drain_failed"
+                | "followup_step_fired"
+                | "followup_coalesced"
+                | "followup_needs_attention"
+                | "followup_draft_failed"
+                | "followup_version_missing"
+        ),
+        // Rule-proposal lifecycle, including the `workflow_status_changed` a review materializes.
+        "proposal" => matches!(
+            event_type,
+            "rule_proposed"
+                | "proposal_reviewed"
+                | "rule_status_changed"
+                | "rule_conflict_detected"
+                | "workflow_status_changed"
+        ),
+        // An unknown filter must not blank the stream — show everything.
+        _ => true,
+    }
 }
 
 /// Project a safe [`PlannedAction`] onto the [`MailAction`] the client applies, or `None` for

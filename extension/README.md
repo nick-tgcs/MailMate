@@ -32,12 +32,25 @@ the extension only relays events and applies host-returned safe actions.
 - `drafts.js` — open review-required draft replies (`compose.beginReply` →
   `compose.saveMessage({mode:'draft'})`, **never sent**) and execute the host's
   `mail_command` safe actions (tag/move/junk/read/flag), reporting each result back.
+- `dashboard.html` / `dashboard.css` / `dashboard.js` — the **dashboard space** (the product's
+  home): a first-class Thunderbird `spaces` tab rendering a small SPA with **Review**,
+  **Follow-ups**, **Proposals**, and **Activity** tabs, the connection banner, the first-run
+  onboarding walkthrough, empty states, and the `›` deep-link grammar (focus a message in the
+  Mail space). Review is built from buffered `classification_ready` decisions; Activity from
+  `list_recent_activity`; Proposals (read-only here) from `list_pending_reviews`. Owns no port —
+  drives the host through the background's `mm:*` router.
+- `icons/mailmate.svg` — the spaces-toolbar button icon (fixed mid-tone fills legible on both
+  light and dark themes, with the brand-blue spark; a space icon is an image resource, so it does
+  not theme-tint).
 - `background.js` — the event page and **single native-port owner**:
   `messages.onNewMailReceived` intake (registered synchronously), notification routing,
   context menus, `messages.onMoved` filing capture, the `HostStatus` → toolbar-badge wiring,
-  and the popup ↔ host message router (`mm:getStatus` / `mm:reconnect` for the recovery card;
-  `mm:classify` / `mm:apply` / `mm:dismiss` / `mm:undo` / `mm:correctLabel` / `mm:notJunk` /
-  `mm:move` / `mm:folders` for the per-message panel).
+  the **dashboard space registration + aggregate badge** (`review + needs-attention follow-ups +
+  pending proposals`) and the `storage.session` review-queue buffer, and the popup/dashboard ↔
+  host message router (`mm:getStatus` / `mm:reconnect` for the recovery card; `mm:classify` /
+  `mm:apply` / `mm:dismiss` / `mm:undo` / `mm:correctLabel` / `mm:notJunk` / `mm:move` /
+  `mm:folders` for the panel; `mm:reviewQueue` / `mm:resolveReview` / `mm:listActivity` /
+  `mm:listProposals` / `mm:settings` / `mm:setPause` for the dashboard).
 
 ## The Phase-10 capabilities
 
@@ -50,7 +63,29 @@ the extension only relays events and applies host-returned safe actions.
 | 5 | Apply safe actions | `classification_ready` / `mail_command` → `drafts.js` |
 | 6 | Record actions & results | `record_user_action` (corrections → feedback; results → audit) |
 
-## Milestone 1 UX (in progress)
+## Milestone 2 UX — the dashboard space
+
+The `spaces` dashboard tab (`dashboard.*`) is MailMate's home and the single source of truth for
+"what needs me." The host addition it consumes is `list_recent_activity` (the Activity tab's
+cross-message global stream + the six event-type filter families); it otherwise reuses the M1
+wires (`classification_ready` buffering for Review, `list_pending_reviews` for Proposals counts,
+`explain_decision`, the panel's `mm:apply` / `mm:dismiss` / `mm:undo` for per-row actions).
+
+| Surface | Wire | Status |
+|---|---|---|
+| Dashboard shell + Review queue | buffered `classification_ready` (in `storage.session`); per-row Approve/Dismiss/Undo via the panel's `mm:*` handlers | **shipped** (`dashboard.*`) |
+| Activity / Explain timeline | `list_recent_activity` (global stream + filter families) | **shipped** |
+| Onboarding walkthrough + connection banner + empty states | `storage.local` `mm:onboarded`; `HostStatus` | **shipped** |
+| Aggregate space badge | `review + needs-attention follow-ups + pending proposals`, via `spaces.update` | **shipped** |
+
+Honest M2 boundaries: the **Proposals** tab is read-only (approve/reject/edit + conflict review
+land with `review_rule_proposal` in Milestone 3); the **Follow-ups** tab is a placeholder until
+`list_followups` (Milestone 4); **Pause** and **Settings** call their real host endpoints
+(`set_pause`, `options_ui`) and degrade with an explicit message until those land in Milestone 4;
+the Review buffer is volatile across a browser restart (the durable `list_review_queue` reopen is
+the documented future addition).
+
+## Milestone 1 UX (shipped)
 
 The Thunderbird UX from [`../interaction-design.md`](../interaction-design.md). The host
 protocol it needs (`hello`, the per-action `apply_state` field, the `classification_corrected`

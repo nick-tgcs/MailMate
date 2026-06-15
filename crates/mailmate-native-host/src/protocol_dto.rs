@@ -225,6 +225,21 @@ impl ExplainDecisionPayload {
     }
 }
 
+/// The `list_recent_activity` request: power the dashboard Activity tab's cross-message
+/// **global** stream. Unlike `explain_decision` (which is per-message and rejects a request
+/// without a `message_id`), this drops the single-message constraint and reads the newest
+/// audit entries, optionally narrowed to one of the six event-type *families* the UI's filter
+/// chips expose (`classified` / `applied` / `blocked` / `corrected` / `follow_up` / `proposal`).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ListRecentActivityPayload {
+    /// Cap the number of (newest-first) events returned. Defaults to 50, hard-capped at 500.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Narrow to one event-type family; absent (or `"all"`) returns every family.
+    #[serde(default)]
+    pub event_type_filter: Option<String>,
+}
+
 /// The `enroll_pipeline_item` control request: tag a quote/proposal → create a
 /// `pipeline_item` and arm a workflow on it. The item is always user-enrolled.
 #[derive(Clone, Debug, Deserialize)]

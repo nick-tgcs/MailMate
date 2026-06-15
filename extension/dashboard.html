@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Locked down: only our own same-origin assets, no inline script, no remote anything. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'"
+    />
+    <title>MailMate</title>
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <!-- Connection banner: hidden while ready; pinned to the top when the host is down. Mirrors
+         the per-message panel + toolbar badge — all three read one HostStatus, never disagree. -->
+    <div id="mm-banner" class="mm-banner" hidden></div>
+
+    <!-- The onboarding walkthrough lives in the same tab (never a modal). Shown on first run
+         (storage.local `mm:onboarded` is false), then hidden for good. -->
+    <section id="mm-onboarding" class="mm-onboarding" hidden></section>
+
+    <!-- The dashboard proper. -->
+    <main id="mm-app" class="mm-app">
+      <header class="mm-head">
+        <div class="mm-brand">
+          <span class="mm-mark" aria-hidden="true">◆</span>
+          <span class="mm-brand__name">MailMate</span>
+        </div>
+        <div class="mm-head__controls">
+          <button id="mm-pause" class="mm-ctl" type="button" title="Pause auto-apply">
+            ⏸ <span id="mm-pause-label">Pause auto-apply</span>
+          </button>
+          <button id="mm-provider" class="mm-ctl mm-ctl--chip" type="button" title="AI provider">
+            Provider: <span id="mm-provider-state">…</span>
+          </button>
+          <button id="mm-refresh" class="mm-ctl mm-ctl--icon" type="button" title="Refresh">⟳</button>
+          <button id="mm-settings" class="mm-ctl mm-ctl--icon" type="button" title="Settings">⚙</button>
+        </div>
+      </header>
+
+      <nav class="mm-tabs" role="tablist">
+        <button class="mm-tab" role="tab" data-tab="review" aria-selected="true">
+          Review <span class="mm-tabcount" data-count="review" hidden></span>
+        </button>
+        <button class="mm-tab" role="tab" data-tab="followups" aria-selected="false">
+          Follow-ups <span class="mm-tabcount" data-count="followups" hidden></span>
+        </button>
+        <button class="mm-tab" role="tab" data-tab="proposals" aria-selected="false">
+          Proposals <span class="mm-tabcount" data-count="proposals" hidden></span>
+        </button>
+        <button class="mm-tab" role="tab" data-tab="activity" aria-selected="false">Activity</button>
+      </nav>
+
+      <section id="mm-content" class="mm-content" role="tabpanel" aria-live="polite"></section>
+    </main>
+
+    <div id="mm-toast" class="mm-toast" hidden></div>
+
+    <script src="dashboard.js"></script>
+  </body>
+</html>

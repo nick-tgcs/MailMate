@@ -26,7 +26,8 @@
     "messagesModify",
     "accountsRead",
     "compose",
-    "compose.save"
+    "compose.save",
+    "storage"
   ],
   "background": {
     "scripts": [

@@ -10,10 +10,13 @@
 //   7. connection health           -> hello handshake -> HostStatus -> toolbar badge
 //   8. per-message panel            -> mm:classify / mm:apply / mm:dismiss / mm:undo /
 //                                      mm:correctLabel / mm:notJunk / mm:move / mm:folders
+//   9. dashboard space              -> spaces.create + aggregate badge; review-queue buffer;
+//                                      mm:reviewQueue / mm:resolveReview / mm:listActivity /
+//                                      mm:listProposals / mm:settings / mm:setPause
 //
 // It is also the single owner of the native port: the popups (the toolbar recovery card and the
-// per-message panel) never open their own port — they ask the background over `browser.runtime`
-// messaging, keeping one single-writer channel.
+// per-message panel) and the dashboard space never open their own port — they ask the background
+// over `browser.runtime` messaging, keeping one single-writer channel.
 //
 // onNewMailReceived is registered synchronously at the top of the event page so a wake-up
 // from a new message is not missed.
@@ -29,8 +32,11 @@ const host = new NativeHost();
 // toolbar `action` badge is the always-on indicator; open popups also get a live push.
 host.onStatusChange((status) => {
   updateToolbarBadge(status);
-  // Push to any open popup; harmless to fail if none is listening.
+  // Push to any open popup or dashboard; harmless to fail if none is listening.
   browser.runtime.sendMessage({ type: "mm:statusChanged", status }).catch(() => {});
+  // The aggregate space badge folds in the pending-proposal count, which needs a live host, so
+  // recompute whenever the connection state changes.
+  recomputeSpaceBadge();
 });
 
 // Map the connection phase onto the toolbar button's badge + tooltip (interaction-design.md
@@ -73,7 +79,30 @@ const POPUP_HANDLERS = {
   "mm:notJunk": (m) => markNotJunk(m),
   "mm:move": (m) => moveMessage(m),
   "mm:folders": () => listFolders(),
+  // Dashboard space.
+  "mm:reviewQueue": () => getReviewQueue(),
+  "mm:resolveReview": (m) => resolveReview(m.decisionId),
+  "mm:listActivity": (m) =>
+    hostCall("list_recent_activity", { limit: m.limit || 80, event_type_filter: m.eventTypeFilter || null }),
+  "mm:listProposals": () => hostCall("list_pending_reviews", {}),
+  "mm:settings": () => hostCall("get_settings", {}, (r) => ({ ok: true, settings: r })),
+  "mm:setPause": (m) => hostCall("set_pause", { paused: Boolean(m.paused) }),
 };
+
+// A guarded host round-trip for the dashboard's read/write requests. Returns the host payload
+// merged onto { ok:true } (or a custom mapper's shape); a disconnected host or a verb this build
+// doesn't speak resolves to { ok:false, error } so the dashboard degrades, never lies.
+async function hostCall(type, payload, mapper) {
+  if (host.status.phase !== HOST_PHASE.ready) {
+    return { ok: false, error: "MailMate host not connected", reason: "host_not_ready" };
+  }
+  try {
+    const result = await host.request(type, payload || {});
+    return mapper ? mapper(result) : { ok: true, ...result };
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+}
 
 browser.runtime.onMessage.addListener((message) => {
   const handler = message && POPUP_HANDLERS[message.type];
@@ -305,10 +334,9 @@ async function applyJunkCorrection(messageId, isSpam) {
 // --- Host -> extension notifications ---------------------------------------------------
 host.onNotification(async (type, payload) => {
   if (type === "classification_ready") {
-    console.info("[MailMate] classification ready:", payload);
-    // The host already applied the allowed actions (as mail_command frames it sent before
-    // this notification); surface the review-required ones for the user to confirm.
-    surfaceReviewSuggestions(payload);
+    // The host already applied the allowed actions; buffer this decision into the dashboard
+    // Review queue (suggested + auto-applied) and refresh the aggregate badge.
+    await surfaceReviewSuggestions(payload);
   } else if (type === "mail_command") {
     const result = await executeMailCommand(payload);
     host.notifyHost("record_user_action", result);
@@ -317,6 +345,7 @@ host.onNotification(async (type, payload) => {
     await openFollowupDraft(payload);
   } else if (type === "followup_needs_attention") {
     surfaceNeedsAttention(payload);
+    await bumpFollowupAttention(payload);
   } else {
     console.info("[MailMate] notification:", type, payload);
   }
@@ -372,12 +401,137 @@ browser.messages.onMoved.addListener(async (_originalMessages, movedMessages) =>
   }
 });
 
-// Surface the review-required suggestions from a classification_ready notification. The
-// dashboard Review queue (Milestone 2) renders these; here we log them so the wiring is
-// observable until that surface lands.
-function surfaceReviewSuggestions(payload) {
-  const review = payload.review_required_actions || [];
-  if (review.length) {
-    console.info("[MailMate] needs review:", review, payload.explanation);
+// --- Dashboard space: review-queue buffer, follow-up attention, aggregate badge --------
+//
+// The Review queue is built from buffered `classification_ready` payloads. We persist the buffer
+// in `storage.session` so it survives an event-page suspension (the documented limitation that a
+// durable host `list_review_queue` would later remove); it is intentionally NOT `storage.local`,
+// so a browser restart does not resurrect stale suggestions. Everything degrades to an empty
+// queue if `storage.session` is unavailable, never an error.
+
+const REVIEW_KEY = "mm:reviewQueue";
+const ATTENTION_KEY = "mm:followupAttention";
+const REVIEW_CAP = 50;
+
+async function sessionGet(key, fallback) {
+  try {
+    const got = await browser.storage.session.get(key);
+    return got[key] === undefined ? fallback : got[key];
+  } catch {
+    return fallback;
   }
 }
+
+async function sessionSet(key, value) {
+  try {
+    await browser.storage.session.set({ [key]: value });
+  } catch {
+    /* no session storage → the buffer is best-effort, not load-bearing */
+  }
+}
+
+// The buffered review queue, newest last. Returned to the dashboard's mm:reviewQueue request.
+async function getReviewQueue() {
+  return { items: await sessionGet(REVIEW_KEY, []) };
+}
+
+// Buffer one classification decision if it has anything to act on (a suggestion to approve or an
+// auto-applied action to undo). De-dupes by decision_id so a re-classification replaces, not
+// duplicates, the card.
+async function bufferReview(payload) {
+  const hasWork =
+    (payload.review_required_actions || []).length > 0 || (payload.applied_actions || []).length > 0;
+  if (!hasWork) return;
+  const items = await sessionGet(REVIEW_KEY, []);
+  const deduped = items.filter((i) => i.decision_id !== payload.decision_id);
+  deduped.push(payload);
+  await sessionSet(REVIEW_KEY, deduped.slice(-REVIEW_CAP));
+}
+
+// Drop a resolved decision from the buffer (approved / dismissed) and refresh the badge.
+async function resolveReview(decisionId) {
+  const items = await sessionGet(REVIEW_KEY, []);
+  await sessionSet(
+    REVIEW_KEY,
+    items.filter((i) => i.decision_id !== decisionId),
+  );
+  await recomputeSpaceBadge();
+  return { ok: true };
+}
+
+// Buffer a `classification_ready` decision and tell the open dashboard to refresh.
+async function surfaceReviewSuggestions(payload) {
+  await bufferReview(payload);
+  await recomputeSpaceBadge();
+  browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "review" }).catch(() => {});
+}
+
+// Track distinct stale follow-ups (by workflow instance) for the aggregate badge. The live
+// Follow-ups pipeline view lands in Milestone 4; the count is correct in the meantime.
+async function bumpFollowupAttention(payload) {
+  const ids = await sessionGet(ATTENTION_KEY, []);
+  const id = payload.workflow_instance_id;
+  if (id && !ids.includes(id)) {
+    ids.push(id);
+    await sessionSet(ATTENTION_KEY, ids);
+  }
+  await recomputeSpaceBadge();
+}
+
+// --- Dashboard space registration + aggregate badge -----------------------------------
+
+const SPACE_NAME = "mailmate";
+let spaceId = null;
+
+// Register (or re-attach to) the MailMate space exactly once. spaces.create throws if the name
+// already exists (e.g. after an event-page restart), so we query first and reuse the id.
+async function ensureSpace() {
+  try {
+    const existing = await browser.spaces.query({ name: SPACE_NAME }).catch(() => []);
+    if (existing && existing.length) {
+      spaceId = existing[0].id;
+    } else {
+      const space = await browser.spaces.create(SPACE_NAME, "dashboard.html", {
+        title: "MailMate",
+        defaultIcons: "icons/mailmate.svg",
+      });
+      spaceId = space.id;
+    }
+    await recomputeSpaceBadge();
+  } catch (e) {
+    console.warn("[MailMate] dashboard space registration failed:", e);
+  }
+}
+
+// The aggregate toolbar badge = work the user must act on now: pending suggestions + stale
+// follow-ups + pending proposals. A buffered decision with ONLY auto-applied actions (the
+// crystallized path) is kept for Undo but is NOT work, so it is excluded from the count — only
+// decisions that still carry a review-required suggestion count. Red when suggestions are
+// waiting, amber when only follow-ups/proposals are. Suppressed at zero.
+async function recomputeSpaceBadge() {
+  if (spaceId == null) return;
+  const items = await sessionGet(REVIEW_KEY, []);
+  const reviews = items.filter((i) => (i.review_required_actions || []).length > 0).length;
+  const attention = (await sessionGet(ATTENTION_KEY, [])).length;
+  let proposals = 0;
+  if (host.status.phase === HOST_PHASE.ready) {
+    try {
+      const r = await host.request("list_pending_reviews");
+      proposals = (r.pending_reviews || []).length;
+    } catch {
+      /* a transient host error just omits the proposal count from the badge */
+    }
+  }
+  const total = reviews + attention + proposals;
+  try {
+    await browser.spaces.update(spaceId, null, {
+      badgeText: total > 0 ? String(total) : "",
+      badgeBackgroundColor: reviews > 0 ? "#c0392b" : "#e67e22",
+    });
+  } catch {
+    /* badge update is cosmetic — never fatal */
+  }
+}
+
+// Register the space on event-page start (fire and forget; failures are logged, not fatal).
+ensureSpace();

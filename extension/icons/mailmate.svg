@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="MailMate">
+  <!-- The MailMate mark: an envelope + a learning "spark". A space/toolbar icon is loaded as an
+       image resource, so `currentColor` would NOT pick up the toolbar theme — it would resolve
+       to black and vanish on dark themes. We use fixed, mid-tone fills chosen to stay legible on
+       both light and dark spaces-toolbar themes, with the brand-blue spark for identity. -->
+  <rect x="3" y="7" width="26" height="19" rx="3" fill="none" stroke="#8a8f98" stroke-width="2"/>
+  <path d="M4 9 L16 18 L28 9" fill="none" stroke="#8a8f98" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="24" cy="8" r="4.5" fill="#2563eb" stroke="#ffffff" stroke-width="1.5"/>
+</svg>

@@ -113,17 +113,23 @@ pub fn classify_response_payload(outcome: &PlanningOutcome, thunderbird_message_
 }
 
 /// The `classification_ready` notification payload (background push). It additionally lists
-/// the actions the host already applied, so the extension does not re-apply them.
+/// the actions the host already applied, so the extension does not re-apply them, and echoes
+/// the message's `subject`/`from` header metadata so the dashboard Review queue can label each
+/// card with the real message identity (these are header metadata, always within `metadata`
+/// retention — never body content).
 #[must_use]
 pub fn classification_ready_payload(
     outcome: &PlanningOutcome,
     thunderbird_message_id: &str,
     applied: &[PlannedAction],
+    subject: &str,
+    from: &str,
 ) -> Value {
     let plan = &outcome.guarded_plan;
     json!({
         "thunderbird_message_id": thunderbird_message_id,
         "decision_id": plan.decision_id,
+        "headers": { "subject": subject, "from": from },
         "classification": classification_json(&outcome.classification),
         "applied_actions": applied.iter().map(|a| suggested_action_json(a, "allowed", "auto_applied")).collect::<Vec<_>>(),
         "review_required_actions": plan
@@ -242,7 +248,16 @@ mod tests {
             message_id: MessageId::from("msg_1"),
             tag: "needs-review".to_owned(),
         }];
-        let payload = classification_ready_payload(&outcome(), "tb_9", &applied);
+        let payload = classification_ready_payload(
+            &outcome(),
+            "tb_9",
+            &applied,
+            "Q3 invoice",
+            "billing@acme.test",
+        );
+        // The header metadata rides along so the dashboard card shows the real message identity.
+        assert_eq!(payload["headers"]["subject"], "Q3 invoice");
+        assert_eq!(payload["headers"]["from"], "billing@acme.test");
         assert_eq!(payload["applied_actions"].as_array().unwrap().len(), 1);
         assert_eq!(payload["applied_actions"][0]["kind"], "tag");
         // An applied action is past-tense: auto_applied (Undo), never a pending suggestion.
