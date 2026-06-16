@@ -7,6 +7,7 @@
 //! `shadow_mode`; the human-review and back-test gates stand between a proposal and a live
 //! rule.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use mailmate_common::feedback::{
     TaskFeedback,
 };
 use mailmate_common::ids::{AuditId, FeedbackId};
-use mailmate_common::proposal::{AgentProposal, ProposalTrigger};
+use mailmate_common::proposal::{AgentProposal, ProposalStatus, ProposalTrigger};
 use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::storage::audit::AuditRepository;
 use mailmate_ports::storage::feedback::FeedbackRepository;
@@ -87,6 +88,37 @@ impl DefaultLearningEngine {
         self.audit.append(entry).await?;
         Ok(())
     }
+
+    /// The signatures of every proposal already on record — the dedup set a fresh pass checks
+    /// against. It spans the pending/shadowing states and the terminal accepted/rejected
+    /// dispositions, so a cluster that has already been proposed (whatever its fate) is not
+    /// proposed again — in particular, a rejected cluster is not re-proposed without new
+    /// evidence (the invariant on [`ProposalStatus::Rejected`]).
+    async fn existing_signatures(&self) -> Result<HashSet<String>, LearningError> {
+        let mut signatures = HashSet::new();
+        for status in [
+            ProposalStatus::Draft,
+            ProposalStatus::PendingReview,
+            ProposalStatus::Shadowing,
+            ProposalStatus::Accepted,
+            ProposalStatus::Rejected,
+        ] {
+            for proposal in self.proposals.list_by_status(status).await? {
+                signatures.insert(proposal_signature(&proposal));
+            }
+        }
+        Ok(signatures)
+    }
+}
+
+/// A deterministic identity for *what a proposal would change* — its kind plus the canonical
+/// JSON of its candidate rule/workflow draft. Two passes over the same recurring pattern build
+/// byte-identical drafts, hence the same signature; this is the cross-pass dedup key that makes
+/// [`DefaultLearningEngine::propose_candidates`] idempotent (re-running adds nothing new).
+fn proposal_signature(proposal: &AgentProposal) -> String {
+    let rule = serde_json::to_string(&proposal.rule_draft).unwrap_or_default();
+    let workflow = serde_json::to_string(&proposal.workflow_draft).unwrap_or_default();
+    format!("{}|{rule}|{workflow}", proposal.proposal_type.as_str())
 }
 
 fn wants(filter: Option<EvidenceSourceKind>, kind: EvidenceSourceKind) -> bool {
@@ -145,6 +177,11 @@ impl LearningEngine for DefaultLearningEngine {
         trigger: ProposalTrigger,
     ) -> Result<Vec<AgentProposal>, LearningError> {
         let mut proposals = Vec::new();
+        // Idempotency: a recurring cluster proposes ONCE. We dedup each candidate by its
+        // deterministic signature against everything already proposed, so re-running a pass
+        // (on every tick / launch) adds nothing new and never piles up duplicates. `seen` is
+        // seeded from the store and then also collects this pass's emissions.
+        let mut seen = self.existing_signatures().await?;
 
         if wants(trigger.source_kind, EvidenceSourceKind::Filing) {
             let rows = self
@@ -154,8 +191,10 @@ impl LearningEngine for DefaultLearningEngine {
             for cluster in cluster_filing(rows) {
                 if cluster.rows.len() >= trigger.thresholds.min_filing_moves {
                     let (proposal, evidence) = filing_proposal(&cluster, &self.source_label);
-                    self.persist_proposal(&proposal, evidence).await?;
-                    proposals.push(proposal);
+                    if seen.insert(proposal_signature(&proposal)) {
+                        self.persist_proposal(&proposal, evidence).await?;
+                        proposals.push(proposal);
+                    }
                 }
             }
         }
@@ -169,8 +208,10 @@ impl LearningEngine for DefaultLearningEngine {
                 if cluster.rows.len() >= trigger.thresholds.min_classification_corrections {
                     let (proposal, evidence) =
                         classification_proposal(&cluster, &self.source_label);
-                    self.persist_proposal(&proposal, evidence).await?;
-                    proposals.push(proposal);
+                    if seen.insert(proposal_signature(&proposal)) {
+                        self.persist_proposal(&proposal, evidence).await?;
+                        proposals.push(proposal);
+                    }
                 }
             }
         }

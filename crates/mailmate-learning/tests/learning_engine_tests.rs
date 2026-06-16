@@ -204,6 +204,71 @@ fn repeated_phishing_corrections_emit_a_classification_proposal() {
 }
 
 #[test]
+fn propose_candidates_is_idempotent_across_passes() {
+    // The host runs a proposal pass at launch and on every tick. A recurring cluster must
+    // propose exactly once — re-running over the same feedback must not duplicate.
+    let h = harness();
+    for _ in 0..3 {
+        block_on(
+            h.engine
+                .record_feedback(TaskFeedback::Filing(filing_row("stripe.com", "Receipts"))),
+        )
+        .unwrap();
+    }
+
+    let first = block_on(h.engine.propose_candidates(ProposalTrigger::all())).unwrap();
+    assert_eq!(
+        first.len(),
+        1,
+        "first pass proposes the crossed-threshold cluster"
+    );
+
+    let second = block_on(h.engine.propose_candidates(ProposalTrigger::all())).unwrap();
+    assert!(
+        second.is_empty(),
+        "a recurring cluster proposes once, not once per pass: {second:?}"
+    );
+
+    // The store holds exactly one pending proposal — no duplicate accumulated.
+    let pending = block_on(h.proposals.list_by_status(ProposalStatus::PendingReview)).unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "no duplicate proposal piled up across passes"
+    );
+}
+
+#[test]
+fn a_reviewed_cluster_is_not_re_proposed() {
+    // Feedback rows persist after a proposal is reviewed. A rejected cluster must not be nagged
+    // again on the next pass (the invariant on `ProposalStatus::Rejected`).
+    let h = harness();
+    for _ in 0..3 {
+        block_on(
+            h.engine
+                .record_feedback(TaskFeedback::Filing(filing_row("stripe.com", "Receipts"))),
+        )
+        .unwrap();
+    }
+
+    let first = block_on(h.engine.propose_candidates(ProposalTrigger::all())).unwrap();
+    assert_eq!(first.len(), 1);
+    // A human rejects it.
+    block_on(h.proposals.set_status(
+        &first[0].id,
+        ProposalStatus::Rejected,
+        Some(Timestamp::now()),
+    ))
+    .unwrap();
+
+    let again = block_on(h.engine.propose_candidates(ProposalTrigger::all())).unwrap();
+    assert!(
+        again.is_empty(),
+        "a rejected cluster is not re-proposed without new evidence: {again:?}"
+    );
+}
+
+#[test]
 fn a_proposed_candidate_crystallizes_only_when_it_clears_the_history_bar() {
     let h = harness();
     for _ in 0..3 {
