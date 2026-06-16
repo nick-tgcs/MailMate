@@ -72,6 +72,51 @@ fn serves_a_ping_over_real_stdio() {
 }
 
 #[test]
+fn serves_when_launched_with_the_manifest_path_argument() {
+    // Mozilla's native-messaging contract launches the host with the manifest's absolute path as
+    // argv[1] (the WebExtensions portal does the same). Regression guard: that MUST serve the
+    // stdin/stdout loop. It used to fall into the "unknown subcommand" arm and exit non-zero,
+    // which the browser surfaces as "native host disconnected: (no error)" — the parked handshake.
+    let json = r#"{"protocol_version":"1.0","kind":"request","request_id":"req_launch","type":"ping","payload":{"nonce":"q"}}"#;
+    let mut input = (u32::try_from(json.len()).unwrap()).to_ne_bytes().to_vec();
+    input.extend_from_slice(json.as_bytes());
+
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    // An absolute path, exactly as the browser passes it (the file need not exist — it is ignored).
+    let manifest_path = data_dir.path().join("com.mailmate.host.json");
+    let mut child = Command::new(BIN)
+        .arg(&manifest_path)
+        .env("MAILMATE_DATA_DIR", data_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn host binary");
+
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(&input)
+        .expect("write ping");
+
+    let out = child.wait_with_output().expect("await host binary");
+    assert!(
+        out.status.success(),
+        "host must serve (exit cleanly) when launched with a manifest-path argument"
+    );
+    assert!(
+        out.stdout.len() >= 4,
+        "expected a framed response, got none"
+    );
+    let len = u32::from_ne_bytes(out.stdout[0..4].try_into().unwrap()) as usize;
+    let body = &out.stdout[4..4 + len];
+    let value: serde_json::Value = serde_json::from_slice(body).expect("response body is JSON");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["request_id"], "req_launch");
+    assert_eq!(value["payload"]["pong"], serde_json::Value::Bool(true));
+}
+
+#[test]
 fn config_subcommand_prints_the_effective_toml() {
     let data_dir = tempfile::tempdir().expect("tempdir");
     let out = Command::new(BIN)

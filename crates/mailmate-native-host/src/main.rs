@@ -41,6 +41,12 @@ fn main() -> ExitCode {
         Some("import-rules") => import_rules(tail),
         Some("simulate") => simulate(tail),
         Some("bench") => bench(tail),
+        // A browser launching us as a native-messaging host passes the manifest's absolute path
+        // (Firefox/Thunderbird, and the xdg-desktop-portal WebExtensions portal) or a `scheme://`
+        // extension origin (Chromium) as the first argument — never a subcommand. Serve the
+        // stdin/stdout loop, exactly as for the no-args case. Without this the host exits as an
+        // "unknown subcommand", which the browser reports as "native host disconnected (no error)".
+        Some(arg) if is_browser_launch(arg) => serve(),
         Some(other) => Err(format!(
             "unknown subcommand {other:?} (expected one of: manifest, config, backup, \
              restore, export-rules, import-rules, simulate, bench, or no args to serve)"
@@ -54,6 +60,15 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether the first CLI argument came from a browser launching us as a native-messaging host
+/// rather than a human typing a subcommand. Browsers pass the manifest's absolute path
+/// (Firefox/Thunderbird on Linux/macOS, via the WebExtensions portal) or a `scheme://` extension
+/// origin (Chromium). Every subcommand we accept is a bare lowercase word, so neither form can
+/// be mistaken for one — and a stray subcommand typo still falls through to the helpful error.
+fn is_browser_launch(arg: &str) -> bool {
+    arg.starts_with('/') || arg.contains("://")
 }
 
 /// Resolve config + data dir and run the native-messaging serve loop.
@@ -142,4 +157,42 @@ fn print_manifest() -> Result<(), Box<dyn Error>> {
     let manifest = NativeHostManifest::new(path, Vec::new());
     println!("{}", serde_json::to_string_pretty(&manifest)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_browser_launch;
+
+    #[test]
+    fn recognizes_a_browser_native_messaging_launch() {
+        // Firefox/Thunderbird (and the WebExtensions portal): the manifest's absolute path.
+        assert!(is_browser_launch(
+            "/home/n/.mozilla/native-messaging-hosts/com.mailmate.host.json"
+        ));
+        // Chromium: a `scheme://…` extension origin.
+        assert!(is_browser_launch("chrome-extension://abcdefghijklmnop/"));
+    }
+
+    #[test]
+    fn leaves_bare_subcommand_words_to_the_subcommand_matcher() {
+        // None of these may be mistaken for a browser launch, so real subcommands still dispatch
+        // and a typo still reaches the "unknown subcommand" error.
+        for word in [
+            "manifest",
+            "config",
+            "backup",
+            "restore",
+            "export-rules",
+            "import-rules",
+            "simulate",
+            "bench",
+            "frobnicate",
+            "",
+        ] {
+            assert!(
+                !is_browser_launch(word),
+                "{word:?} must stay a subcommand token, not a browser launch"
+            );
+        }
+    }
 }
