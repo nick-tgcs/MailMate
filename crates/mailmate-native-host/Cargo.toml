@@ -36,6 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+ureq = { workspace = true }
 
 [dev-dependencies]
 mailmate-test-support = { path = "../mailmate-test-support" }

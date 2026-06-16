@@ -263,6 +263,7 @@ impl AppConfig {
                     id: p.id.clone(),
                     kind: p.kind.clone(),
                     endpoint: p.endpoint.clone(),
+                    model: p.model.clone(),
                 })
                 .collect(),
             paused: self.paused,
@@ -300,6 +301,9 @@ pub struct ProviderSummary {
     /// The endpoint URL (for network adapters), if set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// The model name, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[cfg(test)]

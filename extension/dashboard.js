@@ -950,23 +950,62 @@ function onboardStep2(root, index) {
 }
 
 function onboardStep3(root, index) {
+  // The provider card is filled in async from the host's REAL settings — never hardcode
+  // "no provider", which would be a lie the moment one is configured.
+  const card = el("div", { class: "mm-ob__card", text: "Checking for an AI provider…" });
   onboardShell(
     root,
     index,
-    "Reply drafting (optional)",
+    "AI provider — optional",
     [
       el("p", {
-        text: "MailMate can draft replies for you to review. This needs an AI provider, which is OFF by default — MailMate works fully without one.",
+        text: "MailMate sorts your mail — files, tags, prioritizes, tracks follow-ups — using rules that run on this machine, instantly, with no AI and nothing leaving your computer. An AI provider is optional: the one thing it adds is drafting replies for you to review.",
       }),
-      el("div", { class: "mm-ob__card", text: "Current status:  ◌ No provider configured" }),
       el("p", {
         class: "mm-muted",
-        text: "With no provider, MailMate still classifies, files, tags, prioritizes and tracks follow-ups. Only “draft a reply” waits — it says “drafting needs a provider” instead of failing. You can add one later in Settings.",
+        text: "Those rules come from you. MailMate watches how you file and correct mail, and when it sees the same safe choice enough times — say, three messages from one sender moved to the same folder — it proposes a rule in the Proposals tab for you to approve. It never activates one on its own; as approved rules prove out, it starts handling that pattern automatically — one-tap Undo, and never for sending or deleting. None of this needs a provider.",
+      }),
+      card,
+      el("p", {
+        class: "mm-muted",
+        text: "A provider is off by default. Without one, “draft a reply” simply says “drafting needs a provider” instead of failing — nothing else changes. You can add or change one anytime in Settings.",
       }),
     ],
     () => renderOnboarding(1),
     () => renderOnboarding(3),
   );
+  send({ type: "mm:settings" }).then((reply) => {
+    clear(card);
+    const s = reply && reply.ok ? reply.settings : null;
+    const providers = (s && s.providers) || [];
+    const active = s && s.default_provider;
+    let configured = false;
+    let line;
+    if (!s) {
+      line = "◌ Provider status needs the helper — connect it to manage providers";
+    } else if (active) {
+      const p = providers.find((x) => x.id === active);
+      line = `● Provider: ${active}${p && p.kind ? ` (${p.kind})` : ""} — reply drafting available`;
+      configured = true;
+    } else if (providers.length) {
+      line = "◌ A provider is added but none is set as default — pick one in Settings to enable drafting";
+    } else {
+      line = "◌ No provider configured — reply drafting is off (everything else works)";
+    }
+    card.appendChild(el("div", { text: line }));
+    const setup = el("button", {
+      class: "mm-btn",
+      text: configured ? "Manage in Settings →" : "Set up a provider →",
+    });
+    setup.addEventListener("click", async () => {
+      try {
+        await browser.runtime.openOptionsPage();
+      } catch {
+        toast("Open MailMate's Settings to add a provider", true);
+      }
+    });
+    card.appendChild(setup);
+  });
 }
 
 function onboardStep4(root, index) {

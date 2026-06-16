@@ -44,7 +44,8 @@ use mailmate_ports::rule_engine::RuleEngine;
 use mailmate_ports::storage::{FeedbackRepository, RuleRepository};
 use mailmate_ports::transport::Transport;
 
-use mailmate_ai::{TaskReplyDrafter, UnavailableProvider};
+use mailmate_ai::http::HttpClient;
+use mailmate_ai::TaskReplyDrafter;
 use mailmate_learning::{AiRuleCurator, DefaultLearningEngine, DefaultProposalReview};
 use mailmate_ml::{DeterministicFeatureExtractor, InProcessTrainer, LogisticRegressionClassifier};
 use mailmate_planner::{CascadeClassifier, DefaultActionPlanner};
@@ -62,6 +63,8 @@ use mailmate_workflow::{DefaultExitDetector, DefaultFollowUpScheduler, DefaultWo
 
 use crate::clock::SystemClock;
 use crate::config::{AppConfig, ConfigError};
+use crate::http_client::StdHttpClient;
+use crate::provider::build_provider;
 use crate::router::{AdminSuite, FollowUpSuite, HostRouter};
 use crate::secret_store::FileSecretStore;
 use crate::thunderbird::{ThunderbirdMailClient, WriterTransport};
@@ -175,8 +178,12 @@ pub fn build_router(
         TIER2_POSITIVE,
         TIER2_NEGATIVE,
     ));
-    // Zero-provider default: every provider-typed collaborator degrades rather than fabricates.
-    let provider: Arc<dyn AiProvider> = Arc::new(UnavailableProvider::new());
+    // Build the configured provider from `[ai]` over the host's local HTTP transport. With no
+    // provider configured (or an incomplete one), this degrades to UnavailableProvider — every
+    // provider-typed collaborator still stands up and honestly reports "needs a provider".
+    let http_client: Arc<dyn HttpClient> = Arc::new(StdHttpClient::new());
+    let provider: Arc<dyn AiProvider> =
+        build_provider(&config.ai, secret_store.as_ref(), http_client.clone());
 
     // --- Deterministic engines, seeded from the stored rule snapshots ---
     let classification_snapshot = rule_snapshot(rules.as_ref(), RuleKind::Classification)?;
@@ -286,6 +293,8 @@ pub fn build_router(
         // Persist writes back to the file the config came from (`MAILMATE_CONFIG`), if any.
         config_path: env_nonempty("MAILMATE_CONFIG").map(PathBuf::from),
         secret_store,
+        // The shared HTTP transport, reused for `list_models` provider discovery.
+        http: http_client,
     };
 
     Ok(HostRouter::from_ports(&ports, audit, out)
@@ -307,6 +316,11 @@ pub fn serve(config: AppConfig, data_dir: &Path) -> Result<(), RuntimeError> {
     if app.config.followups.catch_up_on_launch {
         block_on(app.router.drain_followups())?;
     }
+
+    // Mine recurring feedback for deterministic rule candidates at launch and surface any new
+    // proposals into the review queue. Model-free (runs with zero providers) and idempotent
+    // (re-running adds nothing) — the periodic ticker repeats it alongside the follow-up drain.
+    block_on(app.router.generate_proposals())?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let ticker = (app.config.followups.tick_seconds > 0).then(|| {
@@ -472,6 +486,7 @@ fn run_ticker(router: &HostRouter, tick: Duration, stop: &AtomicBool) {
             break;
         }
         let _ = block_on(router.drain_followups());
+        let _ = block_on(router.generate_proposals());
     }
 }
 

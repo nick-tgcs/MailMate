@@ -104,10 +104,15 @@ const POPUP_HANDLERS = {
       provider_id: m.providerId,
       kind: m.kind,
       endpoint: m.endpoint,
+      model: m.model,
       set_default: m.setDefault,
       remove: m.remove,
     }),
   "mm:setSecret": (m) => hostCall("set_secret", { provider_id: m.providerId, secret: m.secret }),
+  // Provider model discovery: probe an endpoint (a saved provider_id attaches its stored key for
+  // an authenticated cloud catalog) so options can offer a pick-list instead of free text.
+  "mm:listModels": (m) =>
+    hostCall("list_models", { kind: m.kind, endpoint: m.endpoint, provider_id: m.providerId || null }),
   // Follow-ups pipeline.
   "mm:listFollowups": (m) =>
     hostCall("list_followups", { status_filter: m.statusFilter || null, limit: m.limit || 100 }),

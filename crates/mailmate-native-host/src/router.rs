@@ -40,6 +40,8 @@ use std::sync::{Arc, Mutex};
 use futures::executor::block_on;
 use serde_json::{json, Value};
 
+use mailmate_ai::http::HttpClient;
+use mailmate_ai::providers::list_models;
 use mailmate_common::action::{GuardedActionPlan, PlannedAction};
 use mailmate_common::actor::Actor;
 use mailmate_common::audit::{event_type, AuditEntry, AuditQuery};
@@ -51,7 +53,7 @@ use mailmate_common::ids::{FolderId, ProposalId, ThreadId};
 use mailmate_common::mail::MailAction;
 use mailmate_common::pipeline::PipelineItemQuery;
 use mailmate_common::policy::TriggerKind;
-use mailmate_common::proposal::ProposalStatus;
+use mailmate_common::proposal::{ProposalStatus, ProposalTrigger};
 use mailmate_common::protocol::{Frame, ProtocolVersion};
 use mailmate_common::retention::RetentionLevel;
 use mailmate_common::secret::{Secret, SecretKey};
@@ -60,6 +62,7 @@ use mailmate_core::{CorrectionContext, CorrectionService, DraftService, Planning
 use mailmate_ports::clock::Clock;
 use mailmate_ports::exit_detector::ExitDetector;
 use mailmate_ports::follow_up_scheduler::FollowUpScheduler;
+use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::mail_client::MailClient;
 use mailmate_ports::proposal_review::ProposalReview;
 use mailmate_ports::secret_store::SecretStore;
@@ -72,7 +75,7 @@ use mailmate_ports::workflow_engine::WorkflowEngine;
 use crate::config::{AppConfig, ProviderSettings};
 use crate::convert::{
     classification_ready_payload, classify_response_payload, followup_draft_ready_payload,
-    followup_needs_attention_payload,
+    followup_needs_attention_payload, proposal_ready_payload,
 };
 use crate::dispatch::{error_response, ok_response, SUPPORTED_PROTOCOL_VERSION};
 use crate::native_stdio::read_frame;
@@ -119,6 +122,10 @@ pub struct AdminSuite {
     pub config_path: Option<PathBuf>,
     /// The 0600 secret store — the only place a provider API key is written (via `set_secret`).
     pub secret_store: Arc<dyn SecretStore>,
+    /// The host's HTTP transport, reused for provider model discovery (`list_models`). It lives
+    /// here so the management surface can probe a provider's catalog endpoint *before* a model is
+    /// chosen — model discovery cannot wait for a fully-built provider (which already needs one).
+    pub http: Arc<dyn HttpClient>,
 }
 
 impl AdminSuite {
@@ -164,6 +171,7 @@ pub struct HostRouter {
     planning: PlanningService,
     correction: CorrectionService,
     draft: DraftService,
+    learning: Arc<dyn LearningEngine>,
     mail_client: Arc<dyn MailClient>,
     audit: Arc<dyn AuditRepository>,
     clock: Arc<dyn Clock>,
@@ -187,6 +195,7 @@ impl HostRouter {
             planning: PlanningService::from_ports(ports),
             correction: CorrectionService::from_ports(ports),
             draft: DraftService::from_ports(ports),
+            learning: ports.learning_engine.clone(),
             mail_client: ports.mail_client.clone(),
             audit,
             clock: ports.clock.clone(),
@@ -313,6 +322,7 @@ impl HostRouter {
             "set_pause" => self.handle_set_pause(request_id, payload).await,
             "set_secret" => self.handle_set_secret(request_id, payload).await,
             "set_provider" => self.handle_set_provider(request_id, payload).await,
+            "list_models" => self.handle_list_models(request_id, payload).await,
             other => self.send(error_response(
                 request_id,
                 "unknown_request_type",
@@ -1174,6 +1184,10 @@ impl HostRouter {
                     .get("endpoint")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                let model = payload
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 match config.ai.providers.iter_mut().find(|p| p.id == provider_id) {
                     Some(existing) => {
                         if let Some(kind) = kind {
@@ -1182,12 +1196,15 @@ impl HostRouter {
                         if payload.get("endpoint").is_some() {
                             existing.endpoint = endpoint;
                         }
+                        if payload.get("model").is_some() {
+                            existing.model = model;
+                        }
                     }
                     None => config.ai.providers.push(ProviderSettings {
                         id: provider_id.to_owned(),
                         kind: kind.unwrap_or("openai_compatible").to_owned(),
                         endpoint,
-                        model: None,
+                        model,
                     }),
                 }
                 if payload.get("set_default").and_then(Value::as_bool) == Some(true) {
@@ -1200,6 +1217,89 @@ impl HostRouter {
             return self.send(error_response(request_id, "invalid_payload", e, None));
         }
         self.respond_settings_write(request_id, admin)
+    }
+
+    /// List the models a provider's endpoint currently serves, so the options UI can offer a
+    /// pick-list instead of a free-text field. `kind` + `endpoint` come from the request (the user
+    /// may be probing an endpoint not yet saved); an optional `provider_id` resolves a saved
+    /// provider's kind/endpoint when those are omitted, and attaches its stored API key for an
+    /// authenticated cloud catalog. The provider-specific URL/shape lives in `mailmate-ai`; a
+    /// transport failure degrades to a `list_models_failed` error beside the still-usable field.
+    async fn handle_list_models(
+        &self,
+        request_id: String,
+        payload: Value,
+    ) -> Result<(), TransportError> {
+        let Some(admin) = &self.admin else {
+            return self.send(admin_not_configured(request_id));
+        };
+        let provider_id = payload
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        // Fall back to a saved provider's kind/endpoint when the request gives only a provider_id
+        // (the card's "refresh models" path). The short-lived clone drops the config lock before
+        // the `.await` below — never hold a `std::sync` guard across an await point.
+        let saved = provider_id.and_then(|id| {
+            admin
+                .config
+                .lock()
+                .unwrap()
+                .ai
+                .providers
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+        });
+        let kind = payload
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| saved.as_ref().map(|p| p.kind.clone()));
+        let endpoint = payload
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| saved.as_ref().and_then(|p| p.endpoint.clone()));
+        let (Some(kind), Some(endpoint)) = (kind, endpoint) else {
+            return self.send(error_response(
+                request_id,
+                "invalid_payload",
+                "list_models requires kind and endpoint (or a saved provider_id that has them)",
+                None,
+            ));
+        };
+        if endpoint.trim().is_empty() {
+            return self.send(error_response(
+                request_id,
+                "invalid_payload",
+                "list_models requires a non-empty endpoint",
+                None,
+            ));
+        }
+        // Attach the stored API key for an authenticated (cloud) catalog, when we know which
+        // provider it is. A store read error degrades to "no key" (a local catalog needs none).
+        let api_key = match provider_id {
+            Some(id) => admin
+                .secret_store
+                .get(AdminSuite::secret_key(id))
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        match list_models(&kind, &endpoint, api_key.as_ref(), admin.http.as_ref()).await {
+            Ok(models) => self.send(ok_response(
+                request_id,
+                json!({ "models": models, "kind": kind, "endpoint": endpoint }),
+            )),
+            Err(e) => self.send(error_response(
+                request_id,
+                "list_models_failed",
+                e.to_string(),
+                Some(json!({ "kind": kind })),
+            )),
+        }
     }
 
     /// Persist (best-effort) and answer a config write with the fresh snapshot + whether it saved.
@@ -1253,6 +1353,7 @@ impl HostRouter {
             capabilities.push("set_pause");
             capabilities.push("set_secret");
             capabilities.push("set_provider");
+            capabilities.push("list_models");
         }
         // Drafting/retention come from the live config; an unwired admin surface reports the
         // host's safe local-first defaults (no provider, metadata retention).
@@ -1314,6 +1415,47 @@ impl HostRouter {
                 notification_id: format!("ntf_attention_{}", item.workflow_instance_id),
                 type_: "followup_needs_attention".to_owned(),
                 payload: followup_needs_attention_payload(item),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Mine recurring feedback for deterministic rule candidates and surface any NEW proposals
+    /// for review — the learning loop's proactive half. Runs at launch (catch-up) and on the
+    /// periodic tick (see [`runtime::serve`](crate::runtime::serve)). Entirely model-free: the
+    /// clustering + thresholds are deterministic, so it proposes with zero providers configured.
+    /// Each freshly-persisted proposal emits a `proposal_ready` notification; the candidate never
+    /// auto-applies — it lands `pending_review` and routes through the Proposals tab + shadow gate.
+    ///
+    /// # Errors
+    /// Propagates a [`TransportError`] from emitting a frame. A storage failure inside the engine
+    /// is audited and ends the pass without erroring the channel (mirrors [`drain_followups`]).
+    ///
+    /// [`drain_followups`]: Self::drain_followups
+    pub async fn generate_proposals(&self) -> Result<(), TransportError> {
+        let proposals = match self
+            .learning
+            .propose_candidates(ProposalTrigger::all())
+            .await
+        {
+            Ok(proposals) => proposals,
+            Err(e) => {
+                let _ = self
+                    .audit
+                    .append(
+                        AuditEntry::new("proposal_generation_failed", Actor::System)
+                            .with_payload(json!({ "error": e.to_string() })),
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
+        for proposal in &proposals {
+            self.send(Frame::Notification {
+                protocol_version: ProtocolVersion::default(),
+                notification_id: format!("ntf_proposal_{}", proposal.id),
+                type_: "proposal_ready".to_owned(),
+                payload: proposal_ready_payload(proposal),
             })?;
         }
         Ok(())

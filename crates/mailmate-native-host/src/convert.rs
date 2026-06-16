@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use mailmate_common::action::{BlockedAction, GuardedActionPlan, PlannedAction};
 use mailmate_common::classification::Classification;
+use mailmate_common::proposal::AgentProposal;
 use mailmate_common::workflow::{FiredStep, NeedsAttentionItem};
 use mailmate_core::PlanningOutcome;
 
@@ -178,6 +179,22 @@ pub fn followup_needs_attention_payload(item: &NeedsAttentionItem) -> Value {
         "pipeline_item_id": item.pipeline_item_id,
         "reason": item.reason,
         "skipped_step_indexes": item.skipped_step_indexes,
+    })
+}
+
+/// The `proposal_ready` notification payload (host → extension): a freshly-mined rule proposal
+/// awaiting human review. Carries the fields the client surfaces — `title`, `risk_level`, and
+/// `proposal_id` (its desktop-notification dedup key) — plus the review-queue context. The
+/// candidate itself never auto-applies; it routes through the Proposals tab and the shadow gate.
+#[must_use]
+pub fn proposal_ready_payload(proposal: &AgentProposal) -> Value {
+    json!({
+        "proposal_id": proposal.id,
+        "title": proposal.title,
+        "proposal_type": proposal.proposal_type.as_str(),
+        "risk_level": proposal.risk_level.as_str(),
+        "recommended_status": proposal.recommended_status.as_str(),
+        "rationale": proposal.rationale,
     })
 }
 
