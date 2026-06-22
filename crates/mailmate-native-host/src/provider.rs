@@ -13,7 +13,8 @@ use futures::executor::block_on;
 
 use mailmate_ai::http::HttpClient;
 use mailmate_ai::providers::{
-    LlamaCppAdapter, LmStudioAdapter, OllamaAdapter, OpenAiCompatibleAdapter, UnavailableProvider,
+    LlamaCppAdapter, LmStudioAdapter, MockProvider, OllamaAdapter, OpenAiCompatibleAdapter,
+    UnavailableProvider,
 };
 use mailmate_common::secret::SecretKey;
 use mailmate_ports::ai_provider::AiProvider;
@@ -66,6 +67,16 @@ fn build_one(
     secrets: &dyn SecretStore,
     http: Arc<dyn HttpClient>,
 ) -> Option<Arc<dyn AiProvider>> {
+    // The deterministic `mock` has no network home, so it must build BEFORE the endpoint guard —
+    // a `kind = "mock"` config stands up a real, offline provider as `KNOWN_PROVIDER_KINDS`
+    // promises (rather than degrading to unavailable). It returns an empty structured response:
+    // honest stub output for dev/demo, never a fabricated answer dressed up as a real model's.
+    if p.kind == "mock" {
+        return Some(Arc::new(MockProvider::returning_json(
+            p.id.clone(),
+            serde_json::json!({}),
+        )));
+    }
     let endpoint = p.endpoint.as_deref()?;
     match p.kind.as_str() {
         "ollama" => Some(Arc::new(OllamaAdapter::new(
@@ -93,7 +104,7 @@ fn build_one(
                 http,
             )))
         }
-        // "mock" and any unknown kind have no real network home → degrade to unavailable.
+        // Any unknown kind has no real network home → degrade to unavailable.
         _ => None,
     }
 }
@@ -186,6 +197,14 @@ mod tests {
     }
 
     #[test]
+    fn a_mock_provider_builds_offline_with_no_endpoint_or_model() {
+        // `KNOWN_PROVIDER_KINDS` promises `mock` works offline — it must stand up a real provider
+        // (not degrade to unavailable) even with neither endpoint nor model configured.
+        let cfg = ai(Some("stub"), vec![provider("stub", "mock", None, None)]);
+        assert_eq!(built_id(&cfg), ProviderId::from("stub"));
+    }
+
+    #[test]
     fn an_openai_compatible_config_builds_even_without_a_key() {
         let cfg = ai(
             Some("vllm"),
@@ -240,8 +259,16 @@ mod tests {
         // zero-provider sentinel's id — the old id-string match reported this as unavailable.
         let cfg = ai(
             Some("unavailable"),
-            vec![provider("unavailable", "ollama", Some("http://x"), Some("m"))],
+            vec![provider(
+                "unavailable",
+                "ollama",
+                Some("http://x"),
+                Some("m"),
+            )],
         );
-        assert!(configured(&cfg), "a real adapter named 'unavailable' is available");
+        assert!(
+            configured(&cfg),
+            "a real adapter named 'unavailable' is available"
+        );
     }
 }

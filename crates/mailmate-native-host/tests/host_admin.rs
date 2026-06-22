@@ -10,12 +10,13 @@ use serde_json::{json, Value};
 
 use mailmate_common::actor::Actor;
 use mailmate_common::audit::AuditEntry;
+use mailmate_common::features::FeatureValue;
 use mailmate_common::feedback::{
     ClassificationFeedback, ClassificationFeedbackQuery, FeedbackPolarity, FilingFeedback,
     FilingFeedbackQuery, FilingFeedbackRow, PinnedVersions,
 };
-use mailmate_common::features::FeatureValue;
 use mailmate_common::ids::{FolderId, MessageId, ProposalId};
+use mailmate_common::message::ClassificationStatus;
 use mailmate_common::proposal::{AgentProposal, ProposalKind, ProposalStatus};
 use mailmate_common::protocol::{Frame, ProtocolVersion, ResponseStatus};
 use mailmate_common::rules::rule::{RiskLevel, RuleStatus};
@@ -23,7 +24,6 @@ use mailmate_common::time::Timestamp;
 use mailmate_native_host::config::{AppConfig, CategoryPolicy};
 use mailmate_native_host::router::HostRouter;
 use mailmate_native_host::runtime::build_router;
-use mailmate_common::message::ClassificationStatus;
 use mailmate_ports::storage::messages::MessageRepository;
 use mailmate_ports::storage::rules::RuleRepository;
 use mailmate_ports::storage::{AuditRepository, FeedbackRepository, ProposalRepository};
@@ -76,8 +76,8 @@ fn router_over(backend: &Arc<SqliteBackend>, out: Arc<FakeTransport>) -> HostRou
         std::process::id()
     ));
     let _ = std::fs::remove_file(&secrets); // start clean
-    // config_path / tier2 weights: None — these tests exercise the in-memory config + an
-    // in-memory Tier-2 model (no on-disk persistence).
+                                            // config_path / tier2 weights: None — these tests exercise the in-memory config + an
+                                            // in-memory Tier-2 model (no on-disk persistence).
     build_router(&AppConfig::default(), backend, out, secrets, None, None).unwrap()
 }
 
@@ -180,10 +180,12 @@ fn a_rule_you_keep_undoing_surfaces_a_retire_proposal_on_the_review_queue() {
     // Three undos of this rule's action — each stamps an `action_undone` row against its rule_id.
     let audit = SqliteAuditRepository::new(backend.clone());
     for _ in 0..3 {
-        block_on(audit.append(
-            AuditEntry::new(event_type::ACTION_UNDONE, Actor::User)
-                .with_rule(RuleKind::Action, rule_id.clone()),
-        ))
+        block_on(
+            audit.append(
+                AuditEntry::new(event_type::ACTION_UNDONE, Actor::User)
+                    .with_rule(RuleKind::Action, rule_id.clone()),
+            ),
+        )
         .unwrap();
     }
 
@@ -311,13 +313,19 @@ fn repeated_record_sent_mail_surfaces_a_vip_proposal_through_the_real_root() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|p| p["proposal_type"] == "new_rule" && p["title"].as_str().is_some_and(|t| t.contains("acme.com")))
+        .find(|p| {
+            p["proposal_type"] == "new_rule"
+                && p["title"].as_str().is_some_and(|t| t.contains("acme.com"))
+        })
         .expect("a frequently-emailed domain surfaces a VIP proposal");
     // The candidate is a classification rule keyed on the (case-folded) domain, setting priority.
     assert_eq!(vip["rule_draft"]["condition"]["field"], "sender_domain");
     assert_eq!(vip["rule_draft"]["condition"]["value"], "acme.com");
     assert_eq!(vip["rule_draft"]["effect"]["priority"], "high");
-    assert_eq!(vip["recommended_status"], "shadow_mode", "never auto-activated");
+    assert_eq!(
+        vip["recommended_status"], "shadow_mode",
+        "never auto-activated"
+    );
 }
 
 #[test]
@@ -362,7 +370,12 @@ fn a_proposals_card_carries_its_rule_drafts_condition_and_effect_ast() {
 
 /// Seed an active action rule (sender_domain == `domain` → move to `folder`) directly into the
 /// store, returning its id. Mirrors what proposal-acceptance produces, without the whole flow.
-fn seed_active_rule(backend: &Arc<SqliteBackend>, stable_name: &str, domain: &str, folder: &str) -> mailmate_common::ids::RuleId {
+fn seed_active_rule(
+    backend: &Arc<SqliteBackend>,
+    stable_name: &str,
+    domain: &str,
+    folder: &str,
+) -> mailmate_common::ids::RuleId {
     use mailmate_common::actor::Actor;
     use mailmate_common::rules::condition::{Condition, FieldValue, Operator, Predicate};
     use mailmate_common::rules::effect::RuleEffect;
@@ -442,12 +455,18 @@ fn set_rule_status_disables_a_rule_and_it_stays_visible_for_re_enabling() {
     .unwrap();
     let resp = last_ok(&out);
     assert_eq!(resp["status"], "disabled");
-    assert_eq!(resp["reloaded"], true, "the engines hot-reloaded so it stops firing now");
+    assert_eq!(
+        resp["reloaded"], true,
+        "the engines hot-reloaded so it stops firing now"
+    );
 
     // It is STILL visible in the manager (so a human can re-enable it) — disabled, not vanished.
     block_on(router.handle(request("list_rules", json!({})))).unwrap();
     let rules = last_ok(&out)["rules"].as_array().unwrap().clone();
-    let card = rules.iter().find(|r| r["rule_id"] == rule_id.as_str()).expect("still listed");
+    let card = rules
+        .iter()
+        .find(|r| r["rule_id"] == rule_id.as_str())
+        .expect("still listed");
     assert_eq!(card["status"], "disabled");
 
     // Re-enable it.
@@ -508,7 +527,10 @@ fn set_rule_status_refuses_to_activate_an_unreviewed_draft_rule() {
                 op: Operator::Eq,
                 value: FieldValue::Text("evil.example".to_owned()),
             }),
-            effect: RuleEffect { move_to: Some("Inbox".to_owned()), ..RuleEffect::new() },
+            effect: RuleEffect {
+                move_to: Some("Inbox".to_owned()),
+                ..RuleEffect::new()
+            },
             priority: 1,
             confidence_threshold: None,
             risk_level: RiskLevel::Low,
@@ -560,7 +582,11 @@ fn an_undo_of_a_rules_action_is_counted_against_that_rule_in_the_manager() {
     .unwrap();
     // The undo took the real route_undo path (filing correction), not the audit-only fallback —
     // so the test exercises the genuine data flow, not just an audit side-write.
-    assert_eq!(last_ok(&out)["sink"], "filing_feedback", "route_undo handled the move undo");
+    assert_eq!(
+        last_ok(&out)["sink"],
+        "filing_feedback",
+        "route_undo handled the move undo"
+    );
 
     // The undo's learning signal really landed as a negative filing-feedback row.
     let filing = SqliteFeedbackRepository::new(backend.clone());
@@ -569,14 +595,27 @@ fn an_undo_of_a_rules_action_is_counted_against_that_rule_in_the_manager() {
         FilingFeedbackQuery::default(),
     ))
     .unwrap();
-    assert_eq!(rows.len(), 1, "the undo wrote exactly one filing-feedback row");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the undo wrote exactly one filing-feedback row"
+    );
 
     block_on(router.handle(request("list_rules", json!({})))).unwrap();
     let rules = last_ok(&out)["rules"].as_array().unwrap().clone();
-    let card_a = rules.iter().find(|r| r["rule_id"] == rule_a.as_str()).unwrap();
-    let card_b = rules.iter().find(|r| r["rule_id"] == rule_b.as_str()).unwrap();
+    let card_a = rules
+        .iter()
+        .find(|r| r["rule_id"] == rule_a.as_str())
+        .unwrap();
+    let card_b = rules
+        .iter()
+        .find(|r| r["rule_id"] == rule_b.as_str())
+        .unwrap();
     assert_eq!(card_a["undo_count"], 1, "the undo is attributed to rule A");
-    assert_eq!(card_b["undo_count"], 0, "an unrelated rule is NOT charged the undo");
+    assert_eq!(
+        card_b["undo_count"], 0,
+        "an unrelated rule is NOT charged the undo"
+    );
 }
 
 #[test]
@@ -593,9 +632,13 @@ fn get_settings_returns_the_secret_free_snapshot() {
     assert_eq!(payload["follow_up_tick_seconds"], 0);
     assert!(payload["providers"].as_array().unwrap().is_empty());
     // The category vocabulary rides along so the panel renders human names without hardcoding.
-    let categories = payload["categories"].as_array().expect("categories vocabulary");
+    let categories = payload["categories"]
+        .as_array()
+        .expect("categories vocabulary");
     assert!(!categories.is_empty());
-    assert!(categories.iter().any(|c| c["key"] == "newsletters" && c["label"] == "Newsletters"));
+    assert!(categories
+        .iter()
+        .any(|c| c["key"] == "newsletters" && c["label"] == "Newsletters"));
 }
 
 #[test]
@@ -919,27 +962,20 @@ fn the_consent_gate_keeps_a_body_level_inert_until_consent_is_granted() {
     .unwrap();
     block_on(router.handle(request("get_settings", json!({})))).unwrap();
     assert_eq!(
-        last_ok(&out)["retention_level"], "metadata",
+        last_ok(&out)["retention_level"],
+        "metadata",
         "a body level is inert without consent"
     );
     assert_eq!(last_ok(&out)["body_consent"], false);
 
     // Granting consent makes the configured body level take effect.
-    block_on(router.handle(request(
-        "set_settings",
-        json!({ "body_consent": true }),
-    )))
-    .unwrap();
+    block_on(router.handle(request("set_settings", json!({ "body_consent": true })))).unwrap();
     block_on(router.handle(request("get_settings", json!({})))).unwrap();
     assert_eq!(last_ok(&out)["retention_level"], "bodies");
     assert_eq!(last_ok(&out)["body_consent"], true);
 
     // Revoking consent clamps the effective level straight back to metadata.
-    block_on(router.handle(request(
-        "set_settings",
-        json!({ "body_consent": false }),
-    )))
-    .unwrap();
+    block_on(router.handle(request("set_settings", json!({ "body_consent": false })))).unwrap();
     block_on(router.handle(request("get_settings", json!({})))).unwrap();
     assert_eq!(last_ok(&out)["retention_level"], "metadata");
 }
@@ -1068,9 +1104,15 @@ fn a_provider_set_in_one_host_session_persists_on_disk_for_the_next() {
     let reloaded = AppConfig::load(&config_path).expect("the persisted config re-loads cleanly");
     let backend_b = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
     let out_b = Arc::new(FakeTransport::new());
-    let router_b =
-        build_router(&reloaded, &backend_b, out_b.clone(), secrets, Some(config_path), None)
-            .unwrap();
+    let router_b = build_router(
+        &reloaded,
+        &backend_b,
+        out_b.clone(),
+        secrets,
+        Some(config_path),
+        None,
+    )
+    .unwrap();
     block_on(router_b.handle(request("get_settings", json!({})))).unwrap();
     let settings = last_ok(&out_b);
     assert_eq!(
@@ -1161,7 +1203,10 @@ fn tier2_online_learning_survives_a_host_restart() {
         .as_f64()
         .expect("spam_score is a number");
 
-    assert!((cold - 0.5).abs() < 1e-6, "a cold model is indifferent: {cold}");
+    assert!(
+        (cold - 0.5).abs() < 1e-6,
+        "a cold model is indifferent: {cold}"
+    );
     assert!(
         learned > cold + 0.05,
         "the reloaded model kept its spam learning: {learned} vs cold {cold}"
@@ -1211,7 +1256,11 @@ fn a_correction_records_the_full_feature_vector_not_just_the_domain() {
         ..Default::default()
     }))
     .unwrap();
-    assert_eq!(rows.len(), 1, "the junk correction recorded exactly one row");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the junk correction recorded exactly one row"
+    );
     let sf = &rows[0].salient_features;
     // Rich features are captured — not just the injected sender_domain.
     assert_eq!(sf.get("is_list_mail"), Some(&FeatureValue::Bool(true)));
@@ -1382,7 +1431,10 @@ fn salient_signals_explain_a_verdict_and_can_be_marked_wrong() {
     let signals = resp["classification"]["salient_signals"]
         .as_array()
         .expect("the verdict carries salient_signals");
-    assert!(!signals.is_empty(), "the verdict carries readable reasons: {resp:#}");
+    assert!(
+        !signals.is_empty(),
+        "the verdict carries readable reasons: {resp:#}"
+    );
     // The reasons are human labels (never raw snake_case ids), and at least one is correctable.
     let correctable: Vec<&Value> = signals
         .iter()
@@ -1423,7 +1475,10 @@ fn salient_signals_explain_a_verdict_and_can_be_marked_wrong() {
     }))
     .unwrap();
     assert_eq!(rows.len(), 1, "exactly one rejected-signal row");
-    assert_eq!(rows[0].human_reason_code.as_deref(), Some(signal_id.as_str()));
+    assert_eq!(
+        rows[0].human_reason_code.as_deref(),
+        Some(signal_id.as_str())
+    );
     assert_eq!(rows[0].polarity, FeedbackPolarity::Negative);
     assert!(
         rows[0].salient_features.get("auth_fail").is_some(),
@@ -1471,14 +1526,17 @@ fn the_classify_payload_carries_an_inform_only_safety_block() {
     assert!(ids.contains(&"executable_attachment"), "got {ids:?}");
     assert!(ids.contains(&"auth_failure"), "got {ids:?}");
     // The dangerous attachment is a Danger-severity finding that names the file.
-    let exe = safety.iter().find(|f| f["id"] == "executable_attachment").unwrap();
+    let exe = safety
+        .iter()
+        .find(|f| f["id"] == "executable_attachment")
+        .unwrap();
     assert_eq!(exe["severity"], "danger");
     assert!(exe["detail"].as_str().unwrap().contains("invoice.pdf.exe"));
     // Inform-only: the Safety block changes nothing the host does — no action was auto-applied.
     assert!(
-        resp["suggested_actions"].as_array().is_none_or(|a| a
-            .iter()
-            .all(|x| x["apply_state"] != "auto_applied")),
+        resp["suggested_actions"]
+            .as_array()
+            .is_none_or(|a| a.iter().all(|x| x["apply_state"] != "auto_applied")),
         "safety findings never drive an auto-applied action"
     );
 }
@@ -1514,7 +1572,10 @@ fn the_classify_payload_exposes_a_one_click_unsubscribe_affordance() {
     assert_eq!(unsub["mailto"]["to"], "unsub@list.test");
     assert_eq!(unsub["mailto"]["subject"], "unsubscribe");
     assert_eq!(unsub["http_url"], "https://list.test/u?id=9");
-    assert_eq!(unsub["one_click"], true, "https + the RFC 8058 marker ⇒ one-click");
+    assert_eq!(
+        unsub["one_click"], true,
+        "https + the RFC 8058 marker ⇒ one-click"
+    );
 
     // A plain message carries no unsubscribe affordance.
     let out2 = Arc::new(FakeTransport::new());
@@ -1530,7 +1591,10 @@ fn the_classify_payload_exposes_a_one_click_unsubscribe_affordance() {
         }),
     )))
     .unwrap();
-    assert!(last_ok(&out2)["unsubscribe"].is_null(), "no header ⇒ no affordance");
+    assert!(
+        last_ok(&out2)["unsubscribe"].is_null(),
+        "no header ⇒ no affordance"
+    );
 }
 
 fn filing_feedback_row(domain: &str, folder: &str) -> FilingFeedbackRow {
@@ -1666,6 +1730,33 @@ fn ok_body(json_body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// Like [`stub_endpoint`], but also **captures the raw bytes of the request** it receives, so a
+/// test can assert what headers (e.g. `Authorization`) the host did — or did not — send. Returns
+/// the base URL plus the shared capture buffer. The request is fully received before the canned
+/// response is written, so the buffer is populated by the time a blocking client call returns.
+fn capturing_stub_endpoint(response: Vec<u8>) -> (String, Arc<std::sync::Mutex<Vec<u8>>>) {
+    use std::io::{Read, Write};
+    use std::sync::Mutex;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = sock.read(&mut buf) {
+                if n == 0 {
+                    break; // peer closed
+                }
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+            let _ = sock.write_all(&response);
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), captured)
+}
+
 #[test]
 fn list_models_lists_an_ollama_catalog_over_the_real_transport() {
     let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
@@ -1747,6 +1838,77 @@ fn list_models_resolves_kind_and_endpoint_from_a_saved_provider() {
 }
 
 #[test]
+fn list_models_never_sends_the_saved_key_to_an_overridden_endpoint() {
+    // SSRF / key-exfiltration guard: a request pins a saved `provider_id` (whose stored key the
+    // host would attach) but OVERRIDES the endpoint with an attacker URL. The saved key MUST NOT
+    // be sent there — discovery still runs, just unauthenticated.
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    let router = router_over(&backend, out.clone());
+
+    // A saved cloud provider (its kind attaches a Bearer key) with a stored key. Its own endpoint
+    // is never connected to in this test — it just has to exist in config.
+    block_on(router.handle(request(
+        "set_provider",
+        json!({ "provider_id": "cloud", "kind": "openai_compatible", "endpoint": "http://saved.invalid/v1", "model": "m" }),
+    )))
+    .unwrap();
+    block_on(router.handle(request(
+        "set_secret",
+        json!({ "provider_id": "cloud", "secret": "sk-leak-me" }),
+    )))
+    .unwrap();
+
+    // Probe an ATTACKER endpoint while pinning the saved provider_id.
+    let (attacker, captured) = capturing_stub_endpoint(ok_body(r#"{"data":[]}"#));
+    block_on(router.handle(request(
+        "list_models",
+        json!({ "provider_id": "cloud", "endpoint": attacker }),
+    )))
+    .unwrap();
+
+    let seen = String::from_utf8_lossy(&captured.lock().unwrap()).to_ascii_lowercase();
+    assert!(
+        !seen.contains("authorization"),
+        "the saved key must never be sent to an overridden endpoint; request was:\n{seen}"
+    );
+    assert!(
+        !seen.contains("sk-leak-me"),
+        "the saved key value leaked to the attacker endpoint:\n{seen}"
+    );
+}
+
+#[test]
+fn list_models_sends_the_saved_key_to_the_providers_own_endpoint() {
+    // The companion to the SSRF guard: discovery against the provider's OWN saved endpoint still
+    // carries its stored key, so authenticated cloud catalogs keep working.
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    let router = router_over(&backend, out.clone());
+
+    let (saved, captured) = capturing_stub_endpoint(ok_body(r#"{"data":[{"id":"m"}]}"#));
+    block_on(router.handle(request(
+        "set_provider",
+        json!({ "provider_id": "cloud", "kind": "openai_compatible", "endpoint": saved, "model": "m" }),
+    )))
+    .unwrap();
+    block_on(router.handle(request(
+        "set_secret",
+        json!({ "provider_id": "cloud", "secret": "sk-keep" }),
+    )))
+    .unwrap();
+
+    // List by provider_id ALONE — no override, so the resolved endpoint IS the saved one.
+    block_on(router.handle(request("list_models", json!({ "provider_id": "cloud" })))).unwrap();
+
+    let seen = String::from_utf8_lossy(&captured.lock().unwrap()).to_ascii_lowercase();
+    assert!(
+        seen.contains("authorization: bearer sk-keep"),
+        "the stored key must authenticate discovery against the provider's own endpoint:\n{seen}"
+    );
+}
+
+#[test]
 fn provider_status_reports_unconfigured_then_available_after_a_complete_default() {
     let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
     let out = Arc::new(FakeTransport::new());
@@ -1803,7 +1965,10 @@ fn provider_status_is_configured_but_unavailable_when_the_default_is_incomplete(
     block_on(router.handle(request("provider_status", json!({})))).unwrap();
     let status = last_ok(&out);
     assert_eq!(status["configured"], true);
-    assert_eq!(status["available"], false, "an incomplete default must not read as available");
+    assert_eq!(
+        status["available"], false,
+        "an incomplete default must not read as available"
+    );
 }
 
 #[test]
@@ -1841,7 +2006,10 @@ fn test_provider_reports_unreachable_as_data_not_an_error() {
     let payload = one_ok_response(&out);
     assert_eq!(payload["reachable"], false);
     assert!(
-        payload["error"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        payload["error"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "an unreachable probe must carry the transport error: {payload}"
     );
 }
@@ -1900,23 +2068,99 @@ fn draft_reply_over_a_real_ollama_stub_returns_a_guarded_review_required_draft()
     .unwrap();
 
     let payload = one_ok_response(&out);
-    assert_eq!(payload["requires_human_review"], true, "a draft is never auto-sent");
+    assert_eq!(
+        payload["requires_human_review"], true,
+        "a draft is never auto-sent"
+    );
     assert!(
-        payload["body"].as_str().unwrap().to_lowercase().contains("no thanks"),
+        payload["body"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("no thanks"),
         "the decline drawn over the real transport reached the host: {}",
         payload["body"]
     );
     assert!(
-        payload["rationale"].as_str().unwrap().contains("polite decline"),
+        payload["rationale"]
+            .as_str()
+            .unwrap()
+            .contains("polite decline"),
         "the rationale rode through: {}",
         payload["rationale"]
     );
     // The model-free guard ran on the host — a clean decline is all-clear (no fabricated flags).
     assert!(
-        payload["commitments"]["findings"].as_array().unwrap().is_empty(),
+        payload["commitments"]["findings"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "a clean decline is all-clear: {}",
         payload["commitments"]
     );
+}
+
+#[test]
+fn set_provider_hot_swaps_the_live_drafter_with_no_restart() {
+    // P2 regression: the live provider is rebuilt + hot-swapped in place after a `set_provider`
+    // write. A router that STARTED with no provider (so `draft_reply` degrades to `draft_failed`)
+    // must draft successfully once a provider is configured from Settings — over the SAME router
+    // instance, proving the drafter's backing adapter swapped without a host restart.
+    let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
+    let out = Arc::new(FakeTransport::new());
+    let router = router_over(&backend, out.clone()); // default config → UnavailableProvider backing
+
+    // 1) Cold: nothing configured → draft degrades (no network hit, never a fabricated draft).
+    block_on(router.handle(request("draft_reply", draft_request_payload()))).unwrap();
+    assert_eq!(
+        last_error_code(&out),
+        "draft_failed",
+        "with no provider the drafter must degrade, not fabricate"
+    );
+
+    // 2) Configure a working Ollama provider from "Settings", pointed at a stub, as the default.
+    let draft_json = json!({
+        "subject": "Re: Your proposal",
+        "body": "Hi,\n\nThanks, but no thanks for now.\n\nBest,",
+        "safety_notes": [],
+        "rationale": "A polite decline with no commitments."
+    })
+    .to_string();
+    let envelope = json!({ "message": { "content": draft_json } }).to_string();
+    let endpoint = stub_endpoint(ok_body(&envelope));
+    block_on(router.handle(request(
+        "set_provider",
+        json!({ "provider_id": "local", "kind": "ollama", "endpoint": endpoint, "model": "llama3", "set_default": true }),
+    )))
+    .unwrap();
+
+    // 3) Warm: the SAME router now drafts over the freshly-swapped provider.
+    block_on(router.handle(request("draft_reply", draft_request_payload()))).unwrap();
+    let warm = last_ok(&out);
+    assert_eq!(
+        warm["requires_human_review"], true,
+        "a draft is never auto-sent"
+    );
+    assert!(
+        warm["body"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("no thanks"),
+        "the draft drawn over the hot-swapped provider reached the host: {}",
+        warm["body"]
+    );
+}
+
+/// A `draft_reply` request payload (shared by the hot-swap regression's cold + warm calls).
+fn draft_request_payload() -> Value {
+    json!({
+        "subject": "Your proposal",
+        "counterparty": "vendor@example.test",
+        "excerpt": "Are you interested in our offer?",
+        "user_instruction": "Politely decline.",
+        "forbidden_commitments": ["dates", "prices"]
+    })
 }
 
 // --- The Golden Path (Phase 2 exit) --------------------------------------------------------
@@ -2026,6 +2270,9 @@ fn triage_router(
         config_path: None,
         secret_store: Arc::new(FakeSecretStore::new()),
         http: Arc::new(StdHttpClient::new()),
+        // This admin-only test router has no live provider graph to swap; settings writes still
+        // take effect on the config/secret store, they just skip the (absent) rebuild.
+        live_provider: None,
     };
     let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone())
         .with_admin(admin);
@@ -2054,7 +2301,10 @@ fn a_category_set_to_off_silences_its_suggestions_the_phase5_exit() {
     block_on(router.handle(new_mail_on("tb_1", "acct_default"))).unwrap();
 
     // Nothing applied, and — crucially — nothing surfaced to act on.
-    assert!(mail.applied_actions().is_empty(), "Off auto-applies nothing");
+    assert!(
+        mail.applied_actions().is_empty(),
+        "Off auto-applies nothing"
+    );
     let ntf = last_notification(&out, "classification_ready");
     assert_eq!(
         ntf["applied_actions"].as_array().unwrap().len(),
@@ -2091,7 +2341,10 @@ fn a_category_set_to_suggest_surfaces_the_action_but_never_auto_applies() {
     assert_eq!(review.len(), 1, "the action surfaces as a suggestion");
     assert_eq!(review[0]["kind"], "tag");
     assert_eq!(review[0]["policy_outcome"], "requires_review");
-    assert_eq!(review[0]["apply_state"], "suggest", "in the loop, not applied");
+    assert_eq!(
+        review[0]["apply_state"], "suggest",
+        "in the loop, not applied"
+    );
 }
 
 #[test]
@@ -2194,7 +2447,11 @@ fn an_out_of_scope_account_is_silenced_regardless_of_category() {
 
     // …but an in-scope account on the same router still auto-applies.
     block_on(router.handle(new_mail_on("tb_2", "acct_default"))).unwrap();
-    assert_eq!(mail.applied_actions().len(), 1, "in-scope account is normal");
+    assert_eq!(
+        mail.applied_actions().len(),
+        1,
+        "in-scope account is normal"
+    );
 }
 
 #[test]
@@ -2212,7 +2469,11 @@ fn pausing_demotes_auto_actions_to_suggestions_rather_than_dropping_them() {
     assert!(mail.applied_actions().is_empty(), "paused applies nothing");
     let ntf = last_notification(&out, "classification_ready");
     let review = ntf["review_required_actions"].as_array().unwrap();
-    assert_eq!(review.len(), 1, "the action surfaces as a suggestion when paused");
+    assert_eq!(
+        review.len(),
+        1,
+        "the action surfaces as a suggestion when paused"
+    );
 }
 
 #[test]
@@ -2230,7 +2491,10 @@ fn accepting_a_retire_hot_reloads_so_the_rule_stops_firing_in_process() {
     // Baseline: a stripe.com arrival is auto-filed to Receipts by the active rule.
     block_on(router.handle(new_mail_from("tb_1", "billing@stripe.com"))).unwrap();
     let before = last_notification(&out, "classification_ready");
-    assert_eq!(before["applied_actions"][0]["kind"], "move", "active rule auto-files");
+    assert_eq!(
+        before["applied_actions"][0]["kind"], "move",
+        "active rule auto-files"
+    );
     assert_eq!(before["applied_actions"][0]["to_folder"], "Receipts");
 
     // Surface a retire: three undos of this rule's action cross the decay count bar (each stamps an
@@ -2402,7 +2666,11 @@ fn the_golden_path_correction_to_active_rule_to_autoapply_to_undo() {
         }),
     )))
     .unwrap();
-    assert_eq!(last_ok(&out)["sink"], "filing_feedback", "the Undo is captured");
+    assert_eq!(
+        last_ok(&out)["sink"],
+        "filing_feedback",
+        "the Undo is captured"
+    );
 
     // The undo row is negative evidence naming the rule's now-reversed target.
     let filing = SqliteFeedbackRepository::new(backend.clone());
@@ -2456,7 +2724,11 @@ fn triage_existing_mail_classifies_without_apply_and_mines_folder_placements() {
     // One ok response — and crucially NO mail commands and NO classification_ready notifications:
     // the backfill mutates no mail.
     let frames = out.sent_frames();
-    assert_eq!(frames.len(), 1, "exactly one response, nothing applied: {frames:?}");
+    assert_eq!(
+        frames.len(),
+        1,
+        "exactly one response, nothing applied: {frames:?}"
+    );
     let summary = one_ok_response(&out);
     assert_eq!(summary["classified"], 4, "every message was classified");
     assert_eq!(
@@ -2503,13 +2775,19 @@ fn re_running_the_backfill_does_not_double_count_existing_placements() {
     });
 
     block_on(router.handle(request("triage_existing_mail", batch.clone()))).unwrap();
-    assert_eq!(one_ok_response(&out)["placements_recorded"], 2, "first run mines both");
+    assert_eq!(
+        one_ok_response(&out)["placements_recorded"],
+        2,
+        "first run mines both"
+    );
 
     // A second identical sweep mines NOTHING new (the partial-unique index makes it idempotent).
     block_on(router.handle(request("triage_existing_mail", batch))).unwrap();
     assert_eq!(
         out.sent_frames().last().and_then(|f| match f {
-            Frame::Response { payload: Some(p), .. } => Some(p["placements_recorded"].clone()),
+            Frame::Response {
+                payload: Some(p), ..
+            } => Some(p["placements_recorded"].clone()),
             _ => None,
         }),
         Some(json!(0)),
@@ -2523,7 +2801,11 @@ fn re_running_the_backfill_does_not_double_count_existing_placements() {
         FilingFeedbackQuery::default(),
     ))
     .unwrap();
-    assert_eq!(rows.len(), 2, "exactly the two observed placements, no duplicates");
+    assert_eq!(
+        rows.len(),
+        2,
+        "exactly the two observed placements, no duplicates"
+    );
 }
 
 #[test]
@@ -2535,7 +2817,10 @@ fn bootstrap_seeds_the_starter_rules_as_drafts_idempotently() {
     let router = router_over(&backend, out.clone());
 
     let first = block_on(router.bootstrap_starter_rules()).unwrap();
-    assert_eq!(first.imported, 2, "both starter rules are seeded on first run");
+    assert_eq!(
+        first.imported, 2,
+        "both starter rules are seeded on first run"
+    );
     assert!(first.skipped.is_empty());
 
     // They are non-firing DRAFTS — neither the active nor the shadow snapshot of either kind

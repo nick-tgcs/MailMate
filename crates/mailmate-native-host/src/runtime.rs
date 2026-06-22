@@ -46,7 +46,7 @@ use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::transport::Transport;
 
 use mailmate_ai::http::HttpClient;
-use mailmate_ai::TaskReplyDrafter;
+use mailmate_ai::{SwappableProvider, TaskReplyDrafter};
 use mailmate_learning::{AiRuleCurator, DefaultLearningEngine, DefaultProposalReview};
 use mailmate_ml::{
     DeterministicFeatureExtractor, InProcessTrainer, LogisticRegressionClassifier, SwappableTier2,
@@ -56,11 +56,11 @@ use mailmate_policy::HardPolicyGuard;
 use mailmate_rules::DeterministicRuleEngine;
 use mailmate_storage::{
     ensure_dir_owner_only, open_and_migrate, restore_database, SqliteAdapterRepository,
-    SqliteAuditRepository, SqliteDataRightsRepository,
-    SqliteBackend, SqliteConflictRepository, SqliteDatasetRepository, SqliteEvalRunRepository,
-    SqliteFeedbackRepository, SqliteMessageRepository, SqlitePipelineItemRepository,
-    SqliteProposalRepository, SqliteReminderRepository, SqliteRuleRepository,
-    SqliteWorkflowInstanceRepository, SqliteWorkflowRepository, StorageConfig, StoragePath,
+    SqliteAuditRepository, SqliteBackend, SqliteConflictRepository, SqliteDataRightsRepository,
+    SqliteDatasetRepository, SqliteEvalRunRepository, SqliteFeedbackRepository,
+    SqliteMessageRepository, SqlitePipelineItemRepository, SqliteProposalRepository,
+    SqliteReminderRepository, SqliteRuleRepository, SqliteWorkflowInstanceRepository,
+    SqliteWorkflowRepository, StorageConfig, StoragePath,
 };
 use mailmate_training::{DefaultTrainingPipeline, FeedbackTrainingSource};
 use mailmate_workflow::{DefaultExitDetector, DefaultFollowUpScheduler, DefaultWorkflowEngine};
@@ -69,10 +69,10 @@ use crate::clock::SystemClock;
 use crate::config::{AppConfig, ConfigError};
 use crate::http_client::StdHttpClient;
 use crate::provider::build_provider;
-use crate::tier2_training::Tier2TrainingService;
 use crate::router::{AdminSuite, FollowUpSuite, HostRouter, RuleReload};
 use crate::secret_store::FileSecretStore;
 use crate::thunderbird::{ThunderbirdMailClient, WriterTransport};
+use crate::tier2_training::Tier2TrainingService;
 
 /// Every scope a rule snapshot sweeps when seeding the deterministic engines.
 const SCOPES: [RuleScope; 5] = [
@@ -214,9 +214,10 @@ pub fn build_router(
     // beside the weights file; at startup a previously-activated artifact becomes the initial
     // backing, else the online model is the cold-start fallback.
     let tier2_model_dirs = tier2_weights_path.as_ref().map(|p| {
-        let base = p
-            .parent()
-            .map_or_else(|| PathBuf::from("tier2_model"), |dir| dir.join("tier2_model"));
+        let base = p.parent().map_or_else(
+            || PathBuf::from("tier2_model"),
+            |dir| dir.join("tier2_model"),
+        );
         (base.join("candidate"), base.join("active"))
     });
     let initial_tier2: Arc<dyn Tier2Classifier> = tier2_model_dirs
@@ -240,11 +241,20 @@ pub fn build_router(
     // provider configured (or an incomplete one), this degrades to UnavailableProvider — every
     // provider-typed collaborator still stands up and honestly reports "needs a provider".
     let http_client: Arc<dyn HttpClient> = Arc::new(StdHttpClient::new());
-    let provider: Arc<dyn AiProvider> =
-        build_provider(&config.ai, secret_store.as_ref(), http_client.clone());
+    // Wrap the configured provider in a `SwappableProvider` so a `set_provider`/`set_secret`
+    // write from Settings can rebuild and hot-swap the backing adapter in place — no host restart.
+    // Every provider-typed collaborator below holds this SAME handle, and the admin suite keeps a
+    // clone to drive the swap.
+    let live_provider = Arc::new(SwappableProvider::new(build_provider(
+        &config.ai,
+        secret_store.as_ref(),
+        http_client.clone(),
+    )));
+    let provider: Arc<dyn AiProvider> = live_provider.clone();
 
     // --- Deterministic engines, seeded from the stored rule snapshots ---
-    let classification_snapshot = block_on(rule_snapshot(rules.as_ref(), RuleKind::Classification))?;
+    let classification_snapshot =
+        block_on(rule_snapshot(rules.as_ref(), RuleKind::Classification))?;
     let action_snapshot = block_on(rule_snapshot(rules.as_ref(), RuleKind::Action))?;
     let mut all_rules = classification_snapshot.clone();
     all_rules.extend(action_snapshot.clone());
@@ -371,6 +381,9 @@ pub fn build_router(
         secret_store,
         // The shared HTTP transport, reused for `list_models` provider discovery.
         http: http_client,
+        // The hot-swappable provider handle: a `set_provider`/`set_secret` write rebuilds from the
+        // updated config + secrets and swaps the backing adapter in place — no host restart.
+        live_provider: Some(live_provider),
     };
 
     let mut router = HostRouter::from_ports(&ports, audit, out)

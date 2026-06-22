@@ -64,11 +64,28 @@ fn main() -> ExitCode {
 
 /// Whether the first CLI argument came from a browser launching us as a native-messaging host
 /// rather than a human typing a subcommand. Browsers pass the manifest's absolute path
-/// (Firefox/Thunderbird on Linux/macOS, via the WebExtensions portal) or a `scheme://` extension
-/// origin (Chromium). Every subcommand we accept is a bare lowercase word, so neither form can
-/// be mistaken for one — and a stray subcommand typo still falls through to the helpful error.
+/// (Firefox/Thunderbird on Linux/macOS, via the WebExtensions portal; on Windows a drive-letter
+/// path like `C:\…\com.mailmate.host.json` or a UNC `\\server\…` share) or a `scheme://`
+/// extension origin (Chromium). Every subcommand we accept is a bare lowercase word containing no
+/// `/`, `\`, `:` or `://`, so none of these forms can be mistaken for one — and a stray subcommand
+/// typo still falls through to the helpful error.
 fn is_browser_launch(arg: &str) -> bool {
-    arg.starts_with('/') || arg.contains("://")
+    // Unix absolute path (Linux/macOS) or Chromium's `scheme://` origin.
+    arg.starts_with('/')
+        || arg.contains("://")
+        // Windows UNC path: `\\server\share\…`.
+        || arg.starts_with('\\')
+        // Windows drive-letter absolute path: a letter, `:`, then a separator (`C:\…` or `C:/…`).
+        || is_windows_drive_path(arg)
+}
+
+/// Whether `arg` is a Windows drive-letter absolute path (`C:\…` / `C:/…`): an ASCII letter
+/// followed by `:` then a path separator. (A bare `c:` with no separator is not treated as one.)
+fn is_windows_drive_path(arg: &str) -> bool {
+    let mut chars = arg.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && matches!(chars.next(), Some('\\' | '/'))
 }
 
 /// Resolve config + data dir and run the native-messaging serve loop.
@@ -171,6 +188,23 @@ mod tests {
         ));
         // Chromium: a `scheme://…` extension origin.
         assert!(is_browser_launch("chrome-extension://abcdefghijklmnop/"));
+        // Windows: a drive-letter manifest path (backslash or forward-slash separated)…
+        assert!(is_browser_launch(
+            r"C:\Users\n\AppData\Roaming\Mozilla\NativeMessagingHosts\com.mailmate.host.json"
+        ));
+        assert!(is_browser_launch("D:/Mozilla/com.mailmate.host.json"));
+        // …and a UNC share path.
+        assert!(is_browser_launch(
+            r"\\fileserver\hosts\com.mailmate.host.json"
+        ));
+    }
+
+    #[test]
+    fn a_bare_drive_letter_without_a_separator_is_not_a_launch() {
+        // Defensive: `c:` alone (no separator) must not be mistaken for a Windows path — though no
+        // real subcommand looks like this, the drive-letter rule stays tight.
+        assert!(!is_browser_launch("c:"));
+        assert!(!is_browser_launch("c:thing"));
     }
 
     #[test]
