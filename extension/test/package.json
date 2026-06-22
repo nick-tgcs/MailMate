@@ -1,0 +1,15 @@
+{
+  "name": "mailmate-extension-tests",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Headless DOM tests for the MailMate Thunderbird extension UI. Loads the REAL dashboard.html + dashboard.js into jsdom with a mocked native-messaging host, then drives the actual click/render flow and asserts what the user would see — the layer the Rust suite can't reach. Dev-only; never shipped in the add-on.",
+  "scripts": {
+    "test": "node --test",
+    "coverage": "bash ./coverage.sh"
+  },
+  "devDependencies": {
+    "c8": "^11.0.0",
+    "jsdom": "^25.0.1"
+  }
+}
