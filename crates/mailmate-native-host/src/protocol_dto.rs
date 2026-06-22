@@ -644,15 +644,26 @@ mod tests {
         .unwrap();
         // The base context flattened in.
         assert_eq!(payload.base.subject, "Quote");
-        assert_eq!(payload.base.forbidden_commitments, vec!["prices".to_owned()]);
+        assert_eq!(
+            payload.base.forbidden_commitments,
+            vec!["prices".to_owned()]
+        );
 
         let request = payload.into_request();
-        let instruction = request.user_instruction.expect("steer folded into instruction");
+        let instruction = request
+            .user_instruction
+            .expect("steer folded into instruction");
         // Original instruction first, then each chip as a clause, then the free-text steer.
-        assert!(instruction.starts_with("Decline the discount."), "{instruction}");
+        assert!(
+            instruction.starts_with("Decline the discount."),
+            "{instruction}"
+        );
         assert!(instruction.contains("Make it shorter."), "{instruction}");
         assert!(instruction.contains("Make it warmer."), "{instruction}");
-        assert!(instruction.ends_with("and ask for the PO number"), "{instruction}");
+        assert!(
+            instruction.ends_with("and ask for the PO number"),
+            "{instruction}"
+        );
         // The base's forbidden list survives lowering.
         assert_eq!(request.forbidden_commitments, vec!["prices".to_owned()]);
     }

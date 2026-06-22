@@ -25,13 +25,13 @@ use mailmate_common::proposal::{AgentProposal, ProposalStatus, ProposalTrigger};
 use mailmate_common::rules::effect::RuleEffect;
 use mailmate_common::rules::evaluation::ConflictSeverity;
 use mailmate_common::rules::rule::{RiskLevel, RuleKind, RuleScope, RuleStatus};
-use mailmate_rules::conflict::detect_conflicts;
 use mailmate_ports::clock::Clock;
 use mailmate_ports::learning_engine::LearningEngine;
 use mailmate_ports::storage::audit::AuditRepository;
 use mailmate_ports::storage::feedback::FeedbackRepository;
 use mailmate_ports::storage::proposals::ProposalRepository;
 use mailmate_ports::storage::rules::RuleRepository;
+use mailmate_rules::conflict::detect_conflicts;
 
 use mailmate_common::features::FeatureVector;
 use mailmate_common::proposal::BackTest;
@@ -120,7 +120,11 @@ impl DefaultLearningEngine {
     }
 
     /// How many audit rows of `event_type` are stamped against `rule_id`.
-    async fn audit_count(&self, event_type: &str, rule_id: &RuleId) -> Result<usize, LearningError> {
+    async fn audit_count(
+        &self,
+        event_type: &str,
+        rule_id: &RuleId,
+    ) -> Result<usize, LearningError> {
         let rows = self
             .audit
             .query(AuditQuery {
@@ -174,8 +178,12 @@ impl DefaultLearningEngine {
                     if !considered.insert(rule.rule_id.clone()) {
                         continue;
                     }
-                    let undos = self.audit_count(event_type::ACTION_UNDONE, &rule.rule_id).await?;
-                    let applied = self.audit_count(event_type::ACTION_APPLIED, &rule.rule_id).await?;
+                    let undos = self
+                        .audit_count(event_type::ACTION_UNDONE, &rule.rule_id)
+                        .await?;
+                    let applied = self
+                        .audit_count(event_type::ACTION_APPLIED, &rule.rule_id)
+                        .await?;
                     // The apply path now stamps `action_applied` with the authoring rule_id, so this
                     // count is the real per-rule fires denominator. We still map 0 to `None` rather
                     // than a 0 denominator: a rule with no recorded fires (freshly activated, or
@@ -195,8 +203,13 @@ impl DefaultLearningEngine {
                         let activated_at = self
                             .latest_audit_at(event_type::RULE_ACTIVATED, &rule.rule_id)
                             .await?;
-                        assess_staleness(last_fire, activated_at, clock.now(), thresholds.max_idle_days)
-                            .map(|verdict| stale_retire_proposal(&rule, verdict, &self.source_label))
+                        assess_staleness(
+                            last_fire,
+                            activated_at,
+                            clock.now(),
+                            thresholds.max_idle_days,
+                        )
+                        .map(|verdict| stale_retire_proposal(&rule, verdict, &self.source_label))
                     } else {
                         None
                     };
@@ -240,7 +253,9 @@ impl DefaultLearningEngine {
         }
         // A strict contradiction is High; a softer overlap raises a cautious candidate to at least
         // Medium. Either way the proposal is forced to PendingHumanReview, never auto-shadowed.
-        let high = conflicts.iter().any(|c| c.severity == ConflictSeverity::High);
+        let high = conflicts
+            .iter()
+            .any(|c| c.severity == ConflictSeverity::High);
         proposal.risk_level = if high {
             RiskLevel::High
         } else {
@@ -375,7 +390,9 @@ fn wants(filter: Option<EvidenceSourceKind>, kind: EvidenceSourceKind) -> bool {
 /// is withheld. Domainless rows have nothing deterministic to key on and are skipped (they are
 /// dropped by clustering too). Ordering is deterministic (the rows arrive sorted by the
 /// repository) so a back-test replays identically.
-fn filing_history_by_domain(rows: &[FilingFeedbackRow]) -> BTreeMap<String, Vec<HistoricalExample>> {
+fn filing_history_by_domain(
+    rows: &[FilingFeedbackRow],
+) -> BTreeMap<String, Vec<HistoricalExample>> {
     let mut by_domain: BTreeMap<String, Vec<HistoricalExample>> = BTreeMap::new();
     for row in rows {
         let Some(domain) = row.sender_domain.clone() else {

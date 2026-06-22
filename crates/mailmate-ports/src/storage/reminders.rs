@@ -24,8 +24,7 @@ pub trait ReminderRepository: Send + Sync {
     ///
     /// # Errors
     /// [`StorageError`] on a backend failure.
-    async fn list_due(&self, now: Timestamp, limit: usize)
-        -> Result<Vec<Reminder>, StorageError>;
+    async fn list_due(&self, now: Timestamp, limit: usize) -> Result<Vec<Reminder>, StorageError>;
 
     /// Mark a reminder fired (terminal): it will never be selected by [`list_due`] again.
     ///
@@ -33,8 +32,7 @@ pub trait ReminderRepository: Send + Sync {
     ///
     /// # Errors
     /// [`StorageError`] on a backend failure.
-    async fn mark_fired(&self, id: &ReminderId, fired_at: Timestamp)
-        -> Result<(), StorageError>;
+    async fn mark_fired(&self, id: &ReminderId, fired_at: Timestamp) -> Result<(), StorageError>;
 
     /// Reschedule a reminder to a new due time and re-arm it to `pending` — this is **snooze**
     /// (push a still-pending one out) and **un-fire** (bring a fired one back) in one operation.

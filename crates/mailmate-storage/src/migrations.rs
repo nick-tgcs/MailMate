@@ -198,12 +198,18 @@ mod tests {
             vec![1, 2, 3, 4, 5, 6, 7, 8],
             "fresh DB applies 0001..0006 in order"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            applied_versions(&conn).unwrap(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
 
         // Re-running is a no-op (covers the "migration from prior version" idempotency).
         let second = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert!(second.is_empty(), "re-run applies nothing");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            applied_versions(&conn).unwrap(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
     }
 
     #[test]
@@ -226,7 +232,10 @@ mod tests {
             vec![2, 3, 4, 5, 6, 7, 8],
             "only the not-yet-applied migrations run"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            applied_versions(&conn).unwrap(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
     }
 
     #[test]

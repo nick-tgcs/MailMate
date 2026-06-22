@@ -756,7 +756,10 @@ fn draft_reply_returns_a_review_required_draft_with_rationale_and_a_clear_guard(
     );
     // …and the model-free guard ran over the (benign) body: present, and all-clear.
     assert!(
-        payload["commitments"]["findings"].as_array().unwrap().is_empty(),
+        payload["commitments"]["findings"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "a benign body has no commitments: {}",
         payload["commitments"]
     );
@@ -834,7 +837,10 @@ fn regenerate_draft_folds_the_steer_into_guidance_and_reruns_the_guard() {
     // The chips + free-text steer reached the drafter, after the base instruction.
     let req = &drafter.requests()[0];
     let instruction = req.user_instruction.as_deref().unwrap();
-    assert!(instruction.contains("Decline the discount."), "{instruction}");
+    assert!(
+        instruction.contains("Decline the discount."),
+        "{instruction}"
+    );
     assert!(instruction.contains("Make it shorter."), "{instruction}");
     assert!(instruction.contains("and propose Monday"), "{instruction}");
 }

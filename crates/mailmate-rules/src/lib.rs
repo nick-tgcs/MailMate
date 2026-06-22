@@ -221,9 +221,7 @@ mod tests {
     use mailmate_common::ids::{DecisionId, RuleId, RuleVersionId};
     use mailmate_common::rules::condition::{Condition, FieldValue, Operator, Predicate};
     use mailmate_common::rules::effect::RuleEffect;
-    use mailmate_common::rules::rule::{
-        RiskLevel, RuleKind, RuleScope, RuleStatus, RuleVersion,
-    };
+    use mailmate_common::rules::rule::{RiskLevel, RuleKind, RuleScope, RuleStatus, RuleVersion};
 
     #[test]
     fn crate_name_is_available() {
@@ -232,7 +230,10 @@ mod tests {
 
     fn ctx(decision: &str, domain: &str) -> RuleEvaluationContext {
         let mut fields = BTreeMap::new();
-        fields.insert("sender_domain".to_owned(), FieldValue::Text(domain.to_owned()));
+        fields.insert(
+            "sender_domain".to_owned(),
+            FieldValue::Text(domain.to_owned()),
+        );
         RuleEvaluationContext {
             decision_id: DecisionId::from(decision),
             fields,

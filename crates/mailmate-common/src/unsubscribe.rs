@@ -78,7 +78,13 @@ pub fn parse_unsubscribe(
 /// usually angle-bracketed; this tolerates either by stripping a leading `<` / trailing `>`.
 fn split_targets(raw: &str) -> Vec<String> {
     raw.split(',')
-        .map(|t| t.trim().trim_start_matches('<').trim_end_matches('>').trim().to_owned())
+        .map(|t| {
+            t.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .trim()
+                .to_owned()
+        })
         .filter(|t| !t.is_empty())
         .collect()
 }
@@ -151,11 +157,8 @@ mod tests {
 
     #[test]
     fn a_mailto_target_is_parsed_with_its_subject() {
-        let opts = parse_unsubscribe(
-            Some("<mailto:unsub@list.test?subject=unsubscribe>"),
-            None,
-        )
-        .unwrap();
+        let opts =
+            parse_unsubscribe(Some("<mailto:unsub@list.test?subject=unsubscribe>"), None).unwrap();
         let mailto = opts.mailto.unwrap();
         assert_eq!(mailto.to, "unsub@list.test");
         assert_eq!(mailto.subject.as_deref(), Some("unsubscribe"));
@@ -172,8 +175,7 @@ mod tests {
         assert!(!plain.one_click);
 
         // With the RFC 8058 marker on an https target, it is one-click.
-        let oneclick =
-            parse_unsubscribe(Some(header), Some("List-Unsubscribe=One-Click")).unwrap();
+        let oneclick = parse_unsubscribe(Some(header), Some("List-Unsubscribe=One-Click")).unwrap();
         assert!(oneclick.one_click);
     }
 
@@ -191,12 +193,12 @@ mod tests {
 
     #[test]
     fn subject_percent_and_plus_escapes_decode() {
-        let opts = parse_unsubscribe(
-            Some("<mailto:u@l.test?subject=please%20remove+me>"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(opts.mailto.unwrap().subject.as_deref(), Some("please remove me"));
+        let opts =
+            parse_unsubscribe(Some("<mailto:u@l.test?subject=please%20remove+me>"), None).unwrap();
+        assert_eq!(
+            opts.mailto.unwrap().subject.as_deref(),
+            Some("please remove me")
+        );
     }
 
     #[test]

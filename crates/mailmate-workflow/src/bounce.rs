@@ -80,15 +80,27 @@ mod tests {
     #[test]
     fn either_signal_alone_is_enough() {
         // Daemon sender, ordinary subject.
-        assert!(is_bounce_notification("mailer-daemon@x.test", "Re: your quote"));
+        assert!(is_bounce_notification(
+            "mailer-daemon@x.test",
+            "Re: your quote"
+        ));
         // Ordinary sender, NDR subject (a relay with a non-standard name).
-        assert!(is_bounce_notification("relay@bounces.x.test", "Mail delivery failed: returning your message"));
+        assert!(is_bounce_notification(
+            "relay@bounces.x.test",
+            "Mail delivery failed: returning your message"
+        ));
     }
 
     #[test]
     fn an_ordinary_reply_is_not_a_bounce() {
-        assert!(!is_bounce_notification("dana@client.test", "Re: the proposal — looks good"));
-        assert!(!is_bounce_notification("noreply@news.test", "Your weekly digest"));
+        assert!(!is_bounce_notification(
+            "dana@client.test",
+            "Re: the proposal — looks good"
+        ));
+        assert!(!is_bounce_notification(
+            "noreply@news.test",
+            "Your weekly digest"
+        ));
         // A human mentioning a bounce in prose is not an NDR.
         assert!(!is_bounce_notification(
             "dana@client.test",

@@ -160,7 +160,9 @@ fn three_same_domain_moves_cross_the_threshold_and_emit_a_reviewable_proposal() 
 
     // Phase 6: the gate's back-test is captured ON the proposal (precision · support) so the
     // Review card shows the exact numbers the candidate was admitted on — not a re-derivation.
-    let bt = proposal.back_test.expect("a filing proposal carries its back-test");
+    let bt = proposal
+        .back_test
+        .expect("a filing proposal carries its back-test");
     assert_eq!(bt.support, 3, "fired on the three historical moves");
     assert_eq!(bt.precision, Some(1.0), "all three agreed → precision 1.0");
 
@@ -211,7 +213,10 @@ fn repeated_phishing_corrections_emit_a_classification_proposal() {
 
 /// A classification correction carrying an arbitrary captured feature set (not just a domain) —
 /// the rich-capture rows multi-aspect induction mines.
-fn classification_row_with(label: &str, features: &[(&str, FeatureValue)]) -> ClassificationFeedbackRow {
+fn classification_row_with(
+    label: &str,
+    features: &[(&str, FeatureValue)],
+) -> ClassificationFeedbackRow {
     let mut salient = FeatureVector::new();
     for (k, v) in features {
         salient.insert(*k, v.clone());
@@ -283,8 +288,9 @@ fn a_rule_the_user_keeps_undoing_surfaces_a_human_gated_retire_proposal() {
     let audit = Arc::new(SqliteAuditRepository::new(backend.clone()));
     let proposals = Arc::new(SqliteProposalRepository::new(backend.clone()));
     let rules = Arc::new(SqliteRuleRepository::new(backend.clone()));
-    let engine = DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
-        .with_rules(rules.clone());
+    let engine =
+        DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
+            .with_rules(rules.clone());
 
     let rule_id = seed_active_rule(&rules, "keep-undoing", "noisy.example");
     let other_id = seed_active_rule(&rules, "well-behaved", "clean.example");
@@ -304,11 +310,16 @@ fn a_rule_the_user_keeps_undoing_surfaces_a_human_gated_retire_proposal() {
     assert_eq!(retire.target_rule_id.as_ref(), Some(&rule_id));
     assert_eq!(retire.target_rule_kind, Some(RuleKind::Action));
     assert_eq!(retire.status, ProposalStatus::PendingReview, "human-gated");
-    assert!(retire.rule_draft.is_none(), "a retire references the rule, no new draft");
+    assert!(
+        retire.rule_draft.is_none(),
+        "a retire references the rule, no new draft"
+    );
     // The well-behaved rule (zero undos) is NOT proposed for retirement.
     assert!(
-        !emitted.iter().any(|p| p.proposal_type == ProposalKind::RetireRule
-            && p.target_rule_id.as_ref() == Some(&other_id)),
+        !emitted
+            .iter()
+            .any(|p| p.proposal_type == ProposalKind::RetireRule
+                && p.target_rule_id.as_ref() == Some(&other_id)),
         "a rule with no undos is left alone"
     );
 
@@ -327,7 +338,9 @@ fn a_rule_the_user_keeps_undoing_surfaces_a_human_gated_retire_proposal() {
     // Idempotent: a second pass does not re-propose the same retirement.
     let again = block_on(engine.propose_candidates(ProposalTrigger::all())).unwrap();
     assert!(
-        !again.iter().any(|p| p.proposal_type == ProposalKind::RetireRule),
+        !again
+            .iter()
+            .any(|p| p.proposal_type == ProposalKind::RetireRule),
         "a retirement proposes once, not once per pass: {again:?}"
     );
 }
@@ -346,14 +359,16 @@ fn with_real_per_rule_fires_a_high_volume_rule_is_protected_by_the_undo_rate() {
     let audit = Arc::new(SqliteAuditRepository::new(backend.clone()));
     let proposals = Arc::new(SqliteProposalRepository::new(backend.clone()));
     let rules = Arc::new(SqliteRuleRepository::new(backend.clone()));
-    let engine = DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
-        .with_rules(rules.clone());
+    let engine =
+        DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
+            .with_rules(rules.clone());
 
     let rule_id = seed_active_rule(&rules, "busy-but-good", "busy.example");
     // 20 real fires (per-rule `action_applied`, the new denominator) and 4 undos → a 20% rate.
     for _ in 0..20 {
-        let fire = mailmate_common::audit::AuditEntry::new(event_type::ACTION_APPLIED, Actor::System)
-            .with_rule(RuleKind::Action, rule_id.clone());
+        let fire =
+            mailmate_common::audit::AuditEntry::new(event_type::ACTION_APPLIED, Actor::System)
+                .with_rule(RuleKind::Action, rule_id.clone());
         block_on(audit.append(fire)).unwrap();
     }
     for _ in 0..4 {
@@ -382,13 +397,15 @@ fn a_misbehaving_rule_retires_on_the_real_undo_rate_with_a_rate_rationale() {
     let audit = Arc::new(SqliteAuditRepository::new(backend.clone()));
     let proposals = Arc::new(SqliteProposalRepository::new(backend.clone()));
     let rules = Arc::new(SqliteRuleRepository::new(backend.clone()));
-    let engine = DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
-        .with_rules(rules.clone());
+    let engine =
+        DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
+            .with_rules(rules.clone());
 
     let rule_id = seed_active_rule(&rules, "really-bad", "bad.example");
     for _ in 0..10 {
-        let fire = mailmate_common::audit::AuditEntry::new(event_type::ACTION_APPLIED, Actor::System)
-            .with_rule(RuleKind::Action, rule_id.clone());
+        let fire =
+            mailmate_common::audit::AuditEntry::new(event_type::ACTION_APPLIED, Actor::System)
+                .with_rule(RuleKind::Action, rule_id.clone());
         block_on(audit.append(fire)).unwrap();
     }
     for _ in 0..4 {
@@ -400,8 +417,10 @@ fn a_misbehaving_rule_retires_on_the_real_undo_rate_with_a_rate_rationale() {
     let emitted = block_on(engine.propose_candidates(ProposalTrigger::all())).unwrap();
     let retire = emitted
         .iter()
-        .find(|p| p.proposal_type == ProposalKind::RetireRule
-            && p.target_rule_id.as_ref() == Some(&rule_id))
+        .find(|p| {
+            p.proposal_type == ProposalKind::RetireRule
+                && p.target_rule_id.as_ref() == Some(&rule_id)
+        })
         .expect("a 40%-undo-rate rule over 10 real fires crosses the rate floor");
     assert!(
         retire.rationale.contains("fired 10 times") && retire.rationale.contains("40% undo rate"),
@@ -442,7 +461,11 @@ fn repeated_outbound_mail_surfaces_a_human_gated_vip_priority_proposal() {
         .find(|p| p.proposal_type == ProposalKind::NewRule && p.title.contains("acme.com"))
         .expect("a frequently-emailed domain surfaces a VIP proposal");
     assert_eq!(vip.status, ProposalStatus::PendingReview, "human-gated");
-    assert_eq!(vip.recommended_status.as_str(), "shadow_mode", "never auto-activated");
+    assert_eq!(
+        vip.recommended_status.as_str(),
+        "shadow_mode",
+        "never auto-activated"
+    );
     let draft = vip.rule_draft.as_ref().unwrap();
     assert_eq!(draft.kind, RuleKind::Classification);
     assert_eq!(draft.effect.priority.as_deref(), Some("high"));
@@ -494,17 +517,24 @@ fn a_rule_that_has_gone_quiet_surfaces_a_human_gated_stale_retire_proposal() {
 
     // "Now" is the present: the quiet rule is 90 days idle (> the 60-day window), the busy rule 0.
     let clock = Arc::new(FakeClock::new(now));
-    let engine = DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
-        .with_rules(rules.clone())
-        .with_clock(clock);
+    let engine =
+        DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
+            .with_rules(rules.clone())
+            .with_clock(clock);
 
     let emitted = block_on(engine.propose_candidates(ProposalTrigger::all())).unwrap();
     let stale = emitted
         .iter()
-        .find(|p| p.proposal_type == ProposalKind::RetireRule
-            && p.target_rule_id.as_ref() == Some(&quiet_id))
+        .find(|p| {
+            p.proposal_type == ProposalKind::RetireRule
+                && p.target_rule_id.as_ref() == Some(&quiet_id)
+        })
         .expect("the long-quiet rule surfaces a stale retire");
-    assert_eq!(stale.status, ProposalStatus::PendingReview, "human-gated, never auto");
+    assert_eq!(
+        stale.status,
+        ProposalStatus::PendingReview,
+        "human-gated, never auto"
+    );
     assert!(
         stale.rationale.contains("hasn't fired in") && stale.rationale.contains("days"),
         "the card states the idle signal: {}",
@@ -512,8 +542,10 @@ fn a_rule_that_has_gone_quiet_surfaces_a_human_gated_stale_retire_proposal() {
     );
     // The busy rule fired moments ago → NOT stale, even though it shares the pass.
     assert!(
-        !emitted.iter().any(|p| p.proposal_type == ProposalKind::RetireRule
-            && p.target_rule_id.as_ref() == Some(&busy_id)),
+        !emitted
+            .iter()
+            .any(|p| p.proposal_type == ProposalKind::RetireRule
+                && p.target_rule_id.as_ref() == Some(&busy_id)),
         "a rule that fired moments ago is not stale"
     );
     // And the stale rule itself is never retired — only proposed.
@@ -540,22 +572,31 @@ fn a_multi_clause_rule_is_induced_and_shown_with_honest_negative_pool_precision(
     let t = |b: bool| FeatureValue::Bool(b);
     let s = |x: &str| FeatureValue::Text(x.to_owned());
     for _ in 0..3 {
-        block_on(h.engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-            "suspicious",
-            &[("auth_result", s("fail")), ("no_prior_contact", t(true))],
-        ))))
+        block_on(
+            h.engine
+                .record_feedback(TaskFeedback::Classification(classification_row_with(
+                    "suspicious",
+                    &[("auth_result", s("fail")), ("no_prior_contact", t(true))],
+                ))),
+        )
         .unwrap();
     }
     // The negative pool: other-label corrections that each share ONE of the two signals.
-    block_on(h.engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-        "legit_contact",
-        &[("auth_result", s("fail")), ("no_prior_contact", t(false))],
-    ))))
+    block_on(
+        h.engine
+            .record_feedback(TaskFeedback::Classification(classification_row_with(
+                "legit_contact",
+                &[("auth_result", s("fail")), ("no_prior_contact", t(false))],
+            ))),
+    )
     .unwrap();
-    block_on(h.engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-        "newsletter",
-        &[("auth_result", s("pass")), ("no_prior_contact", t(true))],
-    ))))
+    block_on(
+        h.engine
+            .record_feedback(TaskFeedback::Classification(classification_row_with(
+                "newsletter",
+                &[("auth_result", s("pass")), ("no_prior_contact", t(true))],
+            ))),
+    )
     .unwrap();
 
     let proposals = block_on(h.engine.propose_candidates(ProposalTrigger {
@@ -590,7 +631,9 @@ fn a_multi_clause_rule_is_induced_and_shown_with_honest_negative_pool_precision(
 
     // The back-test is stamped honestly: precision 1.0 (the conjunction excludes the pool) and
     // support 3 (the positives reproduced — NOT inflated by any negative-pool false positive).
-    let bt = proposal.back_test.expect("an induced rule carries its negative-pool back-test");
+    let bt = proposal
+        .back_test
+        .expect("an induced rule carries its negative-pool back-test");
     assert_eq!(bt.precision, Some(1.0));
     assert_eq!(bt.support, 3);
 
@@ -623,8 +666,9 @@ fn an_induced_rule_that_overlaps_an_active_rule_is_forced_to_human_review_with_t
     let audit = Arc::new(SqliteAuditRepository::new(backend.clone()));
     let proposals = Arc::new(SqliteProposalRepository::new(backend.clone()));
     let rules = Arc::new(SqliteRuleRepository::new(backend.clone()));
-    let engine = DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
-        .with_rules(rules.clone());
+    let engine =
+        DefaultLearningEngine::new(classification, filing, audit.clone(), proposals.clone())
+            .with_rules(rules.clone());
 
     // The existing active GLOBAL classification rule: auth_result == fail → spam.
     let active = block_on(rules.save_rule_draft(NewRule {
@@ -653,27 +697,34 @@ fn an_induced_rule_that_overlaps_an_active_rule_is_forced_to_human_review_with_t
         },
     }))
     .unwrap();
-    block_on(rules.update_rule_status(&active, RuleKind::Classification, RuleStatus::Active)).unwrap();
+    block_on(rules.update_rule_status(&active, RuleKind::Classification, RuleStatus::Active))
+        .unwrap();
 
     // The user induces a more-specific rule with a DIFFERENT label.
     let t = |b: bool| FeatureValue::Bool(b);
     let s = |x: &str| FeatureValue::Text(x.to_owned());
     for _ in 0..3 {
-        block_on(engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-            "suspicious",
-            &[("auth_result", s("fail")), ("no_prior_contact", t(true))],
-        ))))
+        block_on(
+            engine.record_feedback(TaskFeedback::Classification(classification_row_with(
+                "suspicious",
+                &[("auth_result", s("fail")), ("no_prior_contact", t(true))],
+            ))),
+        )
         .unwrap();
     }
-    block_on(engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-        "legit_contact",
-        &[("auth_result", s("fail")), ("no_prior_contact", t(false))],
-    ))))
+    block_on(
+        engine.record_feedback(TaskFeedback::Classification(classification_row_with(
+            "legit_contact",
+            &[("auth_result", s("fail")), ("no_prior_contact", t(false))],
+        ))),
+    )
     .unwrap();
-    block_on(engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-        "newsletter",
-        &[("auth_result", s("pass")), ("no_prior_contact", t(true))],
-    ))))
+    block_on(
+        engine.record_feedback(TaskFeedback::Classification(classification_row_with(
+            "newsletter",
+            &[("auth_result", s("pass")), ("no_prior_contact", t(true))],
+        ))),
+    )
     .unwrap();
 
     let proposals_out = block_on(engine.propose_candidates(ProposalTrigger {
@@ -700,7 +751,10 @@ fn an_induced_rule_that_overlaps_an_active_rule_is_forced_to_human_review_with_t
         RuleStatus::PendingHumanReview,
         "a conflicting proposal is forced to human review, never auto-shadowed"
     );
-    assert!(induced.risk_level >= RiskLevel::Medium, "the overlap raises the risk");
+    assert!(
+        induced.risk_level >= RiskLevel::Medium,
+        "the overlap raises the risk"
+    );
 
     // It persisted WITH its conflicts (round-tripped through the proposal JSON), so the card renders
     // the conflict measure after a reload.
@@ -722,17 +776,23 @@ fn account_stamped_corrections_induce_an_account_scoped_rule() {
     let s = |x: &str| FeatureValue::Text(x.to_owned());
     // Three "suspicious" corrections, all on the "work" account, all sharing auth_result == fail.
     for _ in 0..3 {
-        block_on(h.engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-            "suspicious",
-            &[("account_id", s("work")), ("auth_result", s("fail"))],
-        ))))
+        block_on(
+            h.engine
+                .record_feedback(TaskFeedback::Classification(classification_row_with(
+                    "suspicious",
+                    &[("account_id", s("work")), ("auth_result", s("fail"))],
+                ))),
+        )
         .unwrap();
     }
     // A negative-pool row on the SAME account that auth_result==fail alone must not mis-fire on.
-    block_on(h.engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-        "legit",
-        &[("account_id", s("work")), ("auth_result", s("pass"))],
-    ))))
+    block_on(
+        h.engine
+            .record_feedback(TaskFeedback::Classification(classification_row_with(
+                "legit",
+                &[("account_id", s("work")), ("auth_result", s("pass"))],
+            ))),
+    )
     .unwrap();
 
     let proposals = block_on(h.engine.propose_candidates(ProposalTrigger {
@@ -745,7 +805,11 @@ fn account_stamped_corrections_induce_an_account_scoped_rule() {
         .find(|p| p.proposal_type == mailmate_common::proposal::ProposalKind::NewRule)
         .expect("the work-account cluster induces a rule");
     let draft = induced.rule_draft.as_ref().unwrap();
-    assert_eq!(draft.scope, RuleScope::Account, "scoped to the account, not Global");
+    assert_eq!(
+        draft.scope,
+        RuleScope::Account,
+        "scoped to the account, not Global"
+    );
     // The induced condition keys on the real feature (auth_result), NEVER account_id (that binds
     // via scope; the runtime field environment carries no account_id).
     use mailmate_common::rules::condition::Condition;
@@ -761,7 +825,10 @@ fn account_stamped_corrections_induce_an_account_scoped_rule() {
         _ => vec![],
     };
     assert!(fields.iter().any(|f| f == "auth_result"), "{fields:?}");
-    assert!(!fields.iter().any(|f| f == "account_id"), "account_id is scope, not a predicate: {fields:?}");
+    assert!(
+        !fields.iter().any(|f| f == "account_id"),
+        "account_id is scope, not a predicate: {fields:?}"
+    );
 }
 
 #[test]
@@ -772,17 +839,23 @@ fn an_ambiguous_cluster_that_cannot_beat_its_negative_pool_is_withheld() {
     let h = harness();
     let s = |x: &str| FeatureValue::Text(x.to_owned());
     for _ in 0..3 {
-        block_on(h.engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-            "suspicious",
-            &[("auth_result", s("fail"))],
-        ))))
+        block_on(
+            h.engine
+                .record_feedback(TaskFeedback::Classification(classification_row_with(
+                    "suspicious",
+                    &[("auth_result", s("fail"))],
+                ))),
+        )
         .unwrap();
     }
     for _ in 0..3 {
-        block_on(h.engine.record_feedback(TaskFeedback::Classification(classification_row_with(
-            "legit_contact",
-            &[("auth_result", s("fail"))],
-        ))))
+        block_on(
+            h.engine
+                .record_feedback(TaskFeedback::Classification(classification_row_with(
+                    "legit_contact",
+                    &[("auth_result", s("fail"))],
+                ))),
+        )
         .unwrap();
     }
     let proposals = block_on(h.engine.propose_candidates(ProposalTrigger {
@@ -795,7 +868,10 @@ fn an_ambiguous_cluster_that_cannot_beat_its_negative_pool_is_withheld() {
         "an inseparable cluster fails the negative-pool precision bar: {proposals:?}"
     );
     let pending = block_on(h.proposals.list_by_status(ProposalStatus::PendingReview)).unwrap();
-    assert!(pending.is_empty(), "nothing persisted for the withheld candidate");
+    assert!(
+        pending.is_empty(),
+        "nothing persisted for the withheld candidate"
+    );
 }
 
 #[test]
@@ -971,9 +1047,19 @@ fn a_consistent_domain_history_clears_the_promotion_gate_and_proposes() {
         .unwrap();
     }
     let proposals = block_on(h.engine.propose_candidates(ProposalTrigger::all())).unwrap();
-    assert_eq!(proposals.len(), 1, "a clean history clears the back-test gate");
     assert_eq!(
-        proposals[0].rule_draft.as_ref().unwrap().effect.move_to.as_deref(),
+        proposals.len(),
+        1,
+        "a clean history clears the back-test gate"
+    );
+    assert_eq!(
+        proposals[0]
+            .rule_draft
+            .as_ref()
+            .unwrap()
+            .effect
+            .move_to
+            .as_deref(),
         Some("Receipts")
     );
 }
@@ -1028,4 +1114,3 @@ fn outcome_monitoring_derives_live_and_shadow_precision_from_real_rows() {
     assert_eq!(outcome.shadow_matched, 1);
     assert_eq!(outcome.shadow_precision(), Some(0.5));
 }
-

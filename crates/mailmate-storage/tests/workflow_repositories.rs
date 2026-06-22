@@ -319,7 +319,9 @@ fn list_due_is_bounded_by_the_limit_and_returns_the_soonest_first() {
     let batch = block_on(instances.list_due(now, 3)).unwrap();
     assert_eq!(batch.len(), 3, "the batch cap bounds the drain");
     assert!(
-        batch.windows(2).all(|w| w[0].next_due_at <= w[1].next_due_at),
+        batch
+            .windows(2)
+            .all(|w| w[0].next_due_at <= w[1].next_due_at),
         "ordered soonest-due first"
     );
     // A zero cap drains nothing; a generous cap returns all five.

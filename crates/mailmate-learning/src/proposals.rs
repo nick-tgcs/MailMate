@@ -277,7 +277,9 @@ pub fn workflow_proposal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailmate_common::feedback::{FeedbackPolarity, FilingFeedback, FilingFeedbackRow, PinnedVersions};
+    use mailmate_common::feedback::{
+        FeedbackPolarity, FilingFeedback, FilingFeedbackRow, PinnedVersions,
+    };
     use mailmate_common::ids::{FolderId, MessageId};
 
     fn filing_cluster() -> FilingCluster {

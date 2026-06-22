@@ -356,7 +356,11 @@ mod tests {
         // the spam-trained model directly: top label positive ⇒ supportive features positive.
         let scored2 = block_on(ham.predict(newsletter)).unwrap();
         let top_is_spam = scored2.scores["spam"] >= 0.5;
-        let nl = scored2.contributions.iter().find(|c| c.key == "newsletter").unwrap();
+        let nl = scored2
+            .contributions
+            .iter()
+            .find(|c| c.key == "newsletter")
+            .unwrap();
         assert_eq!(
             nl.signed_weight > 0.0,
             top_is_spam,
@@ -407,8 +411,7 @@ mod tests {
             ),
         ]);
         {
-            let clf =
-                LogisticRegressionClassifier::with_persistence("spam", "ham", path.clone());
+            let clf = LogisticRegressionClassifier::with_persistence("spam", "ham", path.clone());
             for _ in 0..40 {
                 block_on(clf.update(LabeledExample {
                     features: spammy.clone(),
@@ -428,8 +431,13 @@ mod tests {
         // A file trained on different labels is not ours: load fresh rather than mislabel.
         let mismatched =
             LogisticRegressionClassifier::with_persistence("urgent", "normal", path.clone());
-        let fresh = block_on(mismatched.predict(FeatureVector::new())).unwrap().scores["urgent"];
-        assert!((fresh - 0.5).abs() < 1e-9, "label mismatch ⇒ cold start: {fresh}");
+        let fresh = block_on(mismatched.predict(FeatureVector::new()))
+            .unwrap()
+            .scores["urgent"];
+        assert!(
+            (fresh - 0.5).abs() < 1e-9,
+            "label mismatch ⇒ cold start: {fresh}"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -437,7 +445,10 @@ mod tests {
     #[test]
     fn a_rare_one_hot_below_the_floor_cannot_swing_the_verdict() {
         let clf = spam_clf();
-        let rare = features(&[("sender_domain", FeatureValue::Text("rare.example".to_owned()))]);
+        let rare = features(&[(
+            "sender_domain",
+            FeatureValue::Text("rare.example".to_owned()),
+        )]);
         let empty = FeatureVector::new();
 
         // Two spam observations of a one-hot: still below the 3-observation floor, so it must

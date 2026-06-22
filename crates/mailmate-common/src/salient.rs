@@ -179,8 +179,14 @@ fn humanize(key: &str, value: f64) -> (String, SignalKind) {
         return match name {
             "sender_domain" => (format!("Sender domain is {val}"), SignalKind::Sender),
             "sender_address" => (format!("Sender address is {val}"), SignalKind::Sender),
-            "sender_display_name" => (format!("Sender name is \u{201c}{val}\u{201d}"), SignalKind::Sender),
-            _ => (format!("{} is {val}", humanize_token(name)), SignalKind::Other),
+            "sender_display_name" => (
+                format!("Sender name is \u{201c}{val}\u{201d}"),
+                SignalKind::Sender,
+            ),
+            _ => (
+                format!("{} is {val}", humanize_token(name)),
+                SignalKind::Other,
+            ),
         };
     }
     match key {
@@ -192,9 +198,15 @@ fn humanize(key: &str, value: f64) -> (String, SignalKind) {
             "Carries sender-authentication results".to_owned(),
             SignalKind::Authentication,
         ),
-        "spf_pass" => ("Passed SPF authentication".to_owned(), SignalKind::Authentication),
+        "spf_pass" => (
+            "Passed SPF authentication".to_owned(),
+            SignalKind::Authentication,
+        ),
         "dkim_pass" => ("Passed DKIM signing".to_owned(), SignalKind::Authentication),
-        "dmarc_pass" => ("Passed DMARC alignment".to_owned(), SignalKind::Authentication),
+        "dmarc_pass" => (
+            "Passed DMARC alignment".to_owned(),
+            SignalKind::Authentication,
+        ),
         "reply_to_mismatch" => (
             "Reply-To points to a different domain than the sender".to_owned(),
             SignalKind::Sender,
@@ -203,20 +215,38 @@ fn humanize(key: &str, value: f64) -> (String, SignalKind) {
             "Display name embeds a different email address (possible spoof)".to_owned(),
             SignalKind::Sender,
         ),
-        "in_address_book" => ("Sender is in your address book".to_owned(), SignalKind::Sender),
+        "in_address_book" => (
+            "Sender is in your address book".to_owned(),
+            SignalKind::Sender,
+        ),
         "sender_seen_count" => (
             format!("You have seen this sender {} time(s) before", value as i64),
             SignalKind::Sender,
         ),
-        "is_list_mail" => ("Bulk/list mail (has a List-Id header)".to_owned(), SignalKind::ListMail),
-        "has_unsubscribe" => ("Has a one-click unsubscribe link".to_owned(), SignalKind::ListMail),
-        "is_bulk" => ("Marked as bulk mail (Precedence: bulk)".to_owned(), SignalKind::ListMail),
+        "is_list_mail" => (
+            "Bulk/list mail (has a List-Id header)".to_owned(),
+            SignalKind::ListMail,
+        ),
+        "has_unsubscribe" => (
+            "Has a one-click unsubscribe link".to_owned(),
+            SignalKind::ListMail,
+        ),
+        "is_bulk" => (
+            "Marked as bulk mail (Precedence: bulk)".to_owned(),
+            SignalKind::ListMail,
+        ),
         "has_executable" => (
             "Has an executable/script attachment".to_owned(),
             SignalKind::Attachment,
         ),
-        "has_archive" => ("Has an archive attachment".to_owned(), SignalKind::Attachment),
-        "has_invoice_pdf" => ("Has an invoice/receipt PDF".to_owned(), SignalKind::Attachment),
+        "has_archive" => (
+            "Has an archive attachment".to_owned(),
+            SignalKind::Attachment,
+        ),
+        "has_invoice_pdf" => (
+            "Has an invoice/receipt PDF".to_owned(),
+            SignalKind::Attachment,
+        ),
         "has_calendar" => ("Has a calendar invite".to_owned(), SignalKind::Attachment),
         "has_attachments" => ("Has attachments".to_owned(), SignalKind::Attachment),
         "attachment_count" => (
@@ -227,8 +257,14 @@ fn humanize(key: &str, value: f64) -> (String, SignalKind) {
             "Subject uses urgency/pressure language".to_owned(),
             SignalKind::Subject,
         ),
-        "subject_is_reply" => ("Subject is a reply or forward".to_owned(), SignalKind::Subject),
-        "subject_len" => (format!("Subject is {} characters", value as i64), SignalKind::Subject),
+        "subject_is_reply" => (
+            "Subject is a reply or forward".to_owned(),
+            SignalKind::Subject,
+        ),
+        "subject_len" => (
+            format!("Subject is {} characters", value as i64),
+            SignalKind::Subject,
+        ),
         "is_threaded" => (
             "Part of an existing conversation".to_owned(),
             SignalKind::Threading,
@@ -328,21 +364,33 @@ mod tests {
         let rule = rule_signal("rule_abc");
         assert_eq!(rule.id, "rule_abc");
         assert_eq!(rule.source, SignalSource::ClassificationRule);
-        assert!(!rule.correctable, "a rule is steered by editing it, not a signal correction");
+        assert!(
+            !rule.correctable,
+            "a rule is steered by editing it, not a signal correction"
+        );
 
         let ai = ai_signal("ollama");
         assert_eq!(ai.id, "ai_assessment");
         assert!(ai.label.contains("ollama"));
         assert_eq!(ai.kind, SignalKind::AiAssessment);
-        assert!(!ai.correctable, "an AI assessment is never a deterministic claim");
+        assert!(
+            !ai.correctable,
+            "an AI assessment is never a deterministic claim"
+        );
     }
 
     #[test]
     fn kind_and_source_labels_are_stable() {
         assert_eq!(SignalKind::Authentication.as_str(), "authentication");
         assert_eq!(SignalKind::AiAssessment.as_str(), "ai_assessment");
-        assert_eq!(SignalSource::DeterministicFeature.as_str(), "deterministic_feature");
-        assert_eq!(SignalSource::ClassificationRule.as_str(), "classification_rule");
+        assert_eq!(
+            SignalSource::DeterministicFeature.as_str(),
+            "deterministic_feature"
+        );
+        assert_eq!(
+            SignalSource::ClassificationRule.as_str(),
+            "classification_rule"
+        );
     }
 
     #[test]

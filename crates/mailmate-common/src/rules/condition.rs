@@ -216,8 +216,14 @@ mod tests {
         use crate::features::FeatureValue as F;
         // A numeric feature lands as Float (the engine's numeric ops coerce Int/Float alike),
         // so an induced `>= 5` predicate compares against the same number the back-test holds.
-        assert_eq!(FieldValue::from_feature(&F::Number(5.0)), FieldValue::Float(5.0));
-        assert_eq!(FieldValue::from_feature(&F::Bool(true)), FieldValue::Bool(true));
+        assert_eq!(
+            FieldValue::from_feature(&F::Number(5.0)),
+            FieldValue::Float(5.0)
+        );
+        assert_eq!(
+            FieldValue::from_feature(&F::Bool(true)),
+            FieldValue::Bool(true)
+        );
         assert_eq!(
             FieldValue::from_feature(&F::Text("fail".to_owned())),
             FieldValue::Text("fail".to_owned())

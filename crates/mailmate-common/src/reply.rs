@@ -259,7 +259,10 @@ mod tests {
             ..DraftedReply::new("Re: Quote", "No thanks.")
         };
         let draft = ReplyDraft::from_drafted(DraftId::from("d1"), drafted);
-        assert_eq!(draft.rationale, "Declined politely; matches your past replies.");
+        assert_eq!(
+            draft.rationale,
+            "Declined politely; matches your past replies."
+        );
     }
 
     #[test]

@@ -259,7 +259,7 @@ pub fn train(
 
     for _ in 0..config.epochs {
         let z = model.logits(x.clone()); // [n, 1]
-        // Numerically-stable binary-cross-entropy-with-logits: max(z,0) - z*y + log(1+e^-|z|).
+                                         // Numerically-stable binary-cross-entropy-with-logits: max(z,0) - z*y + log(1+e^-|z|).
         let bce = z
             .clone()
             .clamp_min(0.0f32)
@@ -368,7 +368,13 @@ impl TrainedTier2 {
             }
         }
         let n = tp + fp + fn_ + tn;
-        let ratio = |num: u32, den: u32| if den == 0 { 0.0 } else { f64::from(num) / f64::from(den) };
+        let ratio = |num: u32, den: u32| {
+            if den == 0 {
+                0.0
+            } else {
+                f64::from(num) / f64::from(den)
+            }
+        };
         Tier2EvalMetrics {
             n,
             accuracy: ratio(tp + tn, n),
@@ -668,7 +674,10 @@ mod tests {
                 "ham",
                 &[
                     ("has_link", FeatureValue::Bool(false)),
-                    ("sender", FeatureValue::Text(format!("friend{i}@home.example"))),
+                    (
+                        "sender",
+                        FeatureValue::Text(format!("friend{i}@home.example")),
+                    ),
                 ],
             ));
         }
@@ -702,8 +711,14 @@ mod tests {
         let spammy = ex("spam", &[("has_link", FeatureValue::Bool(true))]).features;
         let before = trained.infer(&spammy).0;
         trained.save(&dir).unwrap();
-        assert!(dir.join("model.mpk").exists(), "the Burn record must be written");
-        assert!(dir.join("manifest.json").exists(), "the manifest must be written");
+        assert!(
+            dir.join("model.mpk").exists(),
+            "the Burn record must be written"
+        );
+        assert!(
+            dir.join("manifest.json").exists(),
+            "the manifest must be written"
+        );
 
         // A fresh load (a "restart") reproduces the trained prediction — the artifact is faithful.
         let clf = BurnTier2Classifier::load(&dir).unwrap();
@@ -714,7 +729,10 @@ mod tests {
             "reloaded artifact reproduces the score: {before} vs {after}"
         );
         assert_eq!(scored.calibration_version, CALIBRATION_VERSION);
-        assert!(!scored.contributions.is_empty(), "contributions are exposed");
+        assert!(
+            !scored.contributions.is_empty(),
+            "contributions are exposed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -752,9 +770,15 @@ mod tests {
             DEFAULT_PRECISION_GATE,
         )
         .unwrap();
-        assert!(report.activated, "separable corpus should activate: {report:?}");
+        assert!(
+            report.activated,
+            "separable corpus should activate: {report:?}"
+        );
         assert!(report.eval.n >= MIN_EVAL_ROWS, "{report:?}");
-        assert!(report.eval.precision >= DEFAULT_PRECISION_GATE, "{report:?}");
+        assert!(
+            report.eval.precision >= DEFAULT_PRECISION_GATE,
+            "{report:?}"
+        );
         assert!(active.join("model.mpk").exists(), "active artifact written");
         assert!(!cand.exists(), "candidate was promoted (renamed) to active");
         // The cascade can load the active artifact and use it.
@@ -784,7 +808,10 @@ mod tests {
             0.95,
         )
         .unwrap();
-        assert!(!report.activated, "noise must not clear a 0.95 gate: {report:?}");
+        assert!(
+            !report.activated,
+            "noise must not clear a 0.95 gate: {report:?}"
+        );
         assert!(report.artifact_path.is_none());
         assert!(!active.exists(), "no model was promoted to active");
         assert!(!cand.exists(), "the rejected candidate was cleaned up");
@@ -799,10 +826,7 @@ mod tests {
         struct Fixed(f64);
         #[async_trait]
         impl Tier2Classifier for Fixed {
-            async fn predict(
-                &self,
-                _f: FeatureVector,
-            ) -> Result<CalibratedScores, MlError> {
+            async fn predict(&self, _f: FeatureVector) -> Result<CalibratedScores, MlError> {
                 let mut scores = std::collections::BTreeMap::new();
                 scores.insert("spam".to_owned(), self.0);
                 scores.insert("ham".to_owned(), 1.0 - self.0);
@@ -840,20 +864,48 @@ mod tests {
         let vocab = build_vocab(&examples);
         // The 30 singleton sender one-hots are dropped; only the shared key (support 30) remains —
         // so the dense matrix dimension stays bounded on a high-cardinality corpus.
-        assert_eq!(vocab, vec!["has_link".to_owned()], "singletons dropped: {vocab:?}");
+        assert_eq!(
+            vocab,
+            vec!["has_link".to_owned()],
+            "singletons dropped: {vocab:?}"
+        );
     }
 
     #[test]
     fn a_second_activation_replaces_the_active_artifact_and_leaves_no_backup() {
         let (cand, active) = artifact_dirs("replace");
         let cfg = Tier2TrainConfig::default();
-        let r1 = train_eval_gate(&corpus(), "spam", "ham", &cfg, &cand, &active, DEFAULT_PRECISION_GATE).unwrap();
+        let r1 = train_eval_gate(
+            &corpus(),
+            "spam",
+            "ham",
+            &cfg,
+            &cand,
+            &active,
+            DEFAULT_PRECISION_GATE,
+        )
+        .unwrap();
         assert!(r1.activated && active.join("model.mpk").exists());
         // Re-train: the backup→rename→cleanup path replaces the prior active in place.
-        let r2 = train_eval_gate(&corpus(), "spam", "ham", &cfg, &cand, &active, DEFAULT_PRECISION_GATE).unwrap();
+        let r2 = train_eval_gate(
+            &corpus(),
+            "spam",
+            "ham",
+            &cfg,
+            &cand,
+            &active,
+            DEFAULT_PRECISION_GATE,
+        )
+        .unwrap();
         assert!(r2.activated, "second activation should succeed: {r2:?}");
-        assert!(active.join("model.mpk").exists(), "active still present after replace");
-        assert!(!active.with_extension("bak").exists(), "no stale backup left behind");
+        assert!(
+            active.join("model.mpk").exists(),
+            "active still present after replace"
+        );
+        assert!(
+            !active.with_extension("bak").exists(),
+            "no stale backup left behind"
+        );
         assert!(!cand.exists(), "candidate was consumed by promotion");
         let _ = std::fs::remove_dir_all(active.parent().unwrap());
     }

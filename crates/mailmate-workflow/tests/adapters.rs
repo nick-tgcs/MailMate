@@ -435,7 +435,10 @@ fn arming_an_unknown_pipeline_item_is_not_found() {
     let h = Harness::new();
     let wf = h.seed_workflow("standard");
     let err = block_on(h.engine().arm(PipelineItemId::from("missing_item"), wf)).unwrap_err();
-    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
+    assert!(matches!(
+        err,
+        mailmate_common::error::WorkflowError::NotFound(_)
+    ));
 }
 
 #[test]
@@ -443,7 +446,10 @@ fn arming_with_an_unknown_workflow_definition_is_not_found() {
     let h = Harness::new();
     let item = h.seed_item();
     let err = block_on(h.engine().arm(item, WorkflowDefId::from("missing_wf"))).unwrap_err();
-    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
+    assert!(matches!(
+        err,
+        mailmate_common::error::WorkflowError::NotFound(_)
+    ));
 }
 
 #[test]
@@ -455,7 +461,10 @@ fn rescheduling_an_unknown_instance_is_not_found() {
         false,
     ))
     .unwrap_err();
-    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
+    assert!(matches!(
+        err,
+        mailmate_common::error::WorkflowError::NotFound(_)
+    ));
 }
 
 #[test]
@@ -467,5 +476,8 @@ fn resolving_a_review_on_an_unknown_instance_is_not_found() {
         now(),
     ))
     .unwrap_err();
-    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
+    assert!(matches!(
+        err,
+        mailmate_common::error::WorkflowError::NotFound(_)
+    ));
 }

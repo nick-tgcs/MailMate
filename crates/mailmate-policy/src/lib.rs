@@ -322,12 +322,22 @@ mod tests {
                 },
                 move_action(),
             ],
-            authored_by: vec![Some(RuleId::from("rule_tag")), Some(RuleId::from("rule_move"))],
+            authored_by: vec![
+                Some(RuleId::from("rule_tag")),
+                Some(RuleId::from("rule_move")),
+            ],
         };
         let guarded = block_on(guard().evaluate_action_plan(ctx, plan)).unwrap();
         assert_eq!(guarded.allowed_actions.len(), 1, "only the Tag is allowed");
-        assert!(matches!(guarded.allowed_actions[0], PlannedAction::Tag { .. }));
-        assert_eq!(guarded.review_required_actions.len(), 1, "the sensitive Move is demoted");
+        assert!(matches!(
+            guarded.allowed_actions[0],
+            PlannedAction::Tag { .. }
+        ));
+        assert_eq!(
+            guarded.review_required_actions.len(),
+            1,
+            "the sensitive Move is demoted"
+        );
         // The crux: the allowed sidecar carries the Tag's rule, not the demoted Move's — proving the
         // lockstep push happens only on the Allowed arm and never drifts off by an index.
         assert_eq!(
@@ -381,7 +391,10 @@ mod tests {
         ))
         .unwrap();
         // The junk is held for review, never auto-applied.
-        assert!(guarded.allowed_actions.is_empty(), "auto-junk must not be allowed");
+        assert!(
+            guarded.allowed_actions.is_empty(),
+            "auto-junk must not be allowed"
+        );
         assert_eq!(guarded.review_required_actions.len(), 1);
         assert_eq!(
             guarded.policy_checks[0].policy_id,
@@ -421,7 +434,11 @@ mod tests {
             }]),
         ))
         .unwrap();
-        assert_eq!(guarded.allowed_actions.len(), 1, "the user's explicit junk is allowed");
+        assert_eq!(
+            guarded.allowed_actions.len(),
+            1,
+            "the user's explicit junk is allowed"
+        );
         assert!(guarded.review_required_actions.is_empty());
     }
 

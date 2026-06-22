@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mailmate_common::error::StorageError;
-use mailmate_common::feedback::{ClassificationFeedback, ClassificationFeedbackQuery};
 use mailmate_common::features::LabeledExample;
+use mailmate_common::feedback::{ClassificationFeedback, ClassificationFeedbackQuery};
 use mailmate_ml::tier2_burn::CALIBRATION_VERSION;
 use mailmate_ml::{
     train_tier2_eval_gate, BurnTier2Classifier, SwappableTier2, Tier2EvalMetrics, Tier2ModelError,
@@ -196,7 +196,9 @@ impl Tier2TrainingService {
             // failure here is non-fatal: the model stays on disk and is picked up next restart.
             match BurnTier2Classifier::load(&self.active_dir) {
                 Ok(clf) => self.swappable.swap(Arc::new(clf)),
-                Err(e) => log::warn!("activated tier-2 artifact failed to reload for hot-swap: {e}"),
+                Err(e) => {
+                    log::warn!("activated tier-2 artifact failed to reload for hot-swap: {e}")
+                }
             }
         }
         Ok(report)
@@ -225,7 +227,9 @@ mod tests {
     fn a_storage_error_converts_and_displays_as_a_corpus_read_failure() {
         let err: Tier2TrainingError = StorageError::Serialization("bad row".to_owned()).into();
         assert!(matches!(err, Tier2TrainingError::Storage(_)));
-        assert!(err.to_string().contains("reading the correction corpus failed"));
+        assert!(err
+            .to_string()
+            .contains("reading the correction corpus failed"));
     }
 
     #[test]

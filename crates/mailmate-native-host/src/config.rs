@@ -732,20 +732,32 @@ mod tests {
         cfg.tier2.precision_gate = 1.5;
         assert!(cfg.validate().is_err(), "a gate > 1 can never be cleared");
         cfg.tier2.precision_gate = 0.0;
-        assert!(cfg.validate().is_err(), "a gate of 0 would activate any model");
+        assert!(
+            cfg.validate().is_err(),
+            "a gate of 0 would activate any model"
+        );
         cfg.tier2.precision_gate = 0.8;
         cfg.tier2.max_rows = 0;
-        assert!(cfg.validate().is_err(), "a zero corpus ceiling trains on nothing");
+        assert!(
+            cfg.validate().is_err(),
+            "a zero corpus ceiling trains on nothing"
+        );
     }
 
     #[test]
     fn a_zero_batch_cap_is_rejected_not_silently_coerced() {
         let mut cfg = AppConfig::default();
         cfg.followups.drain_batch_cap = 0;
-        assert!(cfg.validate().is_err(), "a zero drain cap is a config mistake, not 'disable'");
+        assert!(
+            cfg.validate().is_err(),
+            "a zero drain cap is a config mistake, not 'disable'"
+        );
         cfg.followups.drain_batch_cap = 100;
         cfg.followups.reminder_batch_cap = 0;
-        assert!(cfg.validate().is_err(), "a zero reminder cap is rejected too");
+        assert!(
+            cfg.validate().is_err(),
+            "a zero reminder cap is rejected too"
+        );
     }
 
     #[test]
@@ -774,7 +786,11 @@ mod tests {
             CategoryPolicy::Off
         );
         // Tokens round-trip through parse/as_str.
-        for p in [CategoryPolicy::Auto, CategoryPolicy::Suggest, CategoryPolicy::Off] {
+        for p in [
+            CategoryPolicy::Auto,
+            CategoryPolicy::Suggest,
+            CategoryPolicy::Off,
+        ] {
             assert_eq!(CategoryPolicy::parse(p.as_str()), Some(p));
         }
         assert_eq!(CategoryPolicy::parse("nonsense"), None);

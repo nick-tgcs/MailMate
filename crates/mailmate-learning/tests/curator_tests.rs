@@ -418,7 +418,11 @@ fn review_accept_and_activate_makes_the_rule_active_with_an_activation_audit() {
             .get_active_rules(RuleKind::Action, RuleScope::Domain),
     )
     .unwrap();
-    assert_eq!(active.len(), 1, "the activated rule is in the active snapshot");
+    assert_eq!(
+        active.len(),
+        1,
+        "the activated rule is in the active snapshot"
+    );
     assert_eq!(active[0].rule_id, rule_id);
 
     // Activation is its OWN audited transition, separate from materialization.
@@ -427,7 +431,11 @@ fn review_accept_and_activate_makes_the_rule_active_with_an_activation_audit() {
         ..AuditQuery::default()
     }))
     .unwrap();
-    assert_eq!(activated.len(), 1, "a rule_activated audit entry is written");
+    assert_eq!(
+        activated.len(),
+        1,
+        "a rule_activated audit entry is written"
+    );
     assert_eq!(activated[0].actor, Actor::User);
 }
 

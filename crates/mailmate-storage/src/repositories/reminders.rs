@@ -92,11 +92,7 @@ impl ReminderRepository for SqliteReminderRepository {
         Ok(id)
     }
 
-    async fn list_due(
-        &self,
-        now: Timestamp,
-        limit: usize,
-    ) -> Result<Vec<Reminder>, StorageError> {
+    async fn list_due(&self, now: Timestamp, limit: usize) -> Result<Vec<Reminder>, StorageError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -119,11 +115,7 @@ impl ReminderRepository for SqliteReminderRepository {
         })
     }
 
-    async fn mark_fired(
-        &self,
-        id: &ReminderId,
-        fired_at: Timestamp,
-    ) -> Result<(), StorageError> {
+    async fn mark_fired(&self, id: &ReminderId, fired_at: Timestamp) -> Result<(), StorageError> {
         self.backend.with_conn(|conn| {
             // Re-check the fire condition ATOMICALLY at write time so a concurrent snooze or
             // cancel that landed between the drain's `list_due` read and this write WINS — the
@@ -247,7 +239,9 @@ mod tests {
         block_on(repo.mark_fired(&ReminderId::from("rem_1"), at("2026-06-22T09:00:01Z"))).unwrap();
         let after = block_on(repo.list_due(at("2026-06-22T10:00:00Z"), 10)).unwrap();
         assert!(after.is_empty(), "a fired reminder must not re-fire");
-        let got = block_on(repo.get(&ReminderId::from("rem_1"))).unwrap().unwrap();
+        let got = block_on(repo.get(&ReminderId::from("rem_1")))
+            .unwrap()
+            .unwrap();
         assert_eq!(got.status, ReminderStatus::Fired);
         assert!(got.fired_at.is_some());
     }
@@ -260,13 +254,22 @@ mod tests {
 
         // Snooze the still-pending reminder a day forward: no longer due now.
         block_on(repo.reschedule(&ReminderId::from("rem_1"), at("2026-06-23T09:00:00Z"))).unwrap();
-        assert!(block_on(repo.list_due(at("2026-06-22T12:00:00Z"), 10)).unwrap().is_empty());
-        assert_eq!(block_on(repo.list_due(at("2026-06-23T09:00:00Z"), 10)).unwrap().len(), 1);
+        assert!(block_on(repo.list_due(at("2026-06-22T12:00:00Z"), 10))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            block_on(repo.list_due(at("2026-06-23T09:00:00Z"), 10))
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Fire then reschedule (un-fire): it becomes pending and drains again.
         block_on(repo.mark_fired(&ReminderId::from("rem_1"), at("2026-06-23T09:00:01Z"))).unwrap();
         block_on(repo.reschedule(&ReminderId::from("rem_1"), at("2026-06-24T09:00:00Z"))).unwrap();
-        let got = block_on(repo.get(&ReminderId::from("rem_1"))).unwrap().unwrap();
+        let got = block_on(repo.get(&ReminderId::from("rem_1")))
+            .unwrap()
+            .unwrap();
         assert_eq!(got.status, ReminderStatus::Pending);
         assert_eq!(got.fired_at, None, "re-arming clears the fired stamp");
     }
@@ -275,7 +278,10 @@ mod tests {
     fn list_due_is_bounded_by_the_batch_cap_and_orders_soonest_first() {
         let backend = db();
         let repo = SqliteReminderRepository::new(backend);
-        for (i, due) in ["09:00", "09:01", "09:02", "09:03", "09:04"].iter().enumerate() {
+        for (i, due) in ["09:00", "09:01", "09:02", "09:03", "09:04"]
+            .iter()
+            .enumerate()
+        {
             block_on(repo.create(new_reminder(
                 &format!("rem_{i}"),
                 &format!("2026-06-22T{due}:00Z"),
@@ -288,7 +294,9 @@ mod tests {
         assert_eq!(batch[0].id.as_str(), "rem_0");
         assert_eq!(batch[2].id.as_str(), "rem_2");
         // A zero cap drains nothing.
-        assert!(block_on(repo.list_due(at("2026-06-22T10:00:00Z"), 0)).unwrap().is_empty());
+        assert!(block_on(repo.list_due(at("2026-06-22T10:00:00Z"), 0))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -297,10 +305,15 @@ mod tests {
         let repo = SqliteReminderRepository::new(backend);
         block_on(repo.create(new_reminder("rem_1", "2026-06-22T09:00:00Z"))).unwrap();
         block_on(repo.cancel(&ReminderId::from("rem_1"))).unwrap();
-        assert!(block_on(repo.list_due(at("2026-06-22T10:00:00Z"), 10)).unwrap().is_empty());
+        assert!(block_on(repo.list_due(at("2026-06-22T10:00:00Z"), 10))
+            .unwrap()
+            .is_empty());
         assert!(block_on(repo.list_pending(10)).unwrap().is_empty());
         assert_eq!(
-            block_on(repo.get(&ReminderId::from("rem_1"))).unwrap().unwrap().status,
+            block_on(repo.get(&ReminderId::from("rem_1")))
+                .unwrap()
+                .unwrap()
+                .status,
             ReminderStatus::Cancelled
         );
     }
@@ -315,7 +328,10 @@ mod tests {
         block_on(repo.cancel(&ReminderId::from("rem_1"))).unwrap();
         block_on(repo.mark_fired(&ReminderId::from("rem_1"), at("2026-06-22T09:00:01Z"))).unwrap();
         assert_eq!(
-            block_on(repo.get(&ReminderId::from("rem_1"))).unwrap().unwrap().status,
+            block_on(repo.get(&ReminderId::from("rem_1")))
+                .unwrap()
+                .unwrap()
+                .status,
             ReminderStatus::Cancelled,
             "a cancelled reminder must stay cancelled, not be forced fired by the drain"
         );
@@ -330,10 +346,21 @@ mod tests {
         block_on(repo.create(new_reminder("rem_1", "2026-06-22T09:00:00Z"))).unwrap();
         block_on(repo.reschedule(&ReminderId::from("rem_1"), at("2026-06-23T09:00:00Z"))).unwrap();
         block_on(repo.mark_fired(&ReminderId::from("rem_1"), at("2026-06-22T09:00:01Z"))).unwrap();
-        let got = block_on(repo.get(&ReminderId::from("rem_1"))).unwrap().unwrap();
-        assert_eq!(got.status, ReminderStatus::Pending, "the snooze wins — still pending");
+        let got = block_on(repo.get(&ReminderId::from("rem_1")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got.status,
+            ReminderStatus::Pending,
+            "the snooze wins — still pending"
+        );
         assert_eq!(got.fired_at, None, "and it was not stamped fired");
         // It will fire at the new (snoozed) time.
-        assert_eq!(block_on(repo.list_due(at("2026-06-23T09:00:00Z"), 10)).unwrap().len(), 1);
+        assert_eq!(
+            block_on(repo.list_due(at("2026-06-23T09:00:00Z"), 10))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

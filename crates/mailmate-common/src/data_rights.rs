@@ -151,6 +151,9 @@ mod tests {
             body_text: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(!json.contains("body_text"), "an absent body must not appear: {json}");
+        assert!(
+            !json.contains("body_text"),
+            "an absent body must not appear: {json}"
+        );
     }
 }

@@ -50,16 +50,31 @@ fn purge_message_children(
 ) -> Result<(), StorageError> {
     // FK children of `messages` — must go before the row they reference.
     for (table, sql) in [
-        ("message_features", "DELETE FROM message_features WHERE message_id = ?1"),
+        (
+            "message_features",
+            "DELETE FROM message_features WHERE message_id = ?1",
+        ),
         ("drafts", "DELETE FROM drafts WHERE message_id = ?1"),
         // Loose (no FK) but message-scoped — the corrections, audit trail, learning by-products,
         // and the notify-only reminder (its user-authored title/note is per-message PII) that
         // name this message.
-        ("classification_feedback", "DELETE FROM classification_feedback WHERE message_id = ?1"),
-        ("filing_feedback", "DELETE FROM filing_feedback WHERE message_id = ?1"),
+        (
+            "classification_feedback",
+            "DELETE FROM classification_feedback WHERE message_id = ?1",
+        ),
+        (
+            "filing_feedback",
+            "DELETE FROM filing_feedback WHERE message_id = ?1",
+        ),
         ("audit_log", "DELETE FROM audit_log WHERE message_id = ?1"),
-        ("rule_evidence", "DELETE FROM rule_evidence WHERE message_id = ?1"),
-        ("shadow_outcomes", "DELETE FROM shadow_outcomes WHERE message_id = ?1"),
+        (
+            "rule_evidence",
+            "DELETE FROM rule_evidence WHERE message_id = ?1",
+        ),
+        (
+            "shadow_outcomes",
+            "DELETE FROM shadow_outcomes WHERE message_id = ?1",
+        ),
         ("reminders", "DELETE FROM reminders WHERE message_id = ?1"),
     ] {
         let n = tx.execute(sql, params![message_id]).map_err(map_rusqlite)? as u64;
@@ -153,11 +168,17 @@ impl DataRightsRepository for SqliteDataRightsRepository {
                 purge_message_children(&tx, mid, &mut report)?;
             }
             let n = tx
-                .execute("DELETE FROM messages WHERE sender_email = ?1", params![email])
+                .execute(
+                    "DELETE FROM messages WHERE sender_email = ?1",
+                    params![email],
+                )
                 .map_err(map_rusqlite)? as u64;
             report.record("messages", n);
             let n = tx
-                .execute("DELETE FROM sender_profiles WHERE email = ?1", params![email])
+                .execute(
+                    "DELETE FROM sender_profiles WHERE email = ?1",
+                    params![email],
+                )
                 .map_err(map_rusqlite)? as u64;
             report.record("sender_profiles", n);
             // GC threads that lost their last message (their summary is message-derived PII).
@@ -349,7 +370,10 @@ mod tests {
 
     fn count(backend: &SqliteBackend, sql: &str) -> i64 {
         backend
-            .with_conn(|conn| conn.query_row(sql, [], |row| row.get(0)).map_err(map_rusqlite))
+            .with_conn(|conn| {
+                conn.query_row(sql, [], |row| row.get(0))
+                    .map_err(map_rusqlite)
+            })
             .unwrap()
     }
 
@@ -409,12 +433,18 @@ mod tests {
             ("shadow_outcomes", "message_id"),
         ] {
             assert_eq!(
-                count(&backend, &format!("SELECT COUNT(*) FROM {table} WHERE {col}='msg_1'")),
+                count(
+                    &backend,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col}='msg_1'")
+                ),
                 0,
                 "{table} still has msg_1 rows"
             );
             assert_eq!(
-                count(&backend, &format!("SELECT COUNT(*) FROM {table} WHERE {col}='msg_2'")),
+                count(
+                    &backend,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col}='msg_2'")
+                ),
                 1,
                 "{table} wrongly lost msg_2"
             );
@@ -422,7 +452,11 @@ mod tests {
         // The report tallies every touched table once.
         assert_eq!(report.removed.get("messages"), Some(&1));
         assert_eq!(report.removed.get("classification_feedback"), Some(&1));
-        assert_eq!(report.total(), 8, "8 rows removed across 8 tables: {report:?}");
+        assert_eq!(
+            report.total(),
+            8,
+            "8 rows removed across 8 tables: {report:?}"
+        );
     }
 
     #[test]
@@ -430,7 +464,10 @@ mod tests {
         let backend = db();
         let repo = SqliteDataRightsRepository::new(backend);
         let report = block_on(repo.forget_message(&MessageId::from("nope"))).unwrap();
-        assert!(report.is_empty(), "nothing stored ⇒ empty report: {report:?}");
+        assert!(
+            report.is_empty(),
+            "nothing stored ⇒ empty report: {report:?}"
+        );
     }
 
     #[test]
@@ -453,20 +490,50 @@ mod tests {
         let report = block_on(repo.forget_sender("spammer@shared.test")).unwrap();
 
         assert_eq!(
-            count(&backend, "SELECT COUNT(*) FROM messages WHERE sender_email='spammer@shared.test'"),
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM messages WHERE sender_email='spammer@shared.test'"
+            ),
             0
         );
         assert_eq!(
-            count(&backend, "SELECT COUNT(*) FROM messages WHERE sender_email='friend@shared.test'"),
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM messages WHERE sender_email='friend@shared.test'"
+            ),
             1,
             "the same-domain friend must survive"
         );
         // The spammer's derived rows went with the messages; the friend's stayed.
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM classification_feedback WHERE message_id='s1'"), 0);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM classification_feedback WHERE message_id='f1'"), 1);
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM classification_feedback WHERE message_id='s1'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM classification_feedback WHERE message_id='f1'"
+            ),
+            1
+        );
         // Only the spammer's profile is gone.
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM sender_profiles WHERE email='spammer@shared.test'"), 0);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM sender_profiles WHERE email='friend@shared.test'"), 1);
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM sender_profiles WHERE email='spammer@shared.test'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM sender_profiles WHERE email='friend@shared.test'"
+            ),
+            1
+        );
         assert_eq!(report.removed.get("messages"), Some(&2));
         assert_eq!(report.removed.get("sender_profiles"), Some(&1));
     }
@@ -475,7 +542,7 @@ mod tests {
     fn reset_learning_drops_learned_state_keeps_builtins_and_messages() {
         let backend = db();
         seed_message(&backend, "m", "a@b.test"); // a message + its classification_feedback
-        // Two learned rules (one active, one shadow) + one built-in safety rule that must survive.
+                                                 // Two learned rules (one active, one shadow) + one built-in safety rule that must survive.
         exec(
             &backend,
             "INSERT INTO classification_rules (id, stable_name, scope, band, status, created_by, \
@@ -503,21 +570,61 @@ mod tests {
 
         // Learned + shadow rules (and their versions) gone; the safety rule + its version kept.
         assert_eq!(count(&backend, "SELECT COUNT(*) FROM classification_rules WHERE band IN ('learned_active','agent_shadow')"), 0);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM classification_rules WHERE band='system_safety'"), 1);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM classification_rule_versions WHERE rule_id='r_learned'"), 0);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM classification_rule_versions WHERE rule_id='r_safety'"), 1);
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM classification_rules WHERE band='system_safety'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM classification_rule_versions WHERE rule_id='r_learned'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM classification_rule_versions WHERE rule_id='r_safety'"
+            ),
+            1
+        );
         // The correction corpus and proposals are gone.
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM classification_feedback"), 0);
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM classification_feedback"),
+            0
+        );
         assert_eq!(count(&backend, "SELECT COUNT(*) FROM agent_proposals"), 0);
         // But the message itself is KEPT — reset_learning forgets what was learned, not the mail.
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM messages WHERE id='m'"), 1);
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM messages WHERE id='m'"),
+            1
+        );
         // The learn-from-Sent VIP signal (`mail_sent`) is dropped so the same VIP proposals don't
         // re-derive, but the accountability audit trail (`action_applied`) is kept.
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM audit_log WHERE event_type='mail_sent'"), 0);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM audit_log WHERE event_type='action_applied'"), 1);
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM audit_log WHERE event_type='mail_sent'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM audit_log WHERE event_type='action_applied'"
+            ),
+            1
+        );
         assert_eq!(report.removed.get("classification_rules"), Some(&2));
         assert_eq!(report.removed.get("classification_feedback"), Some(&1));
-        assert_eq!(report.removed.get("audit_log"), Some(&1), "the mail_sent row was tallied");
+        assert_eq!(
+            report.removed.get("audit_log"),
+            Some(&1),
+            "the mail_sent row was tallied"
+        );
     }
 
     #[test]
@@ -542,8 +649,19 @@ mod tests {
 
         let report = block_on(repo.forget_message(&MessageId::from("m1"))).unwrap();
 
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM reminders WHERE message_id='m1'"), 0, "the reminder (with its note) is erased");
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM threads WHERE id='thr_1'"), 0, "the now-empty thread is GC'd");
+        assert_eq!(
+            count(
+                &backend,
+                "SELECT COUNT(*) FROM reminders WHERE message_id='m1'"
+            ),
+            0,
+            "the reminder (with its note) is erased"
+        );
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM threads WHERE id='thr_1'"),
+            0,
+            "the now-empty thread is GC'd"
+        );
         assert_eq!(report.removed.get("reminders"), Some(&1));
         assert_eq!(report.removed.get("threads"), Some(&1));
     }
@@ -568,16 +686,26 @@ mod tests {
 
         block_on(repo.forget_sender("spammer@x.test")).unwrap();
 
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM messages WHERE id='ms'"), 0);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM messages WHERE id='mf'"), 1);
-        assert_eq!(count(&backend, "SELECT COUNT(*) FROM threads WHERE id='thr_s'"), 1, "the thread survives — the friend's message still lives there");
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM messages WHERE id='ms'"),
+            0
+        );
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM messages WHERE id='mf'"),
+            1
+        );
+        assert_eq!(
+            count(&backend, "SELECT COUNT(*) FROM threads WHERE id='thr_s'"),
+            1,
+            "the thread survives — the friend's message still lives there"
+        );
     }
 
     #[test]
     fn export_carries_metadata_and_only_retained_bodies() {
         let backend = db();
         seed_message(&backend, "kept", "a@b.test"); // body_retained=1, body_text='BODY kept'
-        // A message whose body was NOT retained but a stale value lingers: must not be exported.
+                                                    // A message whose body was NOT retained but a stale value lingers: must not be exported.
         exec(
             &backend,
             "INSERT INTO messages (id, account_id, folder_id, thunderbird_message_id, sender_email, \
@@ -594,11 +722,22 @@ mod tests {
         let export = block_on(repo.export()).unwrap();
 
         assert_eq!(export.messages.len(), 2);
-        let kept = export.messages.iter().find(|m| m.id.as_str() == "kept").unwrap();
+        let kept = export
+            .messages
+            .iter()
+            .find(|m| m.id.as_str() == "kept")
+            .unwrap();
         assert_eq!(kept.body_text.as_deref(), Some("BODY kept"));
-        let nob = export.messages.iter().find(|m| m.id.as_str() == "nob").unwrap();
+        let nob = export
+            .messages
+            .iter()
+            .find(|m| m.id.as_str() == "nob")
+            .unwrap();
         assert!(!nob.body_retained);
-        assert_eq!(nob.body_text, None, "an unretained body must never be exported");
+        assert_eq!(
+            nob.body_text, None,
+            "an unretained body must never be exported"
+        );
         // The learned rule and the seeded correction are surfaced.
         assert_eq!(export.rules.len(), 1);
         assert_eq!(export.rules[0].stable_name, "learned.vip");

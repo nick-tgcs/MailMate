@@ -255,7 +255,8 @@ pub async fn induce_condition(
                 Some((_, current)) => {
                     let current_p = current.precision().unwrap_or(0.0);
                     precision > current_p + EPS
-                        || ((precision - current_p).abs() <= EPS && report.correct > current.correct)
+                        || ((precision - current_p).abs() <= EPS
+                            && report.correct > current.correct)
                 }
             };
             if better {
@@ -265,7 +266,10 @@ pub async fn induce_condition(
 
         let Some((idx, report)) = best else { break };
         let precision = report.precision().unwrap_or(0.0);
-        let prev_precision = best_report.as_ref().and_then(|r| r.precision()).unwrap_or(0.0);
+        let prev_precision = best_report
+            .as_ref()
+            .and_then(|r| r.precision())
+            .unwrap_or(0.0);
         // Always take a first clause (an empty selection matches nothing); after that, only keep
         // a clause that strictly improves precision — otherwise specializing further just shrinks
         // support for no gain.
@@ -349,10 +353,15 @@ mod tests {
                 ("no_prior_contact", FeatureValue::Bool(true)),
             ]),
         ];
-        let (cond, report) =
-            block_on(induce_condition(&positives, &negatives, "suspicious", 3, 0.9))
-                .unwrap()
-                .expect("a separating conjunction exists");
+        let (cond, report) = block_on(induce_condition(
+            &positives,
+            &negatives,
+            "suspicious",
+            3,
+            0.9,
+        ))
+        .unwrap()
+        .expect("a separating conjunction exists");
         // Two clauses, both present.
         match &cond {
             Condition::All { all } => {
@@ -382,11 +391,13 @@ mod tests {
             fv(&[("sender_domain", FeatureValue::Text("stripe.com".into()))]),
         ];
         // A negative pool the single predicate already excludes.
-        let negatives = vec![fv(&[("sender_domain", FeatureValue::Text("other.com".into()))])];
-        let (cond, report) =
-            block_on(induce_condition(&positives, &negatives, "receipts", 3, 0.9))
-                .unwrap()
-                .unwrap();
+        let negatives = vec![fv(&[(
+            "sender_domain",
+            FeatureValue::Text("other.com".into()),
+        )])];
+        let (cond, report) = block_on(induce_condition(&positives, &negatives, "receipts", 3, 0.9))
+            .unwrap()
+            .unwrap();
         match cond {
             Condition::Predicate(p) => {
                 assert_eq!(p.field, "sender_domain");
@@ -410,15 +421,25 @@ mod tests {
             fv(&[("auth_result", FeatureValue::Text("fail".into()))]),
             fv(&[("auth_result", FeatureValue::Text("fail".into()))]),
         ];
-        let (_, report) = block_on(induce_condition(&positives, &negatives, "suspicious", 2, 0.9))
-            .unwrap()
-            .unwrap();
+        let (_, report) = block_on(induce_condition(
+            &positives,
+            &negatives,
+            "suspicious",
+            2,
+            0.9,
+        ))
+        .unwrap()
+        .unwrap();
         // The induced-rule support is `correct` (the positives reproduced) — NOT `fires`, which
         // here also counts the two negative-pool false positives. The card must show the honest
         // positive support, never inflate it with mail the rule got wrong.
         assert_eq!(report.correct, 2, "reproduced the two positives");
         assert_eq!(report.fires, 4, "but also fired on the two negatives");
-        assert_eq!(report.precision(), Some(0.5), "so precision is an honest 0.5");
+        assert_eq!(
+            report.precision(),
+            Some(0.5),
+            "so precision is an honest 0.5"
+        );
         // The caller gates on precision ≥ bar AND positive support ≥ floor; 0.5 < 0.9 withholds it.
         assert!(report.precision().unwrap() < 0.9);
     }
@@ -431,8 +452,7 @@ mod tests {
             fv(&[("sender_domain", FeatureValue::Text("b.com".into()))]),
             fv(&[("sender_domain", FeatureValue::Text("c.com".into()))]),
         ];
-        let induced =
-            block_on(induce_condition(&positives, &[], "x", 3, 0.9)).unwrap();
+        let induced = block_on(induce_condition(&positives, &[], "x", 3, 0.9)).unwrap();
         assert!(induced.is_none(), "the empty/vacuous-candidate guard holds");
     }
 
@@ -440,20 +460,40 @@ mod tests {
     fn cluster_by_effect_keeps_domainless_rows_and_groups_by_label() {
         let rows = vec![
             // No sender domain at all — the legacy clustering dropped these; here they cluster.
-            corr("suspicious", fv(&[("auth_result", FeatureValue::Text("fail".into()))])),
-            corr("suspicious", fv(&[("auth_result", FeatureValue::Text("fail".into()))])),
-            corr("newsletter", fv(&[("list_id", FeatureValue::Text("news".into()))])),
+            corr(
+                "suspicious",
+                fv(&[("auth_result", FeatureValue::Text("fail".into()))]),
+            ),
+            corr(
+                "suspicious",
+                fv(&[("auth_result", FeatureValue::Text("fail".into()))]),
+            ),
+            corr(
+                "newsletter",
+                fv(&[("list_id", FeatureValue::Text("news".into()))]),
+            ),
             // A reinforcement does not seed a correction cluster.
             {
-                let mut r = corr("suspicious", fv(&[("auth_result", FeatureValue::Text("fail".into()))]));
+                let mut r = corr(
+                    "suspicious",
+                    fv(&[("auth_result", FeatureValue::Text("fail".into()))]),
+                );
                 r.polarity = FeedbackPolarity::Positive;
                 r
             },
         ];
         let clusters = cluster_by_effect(rows);
-        assert_eq!(clusters.len(), 2, "two labels; domainless kept, reinforcement dropped");
+        assert_eq!(
+            clusters.len(),
+            2,
+            "two labels; domainless kept, reinforcement dropped"
+        );
         let suspicious = clusters.iter().find(|c| c.label == "suspicious").unwrap();
-        assert_eq!(suspicious.rows.len(), 2, "only the two negative corrections");
+        assert_eq!(
+            suspicious.rows.len(),
+            2,
+            "only the two negative corrections"
+        );
         assert_eq!(suspicious.scope, RuleScope::Global, "account-less → global");
         assert!(suspicious.account_id.is_none());
     }
@@ -477,9 +517,15 @@ mod tests {
             ("account_id", FeatureValue::Text("work".into())),
             ("auth_result", FeatureValue::Text("pass".into())),
         ])];
-        let (cond, _) = block_on(induce_condition(&positives, &negatives, "suspicious", 2, 0.9))
-            .unwrap()
-            .expect("auth_result separates the pool");
+        let (cond, _) = block_on(induce_condition(
+            &positives,
+            &negatives,
+            "suspicious",
+            2,
+            0.9,
+        ))
+        .unwrap()
+        .expect("auth_result separates the pool");
         // The induced predicate is auth_result — never account_id.
         match cond {
             Condition::Predicate(p) => assert_eq!(p.field, "auth_result"),
@@ -491,7 +537,10 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert!(!fields.contains(&"account_id"), "account_id must not be a predicate: {fields:?}");
+                assert!(
+                    !fields.contains(&"account_id"),
+                    "account_id must not be a predicate: {fields:?}"
+                );
             }
             other => panic!("unexpected condition {other:?}"),
         }

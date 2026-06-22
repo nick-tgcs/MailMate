@@ -13,10 +13,10 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use serde_json::{json, Value};
 
+use mailmate_common::features::{FeatureValue, FeatureVector};
 use mailmate_common::feedback::{
     ClassificationFeedback, ClassificationFeedbackRow, FeedbackPolarity, PinnedVersions,
 };
-use mailmate_common::features::{FeatureValue, FeatureVector};
 use mailmate_common::ids::{FeedbackId, MessageId};
 use mailmate_common::protocol::{Frame, ProtocolVersion, ResponseStatus};
 use mailmate_common::time::Timestamp;
@@ -95,9 +95,21 @@ fn unique_tier2_path(tag: &str) -> std::path::PathBuf {
     dir.join("tier2_weights.json")
 }
 
-fn router_with_tier2(backend: &Arc<SqliteBackend>, out: Arc<FakeTransport>, weights: std::path::PathBuf) -> HostRouter {
+fn router_with_tier2(
+    backend: &Arc<SqliteBackend>,
+    out: Arc<FakeTransport>,
+    weights: std::path::PathBuf,
+) -> HostRouter {
     let secrets = weights.with_file_name("secrets.json");
-    build_router(&AppConfig::default(), backend, out, secrets, None, Some(weights)).unwrap()
+    build_router(
+        &AppConfig::default(),
+        backend,
+        out,
+        secrets,
+        None,
+        Some(weights),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -129,7 +141,11 @@ fn training_from_corrections_activates_a_gated_artifact_and_the_cascade_serves_i
     // TRAIN: read corrections → train → eval the reloaded artifact → gate → promote → hot-swap.
     block_on(router.handle(request("train_tier2_model", json!({})))).unwrap();
     let report = last_ok(&out);
-    assert_eq!(report["activated"], json!(true), "should activate: {report}");
+    assert_eq!(
+        report["activated"],
+        json!(true),
+        "should activate: {report}"
+    );
     assert!(
         report["precision"].as_f64().unwrap() >= 0.8,
         "held-out precision must clear the gate: {report}"
@@ -166,7 +182,11 @@ fn training_with_no_corrections_reports_not_activated_and_never_fabricates_a_mod
 
     block_on(router.handle(request("train_tier2_model", json!({})))).unwrap();
     let report = last_ok(&out);
-    assert_eq!(report["activated"], json!(false), "no data ⇒ no activation: {report}");
+    assert_eq!(
+        report["activated"],
+        json!(false),
+        "no data ⇒ no activation: {report}"
+    );
     assert_eq!(report["eval_n"], json!(0));
     assert!(
         !model_active.exists(),

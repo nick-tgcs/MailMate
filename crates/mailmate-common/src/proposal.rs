@@ -317,7 +317,10 @@ mod tests {
             precision: None,
             support: 0,
         };
-        assert_eq!(serde_json::to_value(empty).unwrap(), json!({ "support": 0 }));
+        assert_eq!(
+            serde_json::to_value(empty).unwrap(),
+            json!({ "support": 0 })
+        );
 
         // BACKWARD COMPAT: a stored proposal JSON written before `back_test` existed still loads
         // (the field defaults to None) — the #[serde(default)] guarantee.

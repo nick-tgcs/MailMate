@@ -321,11 +321,19 @@ mod tests {
         // — body_text NULL, body_retained 0 — while body_hash (identity) survives.
         let repo = repo();
         let kept = MessageId::fresh();
-        block_on(repo.insert(new_message(&kept, Some("opted-in body"), RetentionLevel::Bodies)))
-            .unwrap();
+        block_on(repo.insert(new_message(
+            &kept,
+            Some("opted-in body"),
+            RetentionLevel::Bodies,
+        )))
+        .unwrap();
         let meta = MessageId::fresh();
-        block_on(repo.insert(new_message(&meta, Some("never stored"), RetentionLevel::Metadata)))
-            .unwrap();
+        block_on(repo.insert(new_message(
+            &meta,
+            Some("never stored"),
+            RetentionLevel::Metadata,
+        )))
+        .unwrap();
 
         // Only the one retained body is purged.
         let purged = block_on(repo.purge_bodies()).unwrap();

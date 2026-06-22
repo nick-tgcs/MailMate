@@ -116,9 +116,7 @@ pub fn assess_decay(
     fires: Option<usize>,
     thresholds: DecayThresholds,
 ) -> Option<DecayVerdict> {
-    let undo_rate = fires
-        .filter(|&f| f > 0)
-        .map(|f| undos as f64 / f as f64);
+    let undo_rate = fires.filter(|&f| f > 0).map(|f| undos as f64 / f as f64);
     let triggered = match fires {
         // A real denominator: the rate governs, the raw count does not.
         Some(f) if f >= thresholds.min_fires_for_rate => {
@@ -141,7 +139,11 @@ pub fn assess_decay(
 /// auto-retires. The rationale states exactly the signal it has (a rate when fires are known, a
 /// count otherwise), never a fabricated rate.
 #[must_use]
-pub fn retire_proposal(rule: &EvaluatableRule, verdict: DecayVerdict, source: &str) -> AgentProposal {
+pub fn retire_proposal(
+    rule: &EvaluatableRule,
+    verdict: DecayVerdict,
+    source: &str,
+) -> AgentProposal {
     let rationale = match (verdict.fires, verdict.undo_rate) {
         (Some(fires), Some(rate)) => format!(
             "This rule fired {fires} times and you undid {} of them ({:.0}% undo rate). Retire it?",
@@ -283,10 +285,17 @@ mod tests {
         let v = assess_decay(5, None, DecayThresholds::default()).unwrap();
         let p = retire_proposal(&r, v, "learning-engine");
         assert_eq!(p.proposal_type, ProposalKind::RetireRule);
-        assert_eq!(p.status, ProposalStatus::PendingReview, "human-gated, never auto");
+        assert_eq!(
+            p.status,
+            ProposalStatus::PendingReview,
+            "human-gated, never auto"
+        );
         assert_eq!(p.target_rule_id.as_ref(), Some(&RuleId::from("rule_spam")));
         assert_eq!(p.target_rule_kind, Some(RuleKind::Action));
-        assert!(p.rule_draft.is_none(), "a retire references the rule, carries no new draft");
+        assert!(
+            p.rule_draft.is_none(),
+            "a retire references the rule, carries no new draft"
+        );
         // Recommends exactly what acceptance does — the review handler retires the target.
         assert_eq!(p.recommended_status, RuleStatus::Retired);
         assert!(p.rationale.contains("5 times"), "{}", p.rationale);
@@ -307,7 +316,8 @@ mod tests {
         let max_idle = DecayThresholds::default().max_idle_days;
         // Last fired (max_idle + 5) days ago → idle past the window → stale, and it DID fire before.
         let last_fire = now.add_days(-(max_idle + 5));
-        let v = assess_staleness(Some(last_fire), None, now, max_idle).expect("idle past the window");
+        let v =
+            assess_staleness(Some(last_fire), None, now, max_idle).expect("idle past the window");
         assert!(!v.never_fired, "it used to fire, then went quiet");
         assert_eq!(v.idle_days, max_idle + 5);
     }
@@ -355,10 +365,18 @@ mod tests {
         };
         let p = stale_retire_proposal(&r, v, "learning-engine");
         assert_eq!(p.proposal_type, ProposalKind::RetireRule);
-        assert_eq!(p.status, ProposalStatus::PendingReview, "human-gated, never auto");
+        assert_eq!(
+            p.status,
+            ProposalStatus::PendingReview,
+            "human-gated, never auto"
+        );
         assert_eq!(p.recommended_status, RuleStatus::Retired);
         assert_eq!(p.target_rule_id.as_ref(), Some(&RuleId::from("rule_quiet")));
-        assert!(p.rationale.contains("hasn't fired in 90 days"), "{}", p.rationale);
+        assert!(
+            p.rationale.contains("hasn't fired in 90 days"),
+            "{}",
+            p.rationale
+        );
 
         let never = stale_retire_proposal(
             &r,

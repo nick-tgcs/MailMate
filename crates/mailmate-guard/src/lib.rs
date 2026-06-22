@@ -138,8 +138,14 @@ mod tests {
 
     #[test]
     fn a_benign_acknowledgement_is_all_clear() {
-        let report = scan_commitments("Hi,\n\nThanks for reaching out. I'll take a look and get back to you.\n\nBest,\nN");
-        assert!(report.is_clear(), "unexpected findings: {:?}", report.findings);
+        let report = scan_commitments(
+            "Hi,\n\nThanks for reaching out. I'll take a look and get back to you.\n\nBest,\nN",
+        );
+        assert!(
+            report.is_clear(),
+            "unexpected findings: {:?}",
+            report.findings
+        );
     }
 
     #[test]
@@ -196,8 +202,14 @@ mod tests {
         let cats = categories(&report);
         assert!(cats.contains(&CommitmentCategory::Payment), "got {cats:?}");
         let texts: Vec<&str> = report.findings.iter().map(|f| f.text.as_str()).collect();
-        assert!(texts.iter().any(|t| t.eq_ignore_ascii_case("invoice")), "{texts:?}");
-        assert!(texts.iter().any(|t| t.to_lowercase().starts_with("net 30")), "{texts:?}");
+        assert!(
+            texts.iter().any(|t| t.eq_ignore_ascii_case("invoice")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.to_lowercase().starts_with("net 30")),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -205,7 +217,11 @@ mod tests {
         let report = scan_commitments("Yes, I agree to the terms and we guarantee delivery.");
         let cats = categories(&report);
         assert_eq!(cats, vec![CommitmentCategory::Legal]);
-        let texts: Vec<String> = report.findings.iter().map(|f| f.text.to_lowercase()).collect();
+        let texts: Vec<String> = report
+            .findings
+            .iter()
+            .map(|f| f.text.to_lowercase())
+            .collect();
         assert!(texts.contains(&"i agree".to_owned()), "{texts:?}");
         assert!(texts.contains(&"guarantee".to_owned()), "{texts:?}");
     }

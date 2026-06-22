@@ -62,11 +62,7 @@ const GOLDEN: &[(&str, &str, &[&str])] = &[
         "docs at [url] here",
         &["internal.example.com"],
     ),
-    (
-        "see www.example.org/help.",
-        "see [url].",
-        &["example.org"],
-    ),
+    ("see www.example.org/help.", "see [url].", &["example.org"]),
     // --- Email + phone/card (pre-existing categories, locked) --------------------------
     (
         "reach jane.doe@example.com or +1 (555) 123-4567",
@@ -82,7 +78,12 @@ const GOLDEN: &[(&str, &str, &[&str])] = &[
     (
         "key sk-ABCDEFGHIJKLMNOP0123 url https://x.io/a pay GB29NWBK60161331926819 mail a@b.co",
         "key [secret] url [url] pay [iban] mail [email]",
-        &["sk-ABCDEFGHIJKLMNOP0123", "x.io", "GB29NWBK60161331926819", "a@b.co"],
+        &[
+            "sk-ABCDEFGHIJKLMNOP0123",
+            "x.io",
+            "GB29NWBK60161331926819",
+            "a@b.co",
+        ],
     ),
     // --- Negative controls: clean content is untouched --------------------------------
     (
@@ -118,8 +119,18 @@ fn golden_corpus_redacts_exactly_and_idempotently() {
 
 #[test]
 fn every_matrix_category_is_exercised_by_the_corpus() {
-    let blob: String = GOLDEN.iter().map(|(_, exp, _)| *exp).collect::<Vec<_>>().join(" ");
-    for placeholder in ["[secret]", "[iban]", "[url]", "[email]", "[redacted-number]"] {
+    let blob: String = GOLDEN
+        .iter()
+        .map(|(_, exp, _)| *exp)
+        .collect::<Vec<_>>()
+        .join(" ");
+    for placeholder in [
+        "[secret]",
+        "[iban]",
+        "[url]",
+        "[email]",
+        "[redacted-number]",
+    ] {
         assert!(
             blob.contains(placeholder),
             "the golden corpus must cover {placeholder} — coverage gap"
@@ -133,7 +144,10 @@ fn the_secret_floor_holds_at_a_full_ceiling() {
     // (URLs, emails, prose) retained.
     let raw = "Hi! key sk-LIVEabcdefGHIJKLMN0123 wire GB29NWBK60161331926819 see https://x.io mail a@b.co";
     let got = scrub_secrets(raw);
-    assert!(got.contains("[secret]") && got.contains("[iban]"), "{got:?}");
+    assert!(
+        got.contains("[secret]") && got.contains("[iban]"),
+        "{got:?}"
+    );
     assert!(!got.contains("sk-LIVE") && !got.contains("NWBK"), "{got:?}");
     // Content survives the secret floor (this is a Full export, not a Redacted one).
     assert!(got.contains("https://x.io"), "{got:?}");

@@ -287,7 +287,10 @@ mod tests {
         assert!(!accept.activate, "a plain accept never activates");
         let activate = ReviewDecision::accept_and_activate(ProposalId::from("prop_1a"));
         assert_eq!(activate.outcome, crate::feedback::ProposalOutcome::Accepted);
-        assert!(activate.activate, "accept_and_activate sets the activate flag");
+        assert!(
+            activate.activate,
+            "accept_and_activate sets the activate flag"
+        );
         let reject = ReviewDecision::reject(ProposalId::from("prop_2"), "too_broad");
         assert_eq!(reject.outcome, crate::feedback::ProposalOutcome::Rejected);
         assert!(!reject.activate);

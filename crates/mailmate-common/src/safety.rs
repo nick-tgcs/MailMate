@@ -140,7 +140,10 @@ pub fn assess_safety(message: &MessageData, features: &FeatureVector) -> Vec<Saf
         findings.push(SafetyFinding::new(
             "links_present",
             "Links in this message",
-            format!("Links point to: {}. Hover before clicking.", defanged.join(", ")),
+            format!(
+                "Links point to: {}. Hover before clicking.",
+                defanged.join(", ")
+            ),
             SafetySeverity::Info,
         ));
     }
@@ -283,9 +286,16 @@ mod tests {
         let msg = message(vec![attachment("invoice.pdf.exe")], None);
         let fv = features(&[("has_executable", true)]);
         let findings = assess_safety(&msg, &fv);
-        let exe = findings.iter().find(|f| f.id == "executable_attachment").unwrap();
+        let exe = findings
+            .iter()
+            .find(|f| f.id == "executable_attachment")
+            .unwrap();
         assert_eq!(exe.severity, SafetySeverity::Danger);
-        assert!(exe.detail.contains("invoice.pdf.exe"), "names the file: {}", exe.detail);
+        assert!(
+            exe.detail.contains("invoice.pdf.exe"),
+            "names the file: {}",
+            exe.detail
+        );
     }
 
     #[test]
@@ -297,7 +307,11 @@ mod tests {
         let findings = assess_safety(&msg, &FeatureVector::new());
         let links = findings.iter().find(|f| f.id == "links_present").unwrap();
         // Domains are defanged so the finding can never render a live link.
-        assert!(links.detail.contains("paypa1[.]com"), "got {}", links.detail);
+        assert!(
+            links.detail.contains("paypa1[.]com"),
+            "got {}",
+            links.detail
+        );
         assert!(links.detail.contains("safe[.]test"));
         assert!(!links.detail.contains("paypa1.com"));
     }

@@ -125,9 +125,8 @@ fn parse_level(s: &str) -> LevelFilter {
 /// A compact UTC timestamp, `YYYY-MM-DD HH:MM:SS.mmm` (millisecond precision; no offset — the host
 /// runs unattended, so an unambiguous UTC log is friendlier than a local offset).
 fn now_ts() -> String {
-    let fmt = format_description!(
-        "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]"
-    );
+    let fmt =
+        format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]");
     OffsetDateTime::now_utc()
         .format(fmt)
         .unwrap_or_else(|_| "0000-00-00 00:00:00.000".to_owned())
@@ -208,7 +207,10 @@ mod tests {
             .unwrap()
             .read_to_string(&mut contents)
             .unwrap();
-        assert!(contents.contains("list_models ok: 3 models"), "{contents:?}");
+        assert!(
+            contents.contains("list_models ok: 3 models"),
+            "{contents:?}"
+        );
         assert!(contents.contains("INFO"), "{contents:?}");
         assert!(contents.contains("mailmate::host"), "{contents:?}");
         assert!(!contents.contains("verbose noise"), "{contents:?}");
@@ -221,7 +223,10 @@ mod tests {
 
         std::fs::write(&path, vec![b'x'; 64]).unwrap();
         rotate_if_large(&path, 16); // 64 > 16 → roll aside
-        assert!(!path.exists(), "the oversized log should have been rolled aside");
+        assert!(
+            !path.exists(),
+            "the oversized log should have been rolled aside"
+        );
         assert!(dir.path().join("host.log.old").exists());
 
         std::fs::write(&path, b"small").unwrap();

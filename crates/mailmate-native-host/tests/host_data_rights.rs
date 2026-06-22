@@ -10,10 +10,10 @@ use futures::executor::block_on;
 use serde_json::{json, Value};
 
 use mailmate_common::audit::AuditQuery;
+use mailmate_common::features::FeatureVector;
 use mailmate_common::feedback::{
     ClassificationFeedback, ClassificationFeedbackRow, FeedbackPolarity, PinnedVersions,
 };
-use mailmate_common::features::FeatureVector;
 use mailmate_common::ids::{AccountId, FolderId, MessageId};
 use mailmate_common::message::NewMessage;
 use mailmate_common::protocol::{Frame, ProtocolVersion, ResponseStatus};
@@ -137,8 +137,12 @@ fn forget_message_erases_the_message_and_leaves_a_data_forgotten_tombstone() {
     assert_eq!(report["removed"]["classification_feedback"], json!(1));
 
     // msg_1 is gone; msg_2 untouched.
-    assert!(block_on(messages.get(&MessageId::from("msg_1"))).unwrap().is_none());
-    assert!(block_on(messages.get(&MessageId::from("msg_2"))).unwrap().is_some());
+    assert!(block_on(messages.get(&MessageId::from("msg_1")))
+        .unwrap()
+        .is_none());
+    assert!(block_on(messages.get(&MessageId::from("msg_2")))
+        .unwrap()
+        .is_some());
     // The erasure left exactly one tombstone behind (the message's own audit rows were erased).
     assert_eq!(audit_count(&backend, "data_forgotten"), 1);
 }
@@ -158,9 +162,13 @@ fn forget_sender_erases_that_address_only() {
     )))
     .unwrap();
     assert_eq!(last_ok(&out)["removed"]["messages"], json!(1));
-    assert!(block_on(messages.get(&MessageId::from("s1"))).unwrap().is_none());
+    assert!(block_on(messages.get(&MessageId::from("s1")))
+        .unwrap()
+        .is_none());
     assert!(
-        block_on(messages.get(&MessageId::from("f1"))).unwrap().is_some(),
+        block_on(messages.get(&MessageId::from("f1")))
+            .unwrap()
+            .is_some(),
         "the same-domain friend survives"
     );
 }
@@ -178,7 +186,10 @@ fn reset_learning_clears_corrections_but_keeps_messages() {
 
     block_on(router.handle(request("reset_learning", json!({})))).unwrap();
     assert_eq!(last_ok(&out)["scope"], json!("learning"));
-    assert_eq!(last_ok(&out)["removed"]["classification_feedback"], json!(1));
+    assert_eq!(
+        last_ok(&out)["removed"]["classification_feedback"],
+        json!(1)
+    );
 
     // The correction corpus is empty, but the message is kept.
     assert!(block_on(
@@ -186,7 +197,9 @@ fn reset_learning_clears_corrections_but_keeps_messages() {
     )
     .unwrap()
     .is_empty());
-    assert!(block_on(messages.get(&MessageId::from("m"))).unwrap().is_some());
+    assert!(block_on(messages.get(&MessageId::from("m")))
+        .unwrap()
+        .is_some());
     assert_eq!(audit_count(&backend, "data_forgotten"), 1);
 }
 
@@ -207,8 +220,14 @@ fn export_my_data_returns_metadata_and_only_retained_bodies() {
     assert_eq!(kept["body_text"], json!("BODY kept"));
     let meta = msgs.iter().find(|m| m["id"] == json!("meta")).unwrap();
     assert_eq!(meta["body_retained"], json!(false));
-    assert!(meta.get("body_text").is_none(), "a metadata-only message exports no body");
-    assert_eq!(export["classification_feedback"].as_array().unwrap().len(), 1);
+    assert!(
+        meta.get("body_text").is_none(),
+        "a metadata-only message exports no body"
+    );
+    assert_eq!(
+        export["classification_feedback"].as_array().unwrap().len(),
+        1
+    );
     assert_eq!(audit_count(&backend, "data_exported"), 1);
 }
 
@@ -220,7 +239,11 @@ fn forget_message_without_a_message_id_is_an_invalid_payload() {
 
     block_on(router.handle(request("forget_message", json!({})))).unwrap();
     match out.sent_frames().last().unwrap() {
-        Frame::Response { status: ResponseStatus::Error, error: Some(err), .. } => {
+        Frame::Response {
+            status: ResponseStatus::Error,
+            error: Some(err),
+            ..
+        } => {
             assert_eq!(err.code, "invalid_payload");
         }
         other => panic!("expected an error response, got {other:?}"),

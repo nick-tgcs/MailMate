@@ -257,8 +257,7 @@ fn the_thread_guard_never_auto_junks_a_reply_in_a_joined_thread() {
     // A reply in a thread the user joined (In-Reply-To set, not bulk): junk is held for review.
     let mut reply = message("someone@noisy.example", "Re: our call");
     reply.headers.in_reply_to = Some("<prev-msg@noisy.example>".to_owned());
-    let outcome =
-        block_on(make_service().handle_message(reply, TriggerKind::NewMail)).unwrap();
+    let outcome = block_on(make_service().handle_message(reply, TriggerKind::NewMail)).unwrap();
     assert!(
         outcome.guarded_plan.allowed_actions.is_empty(),
         "a joined-thread reply is never auto-junked"
@@ -272,8 +271,7 @@ fn the_thread_guard_never_auto_junks_a_reply_in_a_joined_thread() {
 
     // The SAME rule on a fresh, non-threaded message junks outright — the guard is narrow.
     let fresh = message("someone@noisy.example", "Buy now");
-    let outcome2 =
-        block_on(make_service().handle_message(fresh, TriggerKind::NewMail)).unwrap();
+    let outcome2 = block_on(make_service().handle_message(fresh, TriggerKind::NewMail)).unwrap();
     assert_eq!(
         outcome2.guarded_plan.allowed_actions.len(),
         1,

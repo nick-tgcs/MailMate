@@ -13,8 +13,8 @@
 //! `FeatureExtractor` adapter the cascade feeds into Tier 2 (it lives here, beside the model
 //! that consumes its output).
 
-pub mod featurize;
 pub mod features;
+pub mod featurize;
 pub mod logreg;
 pub mod tier2_burn;
 pub mod trainer;

@@ -88,10 +88,9 @@ fn display_name_spoofed(display_name: &str, from_domain: &str) -> bool {
 
 /// The lowercased domain of a bare address (`a@b.com` → `b.com`), or `""`.
 fn address_domain(addr: &str) -> String {
-    addr.rsplit_once('@')
-        .map_or_else(String::new, |(_, d)| {
-            d.trim().trim_end_matches('>').to_ascii_lowercase()
-        })
+    addr.rsplit_once('@').map_or_else(String::new, |(_, d)| {
+        d.trim().trim_end_matches('>').to_ascii_lowercase()
+    })
 }
 
 /// Whether `filename` (case-insensitively) ends with any of `exts` (each given without a dot).
@@ -103,7 +102,8 @@ fn has_ext(filename: &str, exts: &[&str]) -> bool {
 /// Whether an attachment looks like an invoice/receipt PDF (a finance/commitment cue).
 fn is_invoice_pdf(att: &Attachment) -> bool {
     let name = att.filename.to_ascii_lowercase();
-    let is_pdf = att.content_type.eq_ignore_ascii_case("application/pdf") || has_ext(&name, &["pdf"]);
+    let is_pdf =
+        att.content_type.eq_ignore_ascii_case("application/pdf") || has_ext(&name, &["pdf"]);
     is_pdf
         && ["invoice", "receipt", "statement", "bill"]
             .iter()
@@ -132,7 +132,9 @@ fn is_executable(att: &Attachment) -> bool {
 /// Whether an attachment is an archive (a malware-delivery cue when combined with the above).
 fn is_archive(att: &Attachment) -> bool {
     let ct = att.content_type.to_ascii_lowercase();
-    ct.contains("zip") || ct.contains("rar") || ct.contains("7z")
+    ct.contains("zip")
+        || ct.contains("rar")
+        || ct.contains("7z")
         || has_ext(&att.filename, &["zip", "rar", "7z", "tar", "gz", "tgz"])
 }
 
@@ -227,7 +229,10 @@ impl FeatureExtractor for DeterministicFeatureExtractor {
         fv.insert("is_threaded", FeatureValue::Bool(threaded));
 
         // List / bulk mail (newsletters, mailing lists) — the unsubscribe + bulk cues.
-        fv.insert("is_list_mail", FeatureValue::Bool(headers.list_id.is_some()));
+        fv.insert(
+            "is_list_mail",
+            FeatureValue::Bool(headers.list_id.is_some()),
+        );
         fv.insert(
             "has_unsubscribe",
             FeatureValue::Bool(headers.list_unsubscribe.is_some()),
@@ -416,7 +421,8 @@ mod tests {
             att("photos.zip", "application/zip"),
             att("meeting.ics", "text/calendar"),
         ];
-        let fv = DeterministicFeatureExtractor::new().extract(&message(MessageHeaders::default(), atts));
+        let fv =
+            DeterministicFeatureExtractor::new().extract(&message(MessageHeaders::default(), atts));
         assert_eq!(fv.get("has_invoice_pdf"), Some(&FeatureValue::Bool(true)));
         assert_eq!(fv.get("has_executable"), Some(&FeatureValue::Bool(true)));
         assert_eq!(fv.get("has_archive"), Some(&FeatureValue::Bool(true)));
@@ -437,9 +443,15 @@ mod tests {
             fv.get("sender_domain"),
             Some(&FeatureValue::Text("evil.test".to_owned()))
         );
-        assert_eq!(fv.get("display_name_spoofed"), Some(&FeatureValue::Bool(true)));
+        assert_eq!(
+            fv.get("display_name_spoofed"),
+            Some(&FeatureValue::Bool(true))
+        );
         // Reply-To points at the same evil domain here, so no *mismatch* against From.
-        assert_eq!(fv.get("reply_to_mismatch"), Some(&FeatureValue::Bool(false)));
+        assert_eq!(
+            fv.get("reply_to_mismatch"),
+            Some(&FeatureValue::Bool(false))
+        );
 
         // A Reply-To on a different domain than From IS a mismatch.
         let headers2 = MessageHeaders {
@@ -448,8 +460,14 @@ mod tests {
             ..MessageHeaders::default()
         };
         let fv2 = DeterministicFeatureExtractor::new().extract(&message(headers2, vec![]));
-        assert_eq!(fv2.get("reply_to_mismatch"), Some(&FeatureValue::Bool(true)));
-        assert_eq!(fv2.get("display_name_spoofed"), Some(&FeatureValue::Bool(false)));
+        assert_eq!(
+            fv2.get("reply_to_mismatch"),
+            Some(&FeatureValue::Bool(true))
+        );
+        assert_eq!(
+            fv2.get("display_name_spoofed"),
+            Some(&FeatureValue::Bool(false))
+        );
     }
 
     #[test]
@@ -478,12 +496,18 @@ mod tests {
         msg.sender_seen_count = Some(42);
         msg.sender_in_address_book = Some(true);
         let fv = DeterministicFeatureExtractor::new().extract(&msg);
-        assert_eq!(fv.get("sender_seen_count"), Some(&FeatureValue::Number(42.0)));
+        assert_eq!(
+            fv.get("sender_seen_count"),
+            Some(&FeatureValue::Number(42.0))
+        );
         assert_eq!(fv.get("in_address_book"), Some(&FeatureValue::Bool(true)));
         assert_eq!(
             fv.get("sender_display_name"),
             Some(&FeatureValue::Text("jane doe".to_owned()))
         );
-        assert_eq!(fv.get("subject_has_urgency"), Some(&FeatureValue::Bool(true)));
+        assert_eq!(
+            fv.get("subject_has_urgency"),
+            Some(&FeatureValue::Bool(true))
+        );
     }
 }

@@ -168,12 +168,12 @@ fn sorted_children(children: &[Condition]) -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mailmate_common::ids::{RuleId, RuleVersionId};
     use mailmate_common::rules::condition::{FieldValue, Operator, Predicate};
     use mailmate_common::rules::effect::RuleEffect;
     use mailmate_common::rules::rule::{
         HierarchyBand, RiskLevel, RuleKind, RuleScope, RuleStatus, RuleVersion,
     };
-    use mailmate_common::ids::{RuleId, RuleVersionId};
 
     fn pred(field: &str, value: &str) -> Condition {
         Condition::Predicate(Predicate {
@@ -237,18 +237,32 @@ mod tests {
         // Existing: auth_result == fail → suspicious. Candidate: auth_result == fail AND
         // no_prior_contact == true → newsletter. Every message the candidate matches ALSO matches
         // the existing rule, which would label it `suspicious` — a real overlap the user must judge.
-        let existing_rule = existing("rule_suspicious", pred("auth_result", "fail"), label_effect("suspicious"));
+        let existing_rule = existing(
+            "rule_suspicious",
+            pred("auth_result", "fail"),
+            label_effect("suspicious"),
+        );
         let cand = candidate(
             Condition::All {
-                all: vec![pred("auth_result", "fail"), pred("no_prior_contact", "true")],
+                all: vec![
+                    pred("auth_result", "fail"),
+                    pred("no_prior_contact", "true"),
+                ],
             },
             label_effect("newsletter"),
         );
         let conflicts = detect_conflicts(&cand, std::slice::from_ref(&existing_rule));
         assert_eq!(conflicts.len(), 1, "the subsumption is reported");
         assert_eq!(conflicts[0].kind, ConflictKind::Overlap);
-        assert_eq!(conflicts[0].existing_rule_id.as_ref().unwrap().as_str(), "rule_suspicious");
-        assert!(conflicts[0].description.contains("subsumed by"), "{}", conflicts[0].description);
+        assert_eq!(
+            conflicts[0].existing_rule_id.as_ref().unwrap().as_str(),
+            "rule_suspicious"
+        );
+        assert!(
+            conflicts[0].description.contains("subsumed by"),
+            "{}",
+            conflicts[0].description
+        );
     }
 
     #[test]
@@ -257,18 +271,34 @@ mod tests {
         // but DIFFERENT labels fire on exactly the same mail and disagree on every message — a real
         // conflict, though neither moves nor junks. It must be reported (else it auto-shadows and
         // silently fights the existing rule).
-        let existing_rule = existing("rule_news", pred("list_id", "news"), label_effect("newsletter"));
+        let existing_rule = existing(
+            "rule_news",
+            pred("list_id", "news"),
+            label_effect("newsletter"),
+        );
         let cand = candidate(pred("list_id", "news"), label_effect("promotions"));
         let conflicts = detect_conflicts(&cand, std::slice::from_ref(&existing_rule));
-        assert_eq!(conflicts.len(), 1, "same condition, different label is a conflict");
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "same condition, different label is a conflict"
+        );
         assert_eq!(conflicts[0].kind, ConflictKind::ContradictoryEffect);
-        assert!(conflicts[0].description.contains("different effect"), "{}", conflicts[0].description);
+        assert!(
+            conflicts[0].description.contains("different effect"),
+            "{}",
+            conflicts[0].description
+        );
     }
 
     #[test]
     fn an_identical_condition_with_an_identical_effect_is_a_harmless_duplicate() {
         // Same condition AND same effect → a redundant duplicate, not a conflict.
-        let existing_rule = existing("rule_news", pred("list_id", "news"), label_effect("newsletter"));
+        let existing_rule = existing(
+            "rule_news",
+            pred("list_id", "news"),
+            label_effect("newsletter"),
+        );
         let cand = candidate(pred("list_id", "news"), label_effect("newsletter"));
         assert!(
             detect_conflicts(&cand, std::slice::from_ref(&existing_rule)).is_empty(),
@@ -279,7 +309,11 @@ mod tests {
     #[test]
     fn disjoint_rules_on_a_shared_field_do_not_conflict() {
         // auth_result == fail vs auth_result == pass: no message satisfies both, so no overlap.
-        let existing_rule = existing("rule_pass", pred("auth_result", "pass"), label_effect("trusted"));
+        let existing_rule = existing(
+            "rule_pass",
+            pred("auth_result", "pass"),
+            label_effect("trusted"),
+        );
         let cand = candidate(pred("auth_result", "fail"), label_effect("suspicious"));
         assert!(
             detect_conflicts(&cand, std::slice::from_ref(&existing_rule)).is_empty(),
@@ -290,7 +324,11 @@ mod tests {
     #[test]
     fn co_matching_rules_with_the_same_effect_are_not_a_conflict() {
         // Candidate is more specific but agrees on the effect → redundant, harmless, not reported.
-        let existing_rule = existing("rule_news", pred("list_id", "news"), label_effect("newsletter"));
+        let existing_rule = existing(
+            "rule_news",
+            pred("list_id", "news"),
+            label_effect("newsletter"),
+        );
         let cand = candidate(
             Condition::All {
                 all: vec![pred("list_id", "news"), pred("sender_domain", "x.com")],
@@ -312,9 +350,15 @@ mod tests {
             ..existing(
                 "rule_move_a",
                 Condition::All {
-                    all: vec![pred("sender_domain", "acme.com"), pred("has_invoice", "true")],
+                    all: vec![
+                        pred("sender_domain", "acme.com"),
+                        pred("has_invoice", "true"),
+                    ],
                 },
-                RuleEffect { move_to: Some("Receipts".to_owned()), ..RuleEffect::new() },
+                RuleEffect {
+                    move_to: Some("Receipts".to_owned()),
+                    ..RuleEffect::new()
+                },
             )
         };
         let cand = RuleDraft {
@@ -323,14 +367,25 @@ mod tests {
                 Condition::All {
                     all: vec![pred("sender_domain", "acme.com"), pred("urgent", "true")],
                 },
-                RuleEffect { move_to: Some("Urgent".to_owned()), ..RuleEffect::new() },
+                RuleEffect {
+                    move_to: Some("Urgent".to_owned()),
+                    ..RuleEffect::new()
+                },
             )
         };
         let conflicts = detect_conflicts(&cand, std::slice::from_ref(&existing_rule));
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].kind, ConflictKind::Overlap);
-        assert_eq!(conflicts[0].severity, ConflictSeverity::High, "contradicting moves are high");
-        assert!(conflicts[0].description.contains("partially overlaps"), "{}", conflicts[0].description);
+        assert_eq!(
+            conflicts[0].severity,
+            ConflictSeverity::High,
+            "contradicting moves are high"
+        );
+        assert!(
+            conflicts[0].description.contains("partially overlaps"),
+            "{}",
+            conflicts[0].description
+        );
     }
 
     #[test]
@@ -339,7 +394,9 @@ mod tests {
         // its matched set soundly, so it reports nothing rather than a guess.
         let existing_rule = existing(
             "rule_any",
-            Condition::Any { any: vec![pred("a", "1"), pred("b", "2")] },
+            Condition::Any {
+                any: vec![pred("a", "1"), pred("b", "2")],
+            },
             label_effect("x"),
         );
         let cand = candidate(pred("a", "1"), label_effect("y"));
@@ -349,4 +406,3 @@ mod tests {
         );
     }
 }
-
