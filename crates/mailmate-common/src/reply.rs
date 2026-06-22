@@ -70,6 +70,11 @@ pub struct DraftedReply {
     /// Human-facing notes asserting which forbidden commitments were avoided.
     #[serde(default)]
     pub safety_notes: Vec<String>,
+    /// The model's short "why this draft" explanation, when it supplied one. Empty when the
+    /// model omitted it — the review surface degrades to a generic line rather than fabricating
+    /// a rationale.
+    #[serde(default)]
+    pub rationale: String,
 }
 
 impl DraftedReply {
@@ -80,6 +85,7 @@ impl DraftedReply {
             subject: subject.into(),
             body: body.into(),
             safety_notes: Vec::new(),
+            rationale: String::new(),
         }
     }
 }
@@ -100,6 +106,9 @@ pub struct ReplyDraft {
     /// The safety notes carried up from the drafter.
     #[serde(default)]
     pub safety_notes: Vec<String>,
+    /// The "why this draft" rationale carried up from the drafter (empty when none was given).
+    #[serde(default)]
+    pub rationale: String,
     /// Always `true`: a MailMate draft is never auto-sent.
     pub requires_human_review: bool,
 }
@@ -113,8 +122,93 @@ impl ReplyDraft {
             subject: drafted.subject,
             body: drafted.body,
             safety_notes: drafted.safety_notes,
+            rationale: drafted.rationale,
             requires_human_review: true,
         }
+    }
+}
+
+/// One of the four classes of commitment the compose-review guard watches for in a draft body.
+///
+/// These are the product's hard promise: before a reply is sent, the user can see exactly what
+/// it commits them to. The scanner is **model-free** (determinism-first) — a draft never silently
+/// commits a date, a price, a payment term, or a legal position without the guard naming it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitmentCategory {
+    /// A date or deadline ("by Friday", "next week", "March 3", "2026-06-22").
+    Date,
+    /// A price or monetary amount ("$500", "EUR 1,000", "20% off").
+    Price,
+    /// A payment term ("net 30", "invoice", "deposit", "refund", "wire transfer").
+    Payment,
+    /// Binding / legal language ("I agree", "we guarantee", "legally binding", "warrant").
+    Legal,
+}
+
+impl CommitmentCategory {
+    /// Every category, in the order the UI presents them.
+    pub const ALL: [Self; 4] = [Self::Date, Self::Price, Self::Payment, Self::Legal];
+
+    /// The stable wire/i18n token for this category.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Date => "date",
+            Self::Price => "price",
+            Self::Payment => "payment",
+            Self::Legal => "legal",
+        }
+    }
+}
+
+/// One thing the guard found: the category and the exact span of text that triggered it, cited
+/// by char offsets into the body so the review surface can highlight it in place. The matched
+/// `text` is carried verbatim so a renderer can show the cited span without re-slicing the body.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CommitmentFinding {
+    /// Which class of commitment this is.
+    pub category: CommitmentCategory,
+    /// The matched text, verbatim.
+    pub text: String,
+    /// Char offset (inclusive) of the match start in the body.
+    pub start: usize,
+    /// Char offset (exclusive) of the match end in the body.
+    pub end: usize,
+}
+
+/// The guard's verdict over one draft body: every commitment it found, in body order.
+///
+/// A clear report ([`Self::is_clear`]) is the all-green case; a non-empty one is the "things to
+/// check before sending" surface. The report makes no judgement about whether a commitment is
+/// *wrong* — only that the draft makes it — which is the honest line for an advisory guard.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CommitmentGuardReport {
+    /// Findings in body order (ascending `start`).
+    #[serde(default)]
+    pub findings: Vec<CommitmentFinding>,
+}
+
+impl CommitmentGuardReport {
+    /// Whether the draft made no detectable commitment (the all-clear case).
+    #[must_use]
+    pub fn is_clear(&self) -> bool {
+        self.findings.is_empty()
+    }
+
+    /// How many commitments were found.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.findings.len()
+    }
+
+    /// The distinct categories present, in [`CommitmentCategory::ALL`] order.
+    #[must_use]
+    pub fn categories(&self) -> Vec<CommitmentCategory> {
+        CommitmentCategory::ALL
+            .into_iter()
+            .filter(|cat| self.findings.iter().any(|f| f.category == *cat))
+            .collect()
     }
 }
 
@@ -156,5 +250,64 @@ mod tests {
         let back: ReplyDraft =
             serde_json::from_str(&serde_json::to_string(&draft).unwrap()).unwrap();
         assert_eq!(back, draft);
+    }
+
+    #[test]
+    fn from_drafted_carries_the_rationale_up() {
+        let drafted = DraftedReply {
+            rationale: "Declined politely; matches your past replies.".to_owned(),
+            ..DraftedReply::new("Re: Quote", "No thanks.")
+        };
+        let draft = ReplyDraft::from_drafted(DraftId::from("d1"), drafted);
+        assert_eq!(draft.rationale, "Declined politely; matches your past replies.");
+    }
+
+    #[test]
+    fn an_empty_guard_report_is_clear_and_has_no_categories() {
+        let report = CommitmentGuardReport::default();
+        assert!(report.is_clear());
+        assert_eq!(report.count(), 0);
+        assert!(report.categories().is_empty());
+    }
+
+    #[test]
+    fn guard_report_categories_are_distinct_and_in_canonical_order() {
+        let report = CommitmentGuardReport {
+            findings: vec![
+                CommitmentFinding {
+                    category: CommitmentCategory::Legal,
+                    text: "I agree".to_owned(),
+                    start: 0,
+                    end: 7,
+                },
+                CommitmentFinding {
+                    category: CommitmentCategory::Date,
+                    text: "Friday".to_owned(),
+                    start: 10,
+                    end: 16,
+                },
+                CommitmentFinding {
+                    category: CommitmentCategory::Date,
+                    text: "Monday".to_owned(),
+                    start: 20,
+                    end: 26,
+                },
+            ],
+        };
+        assert!(!report.is_clear());
+        assert_eq!(report.count(), 3);
+        // Distinct, and Date precedes Legal regardless of discovery order.
+        assert_eq!(
+            report.categories(),
+            vec![CommitmentCategory::Date, CommitmentCategory::Legal]
+        );
+    }
+
+    #[test]
+    fn commitment_category_tokens_are_stable() {
+        assert_eq!(CommitmentCategory::Date.as_str(), "date");
+        assert_eq!(CommitmentCategory::Price.as_str(), "price");
+        assert_eq!(CommitmentCategory::Payment.as_str(), "payment");
+        assert_eq!(CommitmentCategory::Legal.as_str(), "legal");
     }
 }

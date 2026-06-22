@@ -24,6 +24,8 @@ pub fn sample_message() -> MessageData {
             size_bytes: 2048,
         }],
         remote_content_loaded: false,
+        sender_seen_count: None,
+        sender_in_address_book: None,
     }
 }
 

@@ -41,6 +41,24 @@ pub fn build_provider(
         .unwrap_or_else(|| Arc::new(UnavailableProvider::new()))
 }
 
+/// Whether the configured default provider resolves to a real adapter (vs degrading to the
+/// zero-provider sentinel). This is the structural truth `provider_status` reports as `available`:
+/// it runs the SAME construction predicate as [`build_provider`] (down to `build_one`), so it can
+/// never drift from what the draft path would actually get — and unlike an id-string match, a
+/// provider a user happens to name `"unavailable"` cannot fool it.
+#[must_use]
+pub fn provider_is_configured(
+    ai: &AiSettings,
+    secrets: &dyn SecretStore,
+    http: Arc<dyn HttpClient>,
+) -> bool {
+    ai.default_provider
+        .as_deref()
+        .and_then(|id| ai.providers.iter().find(|p| p.id == id))
+        .and_then(|settings| build_one(settings, secrets, http))
+        .is_some()
+}
+
 /// Build one adapter from its settings, or `None` if the kind is unknown or a required field is
 /// missing (endpoint for every network adapter; model for the chat adapters).
 fn build_one(
@@ -193,5 +211,37 @@ mod tests {
             )],
         );
         assert_eq!(built_id(&cfg), ProviderId::from("lc"));
+    }
+
+    fn configured(cfg: &AiSettings) -> bool {
+        provider_is_configured(cfg, &FakeSecretStore::new(), http())
+    }
+
+    #[test]
+    fn provider_is_configured_tracks_build_provider() {
+        // Complete default → configured; incomplete / no-default → not.
+        assert!(configured(&ai(
+            Some("local"),
+            vec![provider("local", "ollama", Some("http://x"), Some("m"))],
+        )));
+        assert!(!configured(&ai(
+            Some("local"),
+            vec![provider("local", "ollama", Some("http://x"), None)], // no model
+        )));
+        assert!(!configured(&ai(
+            None,
+            vec![provider("local", "ollama", Some("http://x"), Some("m"))],
+        )));
+    }
+
+    #[test]
+    fn a_complete_provider_named_unavailable_is_still_configured() {
+        // The structural check must not be fooled by a provider that happens to share the
+        // zero-provider sentinel's id — the old id-string match reported this as unavailable.
+        let cfg = ai(
+            Some("unavailable"),
+            vec![provider("unavailable", "ollama", Some("http://x"), Some("m"))],
+        );
+        assert!(configured(&cfg), "a real adapter named 'unavailable' is available");
     }
 }

@@ -37,6 +37,7 @@ fn bank_security_alert_plan_is_partitioned_correctly() {
                 url: "https://totally-your-bank.example/verify".to_owned(),
             },
         ],
+        authored_by: Vec::new(),
     };
 
     let guarded = block_on(HardPolicyGuard::new().evaluate_action_plan(ctx, plan)).unwrap();
@@ -79,6 +80,7 @@ fn ordinary_receipt_plan_is_fully_allowed() {
                 to_folder: "folder_receipts".into(),
             },
         ],
+        authored_by: Vec::new(),
     };
 
     let guarded = block_on(HardPolicyGuard::new().evaluate_action_plan(ctx, plan)).unwrap();
@@ -95,6 +97,7 @@ fn empty_plan_yields_an_empty_partition() {
             decision_id: DecisionId::from("dec_empty"),
             message_id: None,
             actions: vec![],
+            authored_by: Vec::new(),
         },
     ))
     .unwrap();

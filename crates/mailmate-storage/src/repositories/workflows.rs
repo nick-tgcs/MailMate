@@ -427,20 +427,30 @@ impl WorkflowInstanceRepository for SqliteWorkflowInstanceRepository {
         })
     }
 
-    async fn list_due(&self, now: Timestamp) -> Result<Vec<WorkflowInstance>, StorageError> {
+    async fn list_due(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<WorkflowInstance>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         // Compare at whole-second precision (matching how `next_due_at` is stored), so the
         // fixed-width `YYYY-MM-DDTHH:MM:SSZ` strings sort lexicographically by instant.
         let now_db = ts_to_db(now.floor_to_seconds());
         self.backend.with_conn(|conn| {
             // The load-bearing predicate, served by `idx_workflow_instances_status_next_due`.
-            // Both sides are whole-second RFC3339 UTC, so `<=` on TEXT is exact.
+            // Both sides are whole-second RFC3339 UTC, so `<=` on TEXT is exact. `LIMIT` bounds
+            // a long-offline catch-up so the soonest-due batch drains first, the rest next tick.
             let sql = format!(
                 "SELECT {INSTANCE_COLUMNS} FROM workflow_instances \
                  WHERE status IN ('active','snoozed') AND next_due_at IS NOT NULL \
-                 AND next_due_at <= ?1 ORDER BY next_due_at ASC, id ASC"
+                 AND next_due_at <= ?1 ORDER BY next_due_at ASC, id ASC LIMIT ?2"
             );
             let mut stmt = conn.prepare(&sql).map_err(map_rusqlite)?;
-            let mut rows = stmt.query(params![now_db]).map_err(map_rusqlite)?;
+            let mut rows = stmt
+                .query(params![now_db, limit as i64])
+                .map_err(map_rusqlite)?;
             let mut out = Vec::new();
             while let Some(row) = rows.next().map_err(map_rusqlite)? {
                 out.push(row_to_instance(row)?);

@@ -168,6 +168,15 @@ impl RuleRepository for SqliteRuleRepository {
         self.snapshot(kind, scope, RuleStatus::ShadowMode)
     }
 
+    async fn get_rules_by_status(
+        &self,
+        kind: RuleKind,
+        scope: RuleScope,
+        status: RuleStatus,
+    ) -> Result<Vec<EvaluatableRule>, StorageError> {
+        self.snapshot(kind, scope, status)
+    }
+
     async fn save_rule_draft(&self, draft: NewRule) -> Result<RuleId, StorageError> {
         let (rules, versions) = tables(draft.kind);
         let rule_id = RuleId::fresh();

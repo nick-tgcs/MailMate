@@ -52,8 +52,9 @@ body {
   opacity: 0.75;
 }
 
-/* The commitments guard (degraded form: the host's safety_notes listed verbatim under a single
-   heading until the typed four-category breakdown lands). */
+/* The commitments guard: the typed four-category breakdown (dates / prices / payment / legal),
+   each category citing the exact spans the host's model-free scanner matched. Degrades to a
+   safety_notes list (.mm-guard ul) for an older draft that carried no typed report. */
 .mm-guard {
   border: 1px solid var(--mm-line);
   border-radius: 6px;
@@ -79,6 +80,100 @@ body {
 }
 .mm-guard li {
   margin: 2px 0;
+}
+.mm-guard__cat {
+  margin-top: 8px;
+}
+.mm-guard__cat-label {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+.mm-guard__spans {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+}
+.mm-cite {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--mm-soft);
+  border: 1px solid var(--mm-line);
+}
+.mm-cite--date {
+  border-color: #2563eb;
+}
+.mm-cite--price {
+  border-color: var(--mm-good);
+}
+.mm-cite--payment {
+  border-color: var(--mm-warn);
+}
+.mm-cite--legal {
+  border-color: #b3261e;
+}
+
+/* "Drafted via ollama · llama3" provenance under the rationale. */
+.mm-prov {
+  margin: 4px 0 0;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* Refine: quick-steer chips + a free-text Adjust box + a plain Regenerate. */
+.mm-refine {
+  margin-bottom: 14px;
+}
+.mm-refine__label {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.mm-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mm-chip {
+  padding: 3px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+}
+.mm-adjust {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.mm-adjust__input {
+  flex: 1 1 160px;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--mm-line);
+  background: Field;
+  color: FieldText;
+}
+button.mm-secondary {
+  font-size: 12px;
+  padding: 5px 10px;
+}
+.mm-regen-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  min-height: 1em;
+}
+.mm-regen-note--busy {
+  opacity: 0.75;
+}
+.mm-regen-note--error {
+  color: #b3261e;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .mm-degraded {

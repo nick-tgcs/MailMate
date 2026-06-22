@@ -191,6 +191,11 @@ id_newtype!(
     #[doc = "Workflow shadow-outcome row id (`wsho_…`)."]
     WorkflowShadowOutcomeId
 );
+id_newtype!(
+    "rem",
+    #[doc = "Durable reminder id (`rem_…`) — a notify-only snooze/remind-me timer."]
+    ReminderId
+);
 
 /// Mint a fresh `<prefix>_<uuid-simple>` string with an explicit prefix.
 ///

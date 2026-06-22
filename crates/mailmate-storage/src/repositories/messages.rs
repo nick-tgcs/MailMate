@@ -216,6 +216,21 @@ impl MessageRepository for SqliteMessageRepository {
             Ok(out)
         })
     }
+
+    async fn purge_bodies(&self) -> Result<u64, StorageError> {
+        self.backend.with_conn(|conn| {
+            // NULL the readable body and clear the retained flag wherever a body is present;
+            // body_hash (identity/dedup) is deliberately left intact.
+            let purged = conn
+                .execute(
+                    "UPDATE messages SET body_text = NULL, body_retained = 0 \
+                     WHERE body_text IS NOT NULL",
+                    [],
+                )
+                .map_err(map_rusqlite)?;
+            Ok(purged as u64)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +313,35 @@ mod tests {
         let stored = block_on(repo.get(&id)).unwrap().unwrap();
         assert!(stored.body_retained);
         assert_eq!(stored.body_text.as_deref(), Some("kept body"));
+    }
+
+    #[test]
+    fn purge_bodies_clears_retained_bodies_but_keeps_the_hash() {
+        // The down-level purge: after opting in and storing a body, lowering retention purges it
+        // — body_text NULL, body_retained 0 — while body_hash (identity) survives.
+        let repo = repo();
+        let kept = MessageId::fresh();
+        block_on(repo.insert(new_message(&kept, Some("opted-in body"), RetentionLevel::Bodies)))
+            .unwrap();
+        let meta = MessageId::fresh();
+        block_on(repo.insert(new_message(&meta, Some("never stored"), RetentionLevel::Metadata)))
+            .unwrap();
+
+        // Only the one retained body is purged.
+        let purged = block_on(repo.purge_bodies()).unwrap();
+        assert_eq!(purged, 1, "exactly the one retained body is purged");
+
+        let after = block_on(repo.get(&kept)).unwrap().unwrap();
+        assert_eq!(after.body_text, None, "the body is gone after the purge");
+        assert!(!after.body_retained);
+        assert_eq!(
+            after.body_hash.as_deref(),
+            Some("bodyhash"),
+            "identity hash survives the purge"
+        );
+
+        // A second purge is a no-op (idempotent).
+        assert_eq!(block_on(repo.purge_bodies()).unwrap(), 0);
     }
 
     #[test]

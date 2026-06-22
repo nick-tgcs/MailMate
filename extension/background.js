@@ -22,29 +22,37 @@
 // from a new message is not missed.
 
 /* global NativeHost, HOST_PHASE, registerContextMenus, readMessageForHost, applyPlannedAction,
-   openDraftFromResponse, executeMailCommand, consumeHostMove, openFollowupDraft,
-   surfaceNeedsAttention, showDesktopNotification, getComposeDraft */
+   openDraftFromResponse, executeMailCommand, consumeHostMove, consumeHostTag, openFollowupDraft,
+   surfaceNeedsAttention, showDesktopNotification, getComposeDraft, setBodyRetention */
 
 const host = new NativeHost();
+
+// The dashboard-space id, set once ensureSpace() resolves. Declared up here (not beside the space
+// section far below) because the FIRST onStatusChange fires synchronously during load — before that
+// section runs — and refreshBadges() -> updateSpaceBadge() reads it; a `let` declared later would be
+// in the temporal dead zone and reject the badge refresh on every cold start.
+let spaceId = null;
 
 // --- Connection health: HostStatus -> toolbar badge + popup broadcast ------------------
 // Every connection surface derives from this one status, so they can never disagree. The
 // toolbar `action` badge is the always-on indicator; open popups also get a live push.
 host.onStatusChange((status) => {
-  updateToolbarBadge(status);
+  // Drive the body-retention gate from the host's EFFECTIVE (consent-gated) retention level, so
+  // a body is forwarded only when the host actually retains bodies — never hard-coded.
+  if (status && status.retention !== undefined) {
+    setBodyRetention(status.retention);
+  }
   // Push to any open popup or dashboard; harmless to fail if none is listening.
   browser.runtime.sendMessage({ type: "mm:statusChanged", status }).catch(() => {});
-  // The aggregate space badge folds in the pending-proposal count, which needs a live host, so
-  // recompute whenever the connection state changes.
-  recomputeSpaceBadge();
+  // Refresh BOTH badges (toolbar action + dashboard space): connection state owns the toolbar when
+  // the host isn't ready, otherwise it shows the aggregate of work waiting.
+  refreshBadges();
 });
 
-// Map the connection phase onto the toolbar button's badge + tooltip (interaction-design.md
-// §"Connection health"). Disconnected/mismatch raise a visible "!"; connecting is a muted
-// "…"; ready is calm (no badge).
-function updateToolbarBadge(status) {
+// Map the connection phase onto a toolbar badge spec (interaction-design.md §"Connection health").
+// Disconnected/mismatch raise a visible "!"; connecting is a muted "…".
+function connectionBadge(phase) {
   const byPhase = {
-    [HOST_PHASE.ready]: { text: "", color: "#2e7d32", title: "MailMate — connected" },
     [HOST_PHASE.connecting]: { text: "…", color: "#9e9e9e", title: "MailMate — connecting…" },
     [HOST_PHASE.disconnected]: {
       text: "!",
@@ -57,10 +65,32 @@ function updateToolbarBadge(status) {
       title: "MailMate — version mismatch (update one side)",
     },
   };
-  const badge = byPhase[status.phase] || byPhase[HOST_PHASE.connecting];
-  browser.action.setBadgeText({ text: badge.text });
-  browser.action.setBadgeBackgroundColor({ color: badge.color });
-  browser.action.setTitle({ title: badge.title });
+  return byPhase[phase] || byPhase[HOST_PHASE.connecting];
+}
+
+// The toolbar button's badge. When the host isn't ready, the connection state owns it (a down host
+// is the most urgent thing). When ready, it shows the aggregate count of work waiting — red when a
+// review-required suggestion is among it, amber for follow-ups/proposals only, calm (no badge) at
+// zero.
+function updateToolbarBadge(status, agg) {
+  let badge;
+  if (status.phase === HOST_PHASE.ready) {
+    const total = (agg && agg.total) || 0;
+    const reviews = (agg && agg.reviews) || 0;
+    badge = {
+      text: total > 0 ? String(total) : "",
+      color: reviews > 0 ? "#c0392b" : "#e67e22",
+      title:
+        total > 0
+          ? `MailMate — ${total} item${total === 1 ? "" : "s"} need your attention`
+          : "MailMate — connected",
+    };
+  } else {
+    badge = connectionBadge(status.phase);
+  }
+  browser.action.setBadgeText({ text: badge.text }).catch(() => {});
+  browser.action.setBadgeBackgroundColor({ color: badge.color }).catch(() => {});
+  browser.action.setTitle({ title: badge.title }).catch(() => {});
 }
 
 // --- Popup <-> background request router -----------------------------------------------
@@ -76,8 +106,15 @@ const POPUP_HANDLERS = {
   "mm:dismiss": (m) => dismissSuggestion(m),
   "mm:undo": (m) => undoAuto(m),
   "mm:correctLabel": (m) => correctLabel(m),
+  "mm:signalWrong": (m) => signalWrong(m),
   "mm:notJunk": (m) => markNotJunk(m),
+  "mm:junk": (m) => markJunk(m),
+  "mm:markRead": (m) => markRead(m),
+  "mm:draftReply": (m) => draftReply(m),
   "mm:move": (m) => moveMessage(m),
+  "mm:unsubscribe": (m) => unsubscribe(m),
+  "mm:openDashboard": (m) => openDashboard(m),
+  "mm:aggregate": () => aggregateForPopup(),
   "mm:folders": () => listFolders(),
   // Dashboard space.
   "mm:reviewQueue": () => getReviewQueue(),
@@ -85,6 +122,11 @@ const POPUP_HANDLERS = {
   "mm:listActivity": (m) =>
     hostCall("list_recent_activity", { limit: m.limit || 80, event_type_filter: m.eventTypeFilter || null }),
   "mm:listProposals": () => hostCall("list_pending_reviews", {}),
+  // Rules manager: list every evaluated + disabled rule, and flip a rule's lifecycle status
+  // (enable / disable / promote-to-active) — the host hot-reloads so the change is live at once.
+  "mm:listRules": () => hostCall("list_rules", {}),
+  "mm:setRuleStatus": (m) =>
+    hostCall("set_rule_status", { rule_id: m.ruleId, kind: m.kind, status: m.status }),
   "mm:reviewProposal": (m) =>
     hostCall("review_rule_proposal", {
       proposal_id: m.proposalId,
@@ -99,6 +141,15 @@ const POPUP_HANDLERS = {
       follow_up_tick_seconds: m.followUpTickSeconds,
       catch_up_on_launch: m.catchUpOnLaunch,
     }),
+  // Triage tuning (Phase 5): per-category action policy, per-account scope, tag→category mapping.
+  // Each is a host config write; the host re-reads and returns the fresh snapshot, which options
+  // confirms against (the "host owns the truth" invariant).
+  "mm:setCategoryPolicy": (m) =>
+    hostCall("set_category_policy", { category: m.category, policy: m.policy }),
+  "mm:setAccountScope": (m) =>
+    hostCall("set_account_scope", { account_id: m.accountId, enabled: Boolean(m.enabled) }),
+  "mm:setTagMapping": (m) =>
+    hostCall("set_tag_mapping", { tag: m.tag, category: m.category }),
   "mm:setProvider": (m) =>
     hostCall("set_provider", {
       provider_id: m.providerId,
@@ -112,7 +163,21 @@ const POPUP_HANDLERS = {
   // Provider model discovery: probe an endpoint (a saved provider_id attaches its stored key for
   // an authenticated cloud catalog) so options can offer a pick-list instead of free text.
   "mm:listModels": (m) =>
-    hostCall("list_models", { kind: m.kind, endpoint: m.endpoint, provider_id: m.providerId || null }),
+    hostCall(
+      "list_models",
+      { kind: m.kind, endpoint: m.endpoint, provider_id: m.providerId || null },
+      undefined,
+      20000, // a catalog probe should be quick; bound it so a stalled endpoint errors, not hangs
+    ),
+  // Test connection: probe a provider for a REAL liveness result (reachable + model_count, or an
+  // error string). A down endpoint comes back ok with reachable:false — it is data, not a failure.
+  "mm:testProvider": (m) =>
+    hostCall(
+      "test_provider",
+      { kind: m.kind, endpoint: m.endpoint, provider_id: m.providerId || null },
+      undefined,
+      20000,
+    ),
   // Follow-ups pipeline.
   "mm:listFollowups": (m) =>
     hostCall("list_followups", { status_filter: m.statusFilter || null, limit: m.limit || 100 }),
@@ -126,38 +191,291 @@ const POPUP_HANDLERS = {
   "mm:followupReview": (m) =>
     hostCall("review_followup", { workflow_instance_id: m.workflowInstanceId, resolution: m.resolution }),
   "mm:followupCancel": (m) => hostCall("cancel_sequence", { pipeline_item_id: m.pipelineItemId }),
-  // Compose review panel: the draft's safety context + the provider posture in one round-trip.
+  // Compose review panel: the draft's annotation + provider posture, and a steered re-draft.
   "mm:composeContext": (m) => composeContext(m.tabId),
+  "mm:regenerateDraft": (m) => regenerateDraft(m),
+  // First-run backfill: sweep existing mail through the dry-run triage path (applies nothing).
+  "mm:triageExisting": () => startBackfill(),
+  "mm:backfillStatus": () => backfillStatus(),
+  "mm:backfillControl": (m) => backfillControl(m && m.action),
 };
+
+// --- First-run backfill ("Triage my existing mail") -----------------------------------
+//
+// One tap pages `browser.messages.query` and feeds each page to the host's `triage_existing_mail`
+// (a DRY RUN — the host classifies and mines deliberate folder placements but mutates no mail).
+// The background owns the loop; the dashboard renders the progress chip from `mm:backfillStatus`
+// and steers it with `mm:backfillControl`. Resumable across an event-page nap via storage.local.
+
+const BACKFILL_KEY = "mm:backfill";
+const BACKFILL_PAGE = 40; // messages per host round-trip
+const BACKFILL_CAP = 5000; // a sanity bound so a huge mailbox can't run unbounded
+
+let backfill = freshBackfill();
+
+function freshBackfill() {
+  return {
+    running: false,
+    paused: false,
+    cancelled: false,
+    total: 0,
+    done: 0,
+    classified: 0,
+    needs_review: 0,
+    placements: 0,
+    done_at: null,
+  };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function startBackfill() {
+  if (backfill.running) return { ok: true, started: false, running: true };
+  if (host.status.phase !== HOST_PHASE.ready) {
+    return { ok: false, error: "MailMate host not connected" };
+  }
+  backfill = { ...freshBackfill(), running: true };
+  // Kick the loop without blocking this message's reply — the dashboard polls for progress.
+  runBackfill().catch((e) => {
+    console.warn("[MailMate] backfill failed:", errMessage(e));
+    backfill.running = false;
+    backfill.done_at = Date.now();
+  });
+  return { ok: true, started: true };
+}
+
+async function backfillStatus() {
+  // Hydrate the last finished summary across an event-page restart so the dashboard can still
+  // show "Triaged N messages" after the worker was suspended.
+  if (!backfill.running && !backfill.done_at) {
+    try {
+      const got = await browser.storage.local.get(BACKFILL_KEY);
+      if (got[BACKFILL_KEY]) backfill = { ...backfill, ...got[BACKFILL_KEY], running: false };
+    } catch {
+      /* no storage — report the in-memory state */
+    }
+  }
+  return { ok: true, ...backfill };
+}
+
+function backfillControl(action) {
+  if (action === "pause") backfill.paused = true;
+  else if (action === "resume") backfill.paused = false;
+  else if (action === "cancel") backfill.cancelled = true;
+  return { ok: true, ...backfill };
+}
+
+async function runBackfill() {
+  try {
+    let page = await browser.messages.query({});
+    while (page) {
+      if (backfill.cancelled || backfill.done >= BACKFILL_CAP) break;
+      while (backfill.paused && !backfill.cancelled) await sleep(300);
+      if (backfill.cancelled) break;
+
+      const headers = page.messages || [];
+      const messages = [];
+      for (const h of headers) {
+        try {
+          messages.push(await readMessageForHost(h));
+        } catch (e) {
+          console.debug("[MailMate] backfill skip:", errMessage(e));
+        }
+      }
+      if (messages.length) {
+        const res = await host.request("triage_existing_mail", { messages, record_placements: true });
+        backfill.classified += (res && res.classified) || 0;
+        backfill.needs_review += (res && res.needs_review) || 0;
+        backfill.placements += (res && res.placements_recorded) || 0;
+      }
+      backfill.done += headers.length;
+      backfill.total = backfill.done; // best-effort: TB does not give a cheap total up front
+      page = page.id ? await browser.messages.continueList(page.id) : null;
+    }
+  } finally {
+    backfill.running = false;
+    backfill.done_at = Date.now();
+    try {
+      await browser.storage.local.set({
+        [BACKFILL_KEY]: {
+          done_at: backfill.done_at,
+          classified: backfill.classified,
+          needs_review: backfill.needs_review,
+          placements: backfill.placements,
+        },
+      });
+    } catch {
+      /* best-effort persistence */
+    }
+  }
+}
 
 // The composeAction panel's context: the MailMate draft annotation for this compose window (or
 // null for a hand-written compose) plus the provider posture, so the panel can render the
-// rationale + safety verdict and the degraded "drafting needs a provider" state honestly.
+// rationale + commitments guard and the degraded "drafting needs a provider" state honestly.
+// `providerConfigured` comes from `provider_status.available` (computed by the host's build_provider,
+// so it can't drift from what the draft path would actually get); `provider` carries kind + model
+// for the "Drafted via …" provenance line.
 async function composeContext(tabId) {
   const draft = typeof tabId === "number" ? getComposeDraft(tabId) : null;
   let providerConfigured = null; // null = unknown (host not ready / no admin)
+  let provider = null;
   if (host.status.phase === HOST_PHASE.ready) {
     try {
-      const settings = await host.request("get_settings");
-      providerConfigured = Boolean(settings && settings.default_provider);
+      const status = await host.request("provider_status");
+      providerConfigured = Boolean(status && status.available);
+      if (status && status.provider) {
+        provider = { kind: status.provider.kind, model: status.provider.model };
+      }
     } catch {
       /* leave unknown — the panel degrades to a neutral provider line */
     }
   }
-  return { ok: true, draft, providerConfigured };
+  return { ok: true, draft, providerConfigured, provider };
+}
+
+// Build + run a draft over the host, open it as a review-required Thunderbird draft, and stash its
+// context (so the panel can annotate and regenerate it). Shared by the context-menu action and any
+// future draft entry point.
+async function runDraft(request, inReplyToMessageId) {
+  const draft = await host.request("draft_reply", request);
+  await openDraftFromResponse(draft, inReplyToMessageId, request);
+  return draft;
+}
+
+// Re-draft the reply for an open compose tab, folding the panel's steer (quick-steer chips +
+// free-text) into the host's `regenerate_draft`, then replacing the editable compose body in place
+// (still a draft; still never sent). Returns the SAME shape as composeContext so the panel
+// re-renders with the fresh rationale + guard.
+async function regenerateDraft(m) {
+  const tabId = m && m.tabId;
+  const ctx = typeof tabId === "number" ? getComposeDraft(tabId) : null;
+  if (!ctx || !ctx.request) {
+    return { ok: false, error: "no MailMate draft to regenerate in this window" };
+  }
+  let draft;
+  try {
+    draft = await host.request("regenerate_draft", {
+      ...ctx.request,
+      adjustments: m.adjustments || [],
+      steer: m.steer || null,
+    });
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+  try {
+    await browser.compose.setComposeDetails(tabId, { plainTextBody: draft.body, isPlainText: true });
+  } catch (e) {
+    return { ok: false, error: `couldn't update the draft: ${String(e && e.message ? e.message : e)}` };
+  }
+  // Re-stash the fresh annotation (keeping the request + reply-to so a further Regenerate works).
+  stashComposeDraft(tabId, {
+    ...ctx,
+    draft_id: draft.draft_id || ctx.draft_id,
+    safety_notes: draft.safety_notes || [],
+    commitments: draft.commitments || null,
+    rationale: draft.rationale || null,
+    drafted_body: draft.body || "",
+  });
+  // Drafting just demonstrably succeeded, so pin providerConfigured:true — don't let a transient
+  // failure of the follow-up provider_status probe hide the refine controls the user just used.
+  const ctx2 = await composeContext(tabId);
+  return { ...ctx2, providerConfigured: true };
+}
+
+// --- Edit-divergence learning hook ----------------------------------------------------
+// When the user sends a MailMate draft they had EDITED, that divergence is a signal the draft
+// missed the mark. `compose.onBeforeSend` fires with the final body just before Thunderbird sends
+// — MailMate itself never sends; we only observe. We compare the final body to what MailMate
+// drafted; a meaningful edit records a `draft_diverged` signal. We never cancel or modify the
+// message (return {}), so this is purely observational.
+// tab.id -> recipients captured at onBeforeSend, flushed when the send is confirmed.
+const pendingSendRecipients = new Map();
+
+// The recipients (To + Cc) of a compose, from the onBeforeSend details. Each entry is a full
+// address string the host parses to a domain — the learn-from-Sent / VIP signal.
+function recipientsOf(details) {
+  if (!details) return [];
+  return [...(details.to || []), ...(details.cc || [])].filter((r) => typeof r === "string" && r);
+}
+
+if (typeof browser !== "undefined" && browser.compose && browser.compose.onBeforeSend) {
+  browser.compose.onBeforeSend.addListener((tab, details) => {
+    recordDraftDivergence(tab, details).catch(() => {});
+    // Stash the recipients now (onBeforeSend reliably carries details.to/cc); we only REPORT them
+    // once onAfterSend confirms the message actually left, so a cancelled send teaches nothing.
+    if (tab && tab.id != null) {
+      pendingSendRecipients.set(tab.id, recipientsOf(details));
+    }
+    return {}; // never touch the user's Send
+  });
+}
+
+// onAfterSend fires once the message has actually been sent. Report the stashed recipients as
+// outbound evidence so the host can learn VIP/priority rules for people the user emails often. We
+// never send or modify anything here — this is purely observational, like the divergence hook.
+if (typeof browser !== "undefined" && browser.compose && browser.compose.onAfterSend) {
+  browser.compose.onAfterSend.addListener((tab, sendInfo) => {
+    const tabId = tab && tab.id != null ? tab.id : null;
+    const recipients = tabId != null ? pendingSendRecipients.get(tabId) || [] : [];
+    if (tabId != null) pendingSendRecipients.delete(tabId);
+    // Only a real "send" mode counts as outbound (a save-as-draft is not a sent message).
+    if (sendInfo && sendInfo.mode && sendInfo.mode !== "sendNow" && sendInfo.mode !== "sendLater") {
+      return;
+    }
+    if (!recipients.length) return;
+    host.request("record_sent_mail", { recipients }).catch(() => {});
+  });
+}
+
+// A compose window can close WITHOUT onAfterSend firing — the user cancels the send dialog or it
+// fails — which would otherwise strand its recipient stash forever. Drop it when the tab closes so
+// the Map can't grow unbounded across a long session.
+if (typeof browser !== "undefined" && browser.tabs && browser.tabs.onRemoved) {
+  browser.tabs.onRemoved.addListener((tabId) => {
+    pendingSendRecipients.delete(tabId);
+  });
+}
+
+async function recordDraftDivergence(tab, details) {
+  const ctx = getComposeDraft(tab && tab.id);
+  if (!ctx || !ctx.draft_id) return; // not a MailMate draft — nothing to learn from
+  const original = ctx.drafted_body || "";
+  if (!original) return;
+  const finalBody = (details && (details.plainTextBody || details.body)) || "";
+  // Containment, not equality: Thunderbird appends the quoted original to a reply, so an unedited
+  // draft still CONTAINS MailMate's text verbatim. Only a real edit breaks containment.
+  if (collapseWs(finalBody).includes(collapseWs(original))) return; // sent unchanged — no signal
+  await host.request("record_user_action", {
+    event_type: "draft_diverged",
+    draft_id: ctx.draft_id,
+    thread_id: ctx.request && ctx.request.thread_id ? ctx.request.thread_id : null,
+    // The replied-to message correlates the divergence to a message even when the context-menu
+    // draft carried no thread id (its only entry point omits one) — keeps the audit row anchored.
+    thunderbird_message_id: ctx.reply_to_message_id != null ? String(ctx.reply_to_message_id) : null,
+    user_initiated: true,
+  });
+}
+
+// Collapse runs of whitespace so trivial reflow differences don't read as an edit.
+function collapseWs(s) {
+  return String(s).replace(/\s+/g, " ").trim();
 }
 
 // A guarded host round-trip for the dashboard's read/write requests. Returns the host payload
 // merged onto { ok:true } (or a custom mapper's shape); a disconnected host or a verb this build
 // doesn't speak resolves to { ok:false, error } so the dashboard degrades, never lies.
-async function hostCall(type, payload, mapper) {
+async function hostCall(type, payload, mapper, timeoutMs) {
   if (host.status.phase !== HOST_PHASE.ready) {
+    console.warn(`[MailMate] hostCall ${type}: host not ready (${host.status.phase})`);
     return { ok: false, error: "MailMate host not connected", reason: "host_not_ready" };
   }
   try {
-    const result = await host.request(type, payload || {});
+    const result = await host.request(type, payload || {}, timeoutMs);
+    console.debug(`[MailMate] hostCall ${type}: ok`);
     return mapper ? mapper(result) : { ok: true, ...result };
   } catch (e) {
+    console.warn(`[MailMate] hostCall ${type}: ${errMessage(e)}`);
     return { ok: false, error: errMessage(e) };
   }
 }
@@ -266,7 +584,9 @@ async function undoAuto({ action, decisionId, messageId }) {
       if (!action.reverses_to) {
         return { ok: false, error: "no prior folder to undo the move" };
       }
-      reverse = { kind: "move", message_id: action.message_id, to_folder: action.reverses_to };
+      // The host enriches an auto-applied move with the full inverse action (a move back to the
+      // origin folder), so the Undo just replays it rather than reconstructing the target.
+      reverse = action.reverses_to;
       break;
     default:
       // require_review / create_draft (and anything else) are not reversible mail mutations.
@@ -328,6 +648,72 @@ async function correctLabel({ decisionId, messageId, label, priorLabel }) {
   return { ok: true };
 }
 
+// "This reason is wrong": record the rejected salient signal as negative classification
+// feedback keyed on the signal id. No mail mutation — nothing visible happened, so a failed
+// record IS the failure and is reported as such (mirrors dismissSuggestion).
+async function signalWrong({ decisionId, messageId, signalId, priorLabel }) {
+  try {
+    await host.request("record_user_action", {
+      event_type: "signal_marked_wrong",
+      decision_id: decisionId,
+      thunderbird_message_id: String(messageId),
+      signal_id: signalId,
+      prior_label: priorLabel || null,
+      user_initiated: true,
+    });
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  return { ok: true };
+}
+
+// One-click unsubscribe from a List-Unsubscribe affordance the host parsed. We prefer a
+// pre-addressed compose (the user stays in control; no silent tracking ping). If only an RFC
+// 8058 one-click HTTPS target exists, a single background POST does it; otherwise we open the
+// unsubscribe page in the browser. Never auto-sends anything: a compose still waits for the user.
+async function unsubscribe({ unsubscribe: u }) {
+  if (!u) {
+    return { ok: false, error: "no unsubscribe information for this message" };
+  }
+  if (u.mailto && u.mailto.to) {
+    try {
+      await browser.compose.beginNew({
+        to: [u.mailto.to],
+        subject: u.mailto.subject || "unsubscribe",
+        body: "Please unsubscribe this address from your list.",
+      });
+      return { ok: true, method: "compose" };
+    } catch (e) {
+      return { ok: false, error: errMessage(e) };
+    }
+  }
+  if (u.one_click && u.http_url) {
+    try {
+      await fetch(u.http_url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "List-Unsubscribe=One-Click",
+      });
+      return { ok: true, method: "post" };
+    } catch (e) {
+      return { ok: false, error: errMessage(e) };
+    }
+  }
+  if (u.http_url) {
+    try {
+      if (browser.windows && browser.windows.openDefaultBrowser) {
+        await browser.windows.openDefaultBrowser(u.http_url);
+      } else {
+        await browser.tabs.create({ url: u.http_url });
+      }
+      return { ok: true, method: "open" };
+    } catch (e) {
+      return { ok: false, error: errMessage(e) };
+    }
+  }
+  return { ok: false, error: "no usable unsubscribe target" };
+}
+
 // "Not junk" / "This is legitimate": flip the junk flag (the visible effect), then record the
 // correction best-effort — a lost record must not be reported as a failed correction.
 async function markNotJunk({ messageId }) {
@@ -341,6 +727,43 @@ async function markNotJunk({ messageId }) {
   return { ok: true };
 }
 
+// "Junk & block": flip the junk flag (the visible effect), then record the spam correction
+// best-effort — the strongest spam-axis teaching signal. A user-initiated junk, so it is a real
+// correction (not a host echo).
+async function markJunk({ messageId }) {
+  const id = Number(messageId);
+  try {
+    await browser.messages.update(id, { junk: true });
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  await recordBestEffort(() => recordJunkChanged(id, true), "junk correction");
+  return { ok: true };
+}
+
+// "Mark read": a plain client mutation, no learning signal (reading is not a classification
+// correction). Reported truthfully so the panel can confirm or surface a failure.
+async function markRead({ messageId }) {
+  try {
+    await browser.messages.update(Number(messageId), { read: true });
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  return { ok: true };
+}
+
+// "Draft a reply": open a real reply compose window addressed to the sender. The draft is the
+// user's to edit and send — MailMate never sends (the host has no send path); this is just the
+// compose affordance, so the panel's primary action set is complete.
+async function draftReply({ messageId }) {
+  try {
+    await browser.compose.beginReply(Number(messageId), "replyToSender");
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+  return { ok: true };
+}
+
 // Trigger a real move; the onMoved listener below records the message_moved filing correction
 // (this is NOT a host-commanded move, so it is not suppressed). One genuine interaction.
 async function moveMessage({ messageId, folder }) {
@@ -350,6 +773,32 @@ async function moveMessage({ messageId, folder }) {
     return { ok: false, error: errMessage(e) };
   }
   return { ok: true };
+}
+
+// Open the dashboard tab, optionally deep-linked to a message's explanation timeline (the
+// panel's "Explain in dashboard" link). Reuses an open dashboard tab when possible.
+async function openDashboard({ explain, tab } = {}) {
+  // Deep-link to a dashboard tab via the same durable focus mechanism notifications use: enterApp
+  // consumes mm:focusTab on a cold load; an already-open dashboard gets the live focusTab event.
+  if (tab) {
+    await browser.storage.session.set({ "mm:focusTab": tab }).catch(() => {});
+  }
+  const base = browser.runtime.getURL("dashboard.html");
+  const url = explain ? `${base}#explain=${encodeURIComponent(explain)}` : base;
+  try {
+    await browser.tabs.create({ url });
+    if (tab) {
+      browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "focusTab", tab }).catch(() => {});
+    }
+    return { ok: true };
+  } catch (e) {
+    // The open failed, so clear the focus stash — otherwise the NEXT cold dashboard open (from any
+    // entry point) would consume this stale tab and jump somewhere the user didn't just ask for.
+    if (tab) {
+      browser.storage.session.remove("mm:focusTab").catch(() => {});
+    }
+    return { ok: false, error: errMessage(e) };
+  }
 }
 
 // Flat, file-able folder list for the panel's Move picker. Degrades to an empty list (the
@@ -410,8 +859,12 @@ host.onNotification(async (type, payload) => {
     browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "followups" }).catch(() => {});
   } else if (type === "proposal_ready") {
     // The curator promoted a learned behavior to a pending proposal — refresh the badge + ping.
-    await recomputeSpaceBadge();
-    browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "proposals" }).catch(() => {});
+    // Carry the rule's title so the dashboard can show the same-session crystallization "aha"
+    // ("MailMate just learned …") rather than a silent badge bump.
+    await refreshBadges();
+    browser.runtime
+      .sendMessage({ type: "mm:dashboardEvent", event: "proposals", title: payload && payload.title })
+      .catch(() => {});
     showDesktopNotification(type, payload);
   } else {
     console.info("[MailMate] notification:", type, payload);
@@ -434,14 +887,14 @@ registerContextMenus({
     console.info("[MailMate] classification:", result);
   },
   draftReply: async (messageHeader) => {
-    const draft = await host.request("draft_reply", {
+    const request = {
       message_ids: [String(messageHeader.id)],
       subject: messageHeader.subject || "",
       counterparty: String(messageHeader.author || ""),
       excerpt: messageHeader.subject || "",
       forbidden_commitments: ["dates", "prices", "payment_changes", "legal_positions"],
-    });
-    await openDraftFromResponse(draft, messageHeader.id);
+    };
+    await runDraft(request, messageHeader.id);
   },
   recordCorrection: async (messageHeader, isSpam) => {
     await applyJunkCorrection(messageHeader.id, isSpam);
@@ -454,6 +907,12 @@ registerContextMenus({
 // user-initiated move would double-route it AND poison the filing-correction signal that feeds
 // crystallization. consumeHostMove (keyed by the stable RFC Message-ID) suppresses those echoes;
 // only a genuine user move reaches the host as a filing correction.
+// The account a message belongs to, read off its folder — folded into a correction so the host can
+// scope a learned rule per account. `null` when unknown (the host then falls back to its cache).
+function accountOf(messageHeader) {
+  return messageHeader && messageHeader.folder ? messageHeader.folder.accountId : null;
+}
+
 browser.messages.onMoved.addListener(async (_originalMessages, movedMessages) => {
   for (const messageHeader of movedMessages.messages) {
     if (consumeHostMove(messageHeader.headerMessageId)) {
@@ -463,10 +922,111 @@ browser.messages.onMoved.addListener(async (_originalMessages, movedMessages) =>
       event_type: "message_moved",
       thunderbird_message_id: String(messageHeader.id),
       to_folder_id: messageHeader.folder ? messageHeader.folder.path : null,
+      account_id: accountOf(messageHeader),
       user_initiated: true,
     });
   }
 });
+
+// onUpdated fires when a message's properties change, including its tags. A tag add/remove is a
+// first-class category signal (tags-as-signal), but onUpdated reports only the NEW tag set, so we
+// diff it against the last-seen set per message to recover the add/remove direction. Tags MailMate
+// itself just applied are echo-suppressed via consumeHostTag (the twin of the onMoved guard), so
+// MailMate never learns from its own tagging — only a genuine user tag reaches the host.
+const lastSeenTags = new Map(); // tb message id -> Set<tag>
+
+browser.messages.onUpdated.addListener((messageHeader, changedProperties) => {
+  if (!changedProperties || !("tags" in changedProperties)) {
+    return; // not a tag change
+  }
+  const next = new Set(messageHeader.tags || []);
+  const prev = lastSeenTags.get(messageHeader.id) || new Set();
+  lastSeenTags.set(messageHeader.id, next);
+
+  for (const tag of next) {
+    if (prev.has(tag)) {
+      continue; // unchanged
+    }
+    if (consumeHostTag(messageHeader.headerMessageId, tag)) {
+      continue; // MailMate added it — not a user signal
+    }
+    host.request("record_user_action", {
+      event_type: "tag_changed",
+      thunderbird_message_id: String(messageHeader.id),
+      tag,
+      added: true,
+      account_id: accountOf(messageHeader),
+      user_initiated: true,
+    });
+  }
+  for (const tag of prev) {
+    if (next.has(tag)) {
+      continue; // unchanged
+    }
+    host.request("record_user_action", {
+      event_type: "tag_changed",
+      thunderbird_message_id: String(messageHeader.id),
+      tag,
+      added: false,
+      account_id: accountOf(messageHeader),
+      user_initiated: true,
+    });
+  }
+});
+
+// Per-message header badge: when a message is displayed, classify it (best-effort) and set the
+// messageDisplayAction badge so the verdict is visible at a glance — an in-flight dot while it
+// classifies, then green "✓" benign / amber "!" risky / blue "·" needs-review, or no badge when
+// the host is down. Inform-only: it takes no action and warms the classify feature cache.
+if (browser.messageDisplay && browser.messageDisplay.onMessageDisplayed) {
+  browser.messageDisplay.onMessageDisplayed.addListener((tab, message) => {
+    updateMessageBadge(tab.id, message.id).catch(() => {});
+  });
+}
+
+async function updateMessageBadge(tabId, messageId) {
+  const set = (text, color) => {
+    try {
+      browser.messageDisplayAction.setBadgeText({ tabId, text });
+      if (text) {
+        browser.messageDisplayAction.setBadgeBackgroundColor({ tabId, color });
+      }
+    } catch (e) {
+      /* the badge is cosmetic — never let it throw into the event loop */
+    }
+  };
+  if (host.status.phase !== HOST_PHASE.ready) {
+    set("", null);
+    return;
+  }
+  set("·", "#9e9e9e"); // in-flight dot
+  try {
+    const reply = await classifyForPanel(String(messageId));
+    if (!reply.ok) {
+      set("", null);
+      return;
+    }
+    const badge = badgeForClassification(reply.result.classification || {});
+    set(badge.text, badge.color);
+  } catch (e) {
+    set("", null);
+  }
+}
+
+// Map a verdict onto a per-message header badge: amber "!" for a risky verdict, blue "·" when it
+// needs review, green "✓" for a confident benign verdict.
+function badgeForClassification(c) {
+  const risky =
+    (c.labels || []).some((l) => /spam|phish|junk|suspicious|malware/.test(String(l).toLowerCase())) ||
+    Math.max(c.spam_score || 0, c.phishing_score || 0) >= 0.6;
+  if (risky) {
+    return { text: "!", color: "#e67e22" };
+  }
+  if (c.needs_review) {
+    return { text: "·", color: "#1565c0" };
+  }
+  return { text: "✓", color: "#2e7d32" };
+}
 
 // --- Dashboard space: review-queue buffer, follow-up attention, aggregate badge --------
 //
@@ -522,19 +1082,19 @@ async function resolveReview(decisionId) {
     REVIEW_KEY,
     items.filter((i) => i.decision_id !== decisionId),
   );
-  await recomputeSpaceBadge();
+  await refreshBadges();
   return { ok: true };
 }
 
 // Buffer a `classification_ready` decision and tell the open dashboard to refresh.
 async function surfaceReviewSuggestions(payload) {
   await bufferReview(payload);
-  await recomputeSpaceBadge();
+  await refreshBadges();
   browser.runtime.sendMessage({ type: "mm:dashboardEvent", event: "review" }).catch(() => {});
 }
 
 // Track distinct stale follow-ups (by workflow instance) for the aggregate badge. The live
-// Follow-ups pipeline view lands in Milestone 4; the count is correct in the meantime.
+// The follow-ups pipeline view is live in the dashboard; this keeps the toolbar count in sync.
 async function bumpFollowupAttention(payload) {
   const ids = await sessionGet(ATTENTION_KEY, []);
   const id = payload.workflow_instance_id;
@@ -542,13 +1102,14 @@ async function bumpFollowupAttention(payload) {
     ids.push(id);
     await sessionSet(ATTENTION_KEY, ids);
   }
-  await recomputeSpaceBadge();
+  await refreshBadges();
 }
 
 // --- Dashboard space registration + aggregate badge -----------------------------------
 
 const SPACE_NAME = "mailmate";
-let spaceId = null;
+// `spaceId` is declared near the top of the file (it is read by the first synchronous badge refresh
+// during load, long before this section runs).
 
 // Register (or re-attach to) the MailMate space exactly once. spaces.create throws if the name
 // already exists (e.g. after an event-page restart), so we query first and reuse the id.
@@ -564,19 +1125,17 @@ async function ensureSpace() {
       });
       spaceId = space.id;
     }
-    await recomputeSpaceBadge();
+    await refreshBadges();
   } catch (e) {
     console.warn("[MailMate] dashboard space registration failed:", e);
   }
 }
 
-// The aggregate toolbar badge = work the user must act on now: pending suggestions + stale
-// follow-ups + pending proposals. A buffered decision with ONLY auto-applied actions (the
-// crystallized path) is kept for Undo but is NOT work, so it is excluded from the count — only
-// decisions that still carry a review-required suggestion count. Red when suggestions are
-// waiting, amber when only follow-ups/proposals are. Suppressed at zero.
-async function recomputeSpaceBadge() {
-  if (spaceId == null) return;
+// The aggregate of work the user must act on now: pending suggestions + stale follow-ups +
+// pending proposals. A buffered decision with ONLY auto-applied actions (the crystallized path) is
+// kept for Undo but is NOT work, so only decisions that still carry a review-required suggestion
+// count. The pending-proposal count needs a live host; a transient error just omits it.
+async function computeAggregate() {
   const items = await sessionGet(REVIEW_KEY, []);
   const reviews = items.filter((i) => (i.review_required_actions || []).length > 0).length;
   const attention = (await sessionGet(ATTENTION_KEY, [])).length;
@@ -586,18 +1145,55 @@ async function recomputeSpaceBadge() {
       const r = await host.request("list_pending_reviews");
       proposals = (r.pending_reviews || []).length;
     } catch {
-      /* a transient host error just omits the proposal count from the badge */
+      /* a transient host error just omits the proposal count from the aggregate */
     }
   }
-  const total = reviews + attention + proposals;
-  try {
-    await browser.spaces.update(spaceId, null, {
-      badgeText: total > 0 ? String(total) : "",
-      badgeBackgroundColor: reviews > 0 ? "#c0392b" : "#e67e22",
+  return { reviews, attention, proposals, total: reviews + attention + proposals };
+}
+
+// Refresh BOTH badges (toolbar action + dashboard space) from ONE aggregate computation, so they
+// can never disagree. Skips the host round-trip when the host isn't ready (the count is then 0 and
+// the toolbar shows the connection state instead).
+async function refreshBadges() {
+  const zero = { reviews: 0, attention: 0, proposals: 0, total: 0 };
+  const agg = host.status.phase === HOST_PHASE.ready ? await computeAggregate() : zero;
+  // Re-read status AFTER the await: a disconnect may have landed while computeAggregate ran, and a
+  // stale count must not be painted onto either badge (they must never disagree).
+  const live = host.status.phase === HOST_PHASE.ready ? agg : zero;
+  updateToolbarBadge(host.status, live);
+  updateSpaceBadge(live);
+}
+
+// The dashboard-space tab badge: the same aggregate count, red when a review-required suggestion
+// is waiting, amber for follow-ups/proposals only. Suppressed at zero.
+function updateSpaceBadge(agg) {
+  if (spaceId == null) return;
+  browser.spaces
+    .update(spaceId, null, {
+      badgeText: agg.total > 0 ? String(agg.total) : "",
+      badgeBackgroundColor: agg.reviews > 0 ? "#c0392b" : "#e67e22",
+    })
+    .catch(() => {
+      /* badge update is cosmetic — never fatal */
     });
-  } catch {
-    /* badge update is cosmetic — never fatal */
+}
+
+// The popup's one round-trip: the aggregate breakdown + the pause kill-switch state.
+async function aggregateForPopup() {
+  const agg =
+    host.status.phase === HOST_PHASE.ready
+      ? await computeAggregate()
+      : { reviews: 0, attention: 0, proposals: 0, total: 0 };
+  let paused = false;
+  if (host.status.phase === HOST_PHASE.ready) {
+    try {
+      const settings = await host.request("get_settings");
+      paused = Boolean(settings && settings.paused);
+    } catch {
+      /* leave paused=false — the popup degrades to "running" rather than guessing */
+    }
   }
+  return { ok: true, ...agg, paused };
 }
 
 // Register the space on event-page start (fire and forget; failures are logged, not fatal).

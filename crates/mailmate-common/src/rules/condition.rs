@@ -114,6 +114,25 @@ pub enum FieldValue {
 }
 
 impl FieldValue {
+    /// Lift a captured [`FeatureValue`](crate::features::FeatureValue) into the predicate
+    /// value space, so an induced predicate compares against exactly the value the back-test
+    /// environment will hold. The two type spaces are deliberately distinct (a feature is the
+    /// classifier's input; a field value is the rule language's literal); this is the one
+    /// canonical bridge between them. A numeric feature becomes a `Float` (the rule engine's
+    /// numeric comparisons coerce `Int`/`Float` alike), and the structured escape-hatch
+    /// (`Json`) has no scalar predicate form, so it maps to `Null` (a predicate over it can
+    /// only test `exists`).
+    #[must_use]
+    pub fn from_feature(value: &crate::features::FeatureValue) -> Self {
+        use crate::features::FeatureValue as F;
+        match value {
+            F::Bool(b) => Self::Bool(*b),
+            F::Number(n) => Self::Float(*n),
+            F::Text(s) => Self::Text(s.clone()),
+            F::Json(_) => Self::Null,
+        }
+    }
+
     /// View as a number (`Int`/`Float`), for the numeric comparison operators.
     #[must_use]
     pub fn as_number(&self) -> Option<f64> {
@@ -190,6 +209,24 @@ mod tests {
             serde_json::from_value(json!({ "field": "thread_id", "op": "exists" })).unwrap();
         assert_eq!(p.op, Operator::Exists);
         assert_eq!(p.value, FieldValue::Null);
+    }
+
+    #[test]
+    fn from_feature_bridges_each_feature_kind_into_a_field_value() {
+        use crate::features::FeatureValue as F;
+        // A numeric feature lands as Float (the engine's numeric ops coerce Int/Float alike),
+        // so an induced `>= 5` predicate compares against the same number the back-test holds.
+        assert_eq!(FieldValue::from_feature(&F::Number(5.0)), FieldValue::Float(5.0));
+        assert_eq!(FieldValue::from_feature(&F::Bool(true)), FieldValue::Bool(true));
+        assert_eq!(
+            FieldValue::from_feature(&F::Text("fail".to_owned())),
+            FieldValue::Text("fail".to_owned())
+        );
+        // The structured escape-hatch has no scalar predicate form → Null (only `exists` applies).
+        assert_eq!(
+            FieldValue::from_feature(&F::Json(serde_json::json!({ "x": 1 }))),
+            FieldValue::Null
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! activation: the human-review and back-test gates still stand between it and a live rule.
 
 use mailmate_common::evidence::{EvidenceKind, EvidenceSourceKind, RuleEvidence};
-use mailmate_common::feedback::FollowUpFeedbackRow;
+use mailmate_common::feedback::{ClassificationFeedbackRow, FollowUpFeedbackRow};
 use mailmate_common::ids::{EvidenceId, ProposalId};
 use mailmate_common::proposal::{AgentProposal, EvidenceRef, ProposalKind, ProposalStatus};
 use mailmate_common::rules::condition::{Condition, FieldValue, Operator, Predicate};
@@ -17,7 +17,7 @@ use mailmate_common::rules::rule::{RiskLevel, RuleDraft, RuleKind, RuleScope, Ru
 use mailmate_common::time::Timestamp;
 use mailmate_common::workflow::WorkflowDraft;
 
-use crate::evidence::{ClassificationCluster, FilingCluster};
+use crate::evidence::FilingCluster;
 
 /// A `sender_domain == <domain>` predicate — the deterministic key both proposal kinds use.
 fn sender_domain_eq(domain: &str) -> Condition {
@@ -114,6 +114,9 @@ pub fn filing_proposal(
         workflow_draft: None,
         target_workflow_id: None,
         evidence_refs: refs,
+        // The engine stamps the real back-test on this filing proposal after the gate runs.
+        back_test: None,
+        conflicts: Vec::new(),
         source_provider: source.to_owned(),
         created_at: Timestamp::now(),
         reviewed_at: None,
@@ -121,20 +124,27 @@ pub fn filing_proposal(
     (proposal, evidence)
 }
 
-/// Build a classification-rule proposal (label mail from a sender domain) from a cluster of
-/// repeated corrections to the same label.
+/// Build a classification-rule proposal from an **induced multi-aspect condition**: the
+/// candidate labels mail matching `condition` as `label`, justified by the cluster's
+/// corrections. Unlike [`classification_proposal`] (a single `sender_domain ==` predicate at
+/// domain scope), the condition is whatever the induction composed — one clause or an `all(...)`
+/// of several — and the scope is the cluster's (account-bound or global). The engine stamps the
+/// real back-test (precision · positive support) after the gate; this builder leaves it `None`.
 #[must_use]
-pub fn classification_proposal(
-    cluster: &ClassificationCluster,
+pub fn classification_proposal_induced(
+    scope: RuleScope,
+    label: &str,
+    condition: Condition,
+    rows: &[ClassificationFeedbackRow],
     source: &str,
 ) -> (AgentProposal, Vec<RuleEvidence>) {
     let proposal_id = ProposalId::fresh();
     let draft = RuleDraft {
         kind: RuleKind::Classification,
-        scope: RuleScope::Domain,
-        condition: sender_domain_eq(&cluster.sender_domain),
+        scope,
+        condition,
         effect: RuleEffect {
-            set_labels: vec![cluster.label.clone()],
+            set_labels: vec![label.to_owned()],
             ..RuleEffect::new()
         },
     };
@@ -142,7 +152,7 @@ pub fn classification_proposal(
         &proposal_id,
         RuleKind::Classification,
         EvidenceSourceKind::Classification,
-        cluster.rows.iter().map(|r| {
+        rows.iter().map(|r| {
             (
                 r.id.clone(),
                 r.message_id.clone(),
@@ -154,14 +164,12 @@ pub fn classification_proposal(
         id: proposal_id,
         proposal_type: ProposalKind::NewRule,
         status: ProposalStatus::PendingReview,
-        title: format!("Label {} mail as {}", cluster.sender_domain, cluster.label),
+        title: format!("Label mail as {label}"),
         rationale: format!(
-            "You corrected {} messages from {} to {}.",
-            cluster.rows.len(),
-            cluster.sender_domain,
-            cluster.label
+            "You corrected {} messages to {label}; this rule reproduces that pattern.",
+            rows.len()
         ),
-        // A classification correction (spam/phishing) is higher-stakes than a filing move.
+        // A classification correction (spam/phishing/suspicious) is higher-stakes than a move.
         risk_level: RiskLevel::Medium,
         recommended_status: RuleStatus::ShadowMode,
         rule_draft: Some(draft),
@@ -170,11 +178,56 @@ pub fn classification_proposal(
         workflow_draft: None,
         target_workflow_id: None,
         evidence_refs: refs,
+        // The engine stamps the real back-test (precision · positive support) after induction.
+        back_test: None,
+        conflicts: Vec::new(),
         source_provider: source.to_owned(),
         created_at: Timestamp::now(),
         reviewed_at: None,
     };
     (proposal, evidence)
+}
+
+/// Build a VIP/priority `new_rule` proposal from outbound evidence: the user has sent mail to
+/// `domain` `send_count` times, so their inbound mail likely matters. The candidate is a
+/// deterministic **classification** rule `sender_domain == domain → priority high` — a model-free
+/// rule the user reviews, recommends `shadow_mode` (never auto-activated), and carries the send
+/// count in its rationale (the honest evidence; there is no precision back-test for a VIP signal,
+/// so `back_test` stays `None`).
+#[must_use]
+pub fn vip_proposal(domain: &str, send_count: usize, source: &str) -> AgentProposal {
+    AgentProposal {
+        id: ProposalId::fresh(),
+        proposal_type: ProposalKind::NewRule,
+        status: ProposalStatus::PendingReview,
+        title: format!("Treat {domain} mail as priority"),
+        rationale: format!(
+            "You've sent mail to {domain} {send_count} times — treat their incoming mail as high priority?"
+        ),
+        risk_level: RiskLevel::Low,
+        recommended_status: RuleStatus::ShadowMode,
+        rule_draft: Some(RuleDraft {
+            kind: RuleKind::Classification,
+            scope: RuleScope::Domain,
+            condition: sender_domain_eq(domain),
+            effect: RuleEffect {
+                priority: Some("high".to_owned()),
+                ..RuleEffect::new()
+            },
+        }),
+        target_rule_kind: None,
+        target_rule_id: None,
+        workflow_draft: None,
+        target_workflow_id: None,
+        // The supporting evidence is the outbound audit trail (counted by the engine), not a
+        // feedback-table row, so there are no typed evidence refs to link.
+        evidence_refs: Vec::new(),
+        back_test: None,
+        conflicts: Vec::new(),
+        source_provider: source.to_owned(),
+        created_at: Timestamp::now(),
+        reviewed_at: None,
+    }
 }
 
 /// Build a `new_workflow` proposal: a candidate follow-up cadence justified by repeated
@@ -212,6 +265,9 @@ pub fn workflow_proposal(
         workflow_draft: Some(draft),
         target_workflow_id: None,
         evidence_refs,
+        // A workflow (cadence) proposal has no filing back-test.
+        back_test: None,
+        conflicts: Vec::new(),
         source_provider: source.to_owned(),
         created_at: Timestamp::now(),
         reviewed_at: None,
@@ -221,10 +277,7 @@ pub fn workflow_proposal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailmate_common::features::{FeatureValue, FeatureVector};
-    use mailmate_common::feedback::{ClassificationFeedback, FeedbackPolarity};
-    use mailmate_common::feedback::{ClassificationFeedbackRow, FilingFeedbackRow};
-    use mailmate_common::feedback::{FilingFeedback, PinnedVersions};
+    use mailmate_common::feedback::{FeedbackPolarity, FilingFeedback, FilingFeedbackRow, PinnedVersions};
     use mailmate_common::ids::{FolderId, MessageId};
 
     fn filing_cluster() -> FilingCluster {
@@ -247,30 +300,6 @@ mod tests {
         }
     }
 
-    fn classification_cluster() -> ClassificationCluster {
-        let mut salient = FeatureVector::new();
-        salient.insert("sender_domain", FeatureValue::Text("paypa1.com".to_owned()));
-        let row = ClassificationFeedbackRow {
-            id: ClassificationFeedback::fresh_id(),
-            message_id: MessageId::fresh(),
-            pinned_versions: PinnedVersions::default(),
-            ai_label: Some("not_junk".to_owned()),
-            ai_score: None,
-            ai_rationale: None,
-            human_label: "phishing".to_owned(),
-            human_reason_code: None,
-            human_reason_text: None,
-            salient_features: salient,
-            polarity: FeedbackPolarity::Negative,
-            created_at: Timestamp::now(),
-        };
-        ClassificationCluster {
-            sender_domain: "paypa1.com".to_owned(),
-            label: "phishing".to_owned(),
-            rows: vec![row.clone(), row],
-        }
-    }
-
     #[test]
     fn filing_proposal_is_a_deterministic_action_draft_with_linked_evidence() {
         let (proposal, evidence) = filing_proposal(&filing_cluster(), "learning-engine");
@@ -289,18 +318,6 @@ mod tests {
         assert!(evidence
             .iter()
             .all(|e| e.evidence_kind == EvidenceKind::Override));
-    }
-
-    #[test]
-    fn classification_proposal_sets_labels_and_is_medium_risk() {
-        let (proposal, evidence) =
-            classification_proposal(&classification_cluster(), "learning-engine");
-        let draft = proposal.rule_draft.as_ref().unwrap();
-        assert_eq!(draft.kind, RuleKind::Classification);
-        assert_eq!(draft.effect.set_labels, vec!["phishing".to_owned()]);
-        assert_eq!(proposal.risk_level, RiskLevel::Medium);
-        assert_eq!(evidence.len(), 2);
-        assert!(proposal.title.contains("phishing"));
     }
 
     #[test]

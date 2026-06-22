@@ -17,6 +17,13 @@ use crate::time::Timestamp;
 pub mod event_type {
     /// A safe action was applied to a message.
     pub const ACTION_APPLIED: &str = "action_applied";
+    /// An auto-applied action was undone by the user — the strongest negative signal against the
+    /// rule that authored it. Stamped with that `rule_id`, it is the per-rule decay signal the
+    /// learning engine reads to surface a *retire* proposal. Paired with the per-rule
+    /// [`ACTION_APPLIED`] fires count (now also `rule_id`-stamped), it yields the real undo *rate*
+    /// the decay pass governs on; the undo *count* is the fallback only for a rule with no recorded
+    /// fires yet.
+    pub const ACTION_UNDONE: &str = "action_undone";
     /// A candidate action was blocked by the policy guard.
     pub const ACTION_BLOCKED_BY_POLICY: &str = "action_blocked_by_policy";
     /// A provider response failed validation and was discarded.
@@ -25,10 +32,35 @@ pub mod event_type {
     pub const RULE_PROPOSED: &str = "rule_proposed";
     /// A rule changed lifecycle status (draft → shadow → active → …).
     pub const RULE_STATUS_CHANGED: &str = "rule_status_changed";
+    /// A human activated a rule — the separate, explicit decision that turns an accepted
+    /// proposal's rule live (distinct from the shadow/pending materialization). This is what a
+    /// trust receipt counts as "rules you turned on", and what an audit reads to prove no rule
+    /// went active without a deliberate human action.
+    pub const RULE_ACTIVATED: &str = "rule_activated";
     /// A proposal was reviewed (accepted/rejected) by a human.
     pub const PROPOSAL_REVIEWED: &str = "proposal_reviewed";
     /// The curator recorded a conflict between two live rules.
     pub const RULE_CONFLICT_DETECTED: &str = "rule_conflict_detected";
+    /// The user *sent* a message — outbound evidence. One row per recipient (its domain in the
+    /// payload). Counting these per domain is how the learning engine proposes a VIP/priority rule:
+    /// people you repeatedly email are people whose mail matters (learn-from-Sent, Phase 7).
+    pub const MAIL_SENT: &str = "mail_sent";
+    /// An on-device Tier-2 model training run completed (Phase 8). The payload carries the
+    /// held-out metrics and whether the artifact cleared the precision gate and was activated —
+    /// the auditable record that "the gate flips active only above threshold".
+    pub const TIER2_TRAINED: &str = "tier2_trained";
+    /// The user erased data about a message or a sender, or reset all learning (Phase 9
+    /// delete-my-data). The payload carries the scope and the per-table tally of what was
+    /// removed. A single tombstone left behind after the per-message audit rows are deleted, so
+    /// "this data was forgotten" stays accountable without resurrecting what was erased.
+    pub const DATA_FORGOTTEN: &str = "data_forgotten";
+    /// The user exported everything stored about them (Phase 9 portability). The payload carries
+    /// only counts — never the exported content — so the audit log itself is not a copy of the
+    /// data the user asked to take with them.
+    pub const DATA_EXPORTED: &str = "data_exported";
+    /// A durable remind-me / snooze timer came due and the host emitted its notify-only nudge
+    /// (Phase 9). One row per fired reminder — the accountable record that the nudge happened.
+    pub const REMINDER_FIRED: &str = "reminder_fired";
 }
 
 /// One append-only audit entry.

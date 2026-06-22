@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{DecisionId, DraftId, FolderId, MessageId};
+use crate::ids::{DecisionId, DraftId, FolderId, MessageId, RuleId};
 use crate::mail::DraftSpec;
 use crate::policy::PolicyCheckResult;
 
@@ -172,6 +172,14 @@ pub struct ActionPlan {
     pub message_id: Option<MessageId>,
     /// The candidate actions to evaluate.
     pub actions: Vec<ProposedAction>,
+    /// The authoring rule for each action in `actions` (a length-matched sidecar: `authored_by[i]`
+    /// is the rule that produced `actions[i]`, or `None` for an action the planner synthesized —
+    /// e.g. a needs-review fallback — that no single rule authored). This is the per-firing
+    /// provenance the guard preserves and the apply path stamps onto `action_applied`, so the
+    /// Rules manager can count a rule's real fires and undo-rate. Defaulted empty so a plan built
+    /// without provenance simply has none (the apply path degrades to `None`, never panics).
+    #[serde(default)]
+    pub authored_by: Vec<Option<RuleId>>,
 }
 
 /// A candidate action the guard refused, with the policy that refused it.
@@ -195,6 +203,13 @@ pub struct GuardedActionPlan {
     pub decision_id: DecisionId,
     /// Actions MailMate may apply automatically.
     pub allowed_actions: Vec<PlannedAction>,
+    /// The authoring rule for each allowed action (a length-matched sidecar:
+    /// `allowed_authored_by[i]` authored `allowed_actions[i]`). The guard fills it in lockstep with
+    /// `allowed_actions`, carrying the planner's per-action provenance through the partition so the
+    /// apply path can stamp each auto-applied action with the rule that fired it. Defaulted empty;
+    /// the apply path reads it position-wise and degrades a missing entry to `None`.
+    #[serde(default)]
+    pub allowed_authored_by: Vec<Option<RuleId>>,
     /// Actions MailMate may apply only after human review.
     pub review_required_actions: Vec<PlannedAction>,
     /// Candidates a hard policy refused.

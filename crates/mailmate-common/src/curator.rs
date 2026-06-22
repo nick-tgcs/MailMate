@@ -14,7 +14,7 @@ use crate::conflict::RuleConflictRecord;
 use crate::evidence::EvidenceSourceKind;
 use crate::ids::{FeedbackId, ProposalId, RuleId};
 use crate::proposal::{AgentProposal, ProposalStatus};
-use crate::rules::rule::RuleKind;
+use crate::rules::rule::{RuleKind, RuleStatus};
 
 /// One thing a curator pass can do. A request carries a set of these (empty = all); the
 /// adapter runs each requested capability and folds the results into one [`CuratorReport`].
@@ -164,14 +164,21 @@ impl CuratorReport {
 }
 
 /// A human's disposition of one proposal. Acceptance is the **only** path by which a
-/// proposal's recommended rule is created — and even then it enters its recommended status
-/// (`shadow_mode`/`pending_human_review`), never `active` directly.
+/// proposal's recommended rule is created. Materialization always enters the recommended status
+/// (`shadow_mode`/`pending_human_review`); going `active` is a *separate*, explicitly-requested
+/// step ([`activate`](Self::activate)) recorded as its own `rule_activated` audit — never a
+/// silent side effect of materialization.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ReviewDecision {
     /// The proposal being decided.
     pub proposal_id: ProposalId,
     /// What the human decided.
     pub outcome: crate::feedback::ProposalOutcome,
+    /// On an acceptance, also activate the materialized rule (turn it live), rather than leaving
+    /// it in its recommended shadow/pending status. Ignored on a rejection. This is the explicit
+    /// "approve & activate" path; the default acceptance is the cautious shadow-first one.
+    #[serde(default)]
+    pub activate: bool,
     /// Why — a chip code, if given.
     pub human_reason_code: Option<String>,
     /// Freeform fallback reason.
@@ -179,12 +186,27 @@ pub struct ReviewDecision {
 }
 
 impl ReviewDecision {
-    /// Accept a proposal as-is.
+    /// Accept a proposal as-is, materializing the rule into its recommended (shadow/pending)
+    /// status — the cautious default that never activates.
     #[must_use]
     pub fn accept(proposal_id: ProposalId) -> Self {
         Self {
             proposal_id,
             outcome: crate::feedback::ProposalOutcome::Accepted,
+            activate: false,
+            human_reason_code: None,
+            human_reason_text: None,
+        }
+    }
+
+    /// Accept a proposal **and** activate its rule in one explicit decision — the "approve &
+    /// activate" path that turns the rule live (a separate, audited transition).
+    #[must_use]
+    pub fn accept_and_activate(proposal_id: ProposalId) -> Self {
+        Self {
+            proposal_id,
+            outcome: crate::feedback::ProposalOutcome::Accepted,
+            activate: true,
             human_reason_code: None,
             human_reason_text: None,
         }
@@ -196,6 +218,7 @@ impl ReviewDecision {
         Self {
             proposal_id,
             outcome: crate::feedback::ProposalOutcome::Rejected,
+            activate: false,
             human_reason_code: Some(reason_code.into()),
             human_reason_text: None,
         }
@@ -208,10 +231,17 @@ impl ReviewDecision {
 pub struct ReviewOutcome {
     /// The reviewed proposal.
     pub proposal_id: ProposalId,
-    /// The proposal's status after review (`accepted`/`rejected`).
+    /// The proposal's *disposition* after review (`accepted`/`rejected`) — distinct from the
+    /// rule's lifecycle mode below.
     pub new_status: ProposalStatus,
     /// The rule created on acceptance (a `new_rule` proposal), if one was.
     pub created_rule_id: Option<RuleId>,
+    /// The materialized rule's lifecycle status (`shadow_mode` by default, `active` when the
+    /// decision asked to activate). `None` when no rule was created (rejection, or a
+    /// refine/merge/split/retire that mutates an existing rule). This is the rule *mode* the UI
+    /// shows, as opposed to [`new_status`](Self::new_status) which is the proposal disposition.
+    #[serde(default)]
+    pub rule_status: Option<RuleStatus>,
     /// The `rule_proposal_feedback` row that recorded the decision.
     pub feedback_id: FeedbackId,
 }
@@ -254,8 +284,13 @@ mod tests {
     fn review_decision_helpers_set_outcome_and_polarity() {
         let accept = ReviewDecision::accept(ProposalId::from("prop_1"));
         assert_eq!(accept.outcome, crate::feedback::ProposalOutcome::Accepted);
+        assert!(!accept.activate, "a plain accept never activates");
+        let activate = ReviewDecision::accept_and_activate(ProposalId::from("prop_1a"));
+        assert_eq!(activate.outcome, crate::feedback::ProposalOutcome::Accepted);
+        assert!(activate.activate, "accept_and_activate sets the activate flag");
         let reject = ReviewDecision::reject(ProposalId::from("prop_2"), "too_broad");
         assert_eq!(reject.outcome, crate::feedback::ProposalOutcome::Rejected);
+        assert!(!reject.activate);
         assert_eq!(reject.human_reason_code.as_deref(), Some("too_broad"));
     }
 }

@@ -57,6 +57,25 @@ impl RuleRepository for FakeRules {
             .collect())
     }
 
+    async fn get_rules_by_status(
+        &self,
+        kind: RuleKind,
+        scope: RuleScope,
+        status: RuleStatus,
+    ) -> Result<Vec<EvaluatableRule>, StorageError> {
+        // This fake only tracks active + shadow; answer from whichever matches the asked status.
+        let pool = match status {
+            RuleStatus::Active => &self.active,
+            RuleStatus::ShadowMode => &self.shadow,
+            _ => return Ok(Vec::new()),
+        };
+        Ok(pool
+            .iter()
+            .filter(|r| r.kind == kind && r.scope == scope)
+            .cloned()
+            .collect())
+    }
+
     async fn save_rule_draft(&self, draft: NewRule) -> Result<RuleId, StorageError> {
         let mut saved = self.saved.lock().unwrap();
         if saved.iter().any(|r| r.stable_name == draft.stable_name) {

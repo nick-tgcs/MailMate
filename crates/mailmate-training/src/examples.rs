@@ -65,6 +65,13 @@ fn label_for_polarity(polarity: FeedbackPolarity) -> TrainingLabel {
 fn features_to_context(features: &FeatureVector) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for (name, value) in &features.features {
+        // `account_id` is captured into salient features purely as a SCOPING dimension for
+        // per-account rule induction — it is not a content signal and must not become a model input
+        // (induction likewise never makes it a predicate). Exporting it would leak the user's
+        // account identity into the training corpus, so it is dropped here.
+        if name == "account_id" {
+            continue;
+        }
         let rendered = match value {
             FeatureValue::Bool(b) => b.to_string(),
             FeatureValue::Number(n) => n.to_string(),
@@ -214,6 +221,8 @@ mod tests {
         features.insert("sender_history", FeatureValue::Number(12.0));
         features.insert("list_id", FeatureValue::Text("news.example".to_owned()));
         features.insert("blob", FeatureValue::Json(serde_json::json!({"k": "v"})));
+        // A scoping-only feature folded in by the per-account correction capture — must NOT export.
+        features.insert("account_id", FeatureValue::Text("work-account".to_owned()));
         ClassificationFeedbackRow {
             id: FeedbackId::from("clsfb_1"),
             message_id: MessageId::from("msg_1"),
@@ -251,6 +260,11 @@ mod tests {
         assert_eq!(ctx.get("list_id").unwrap(), "news.example");
         assert_eq!(ctx.get("blob").unwrap(), "<json>");
         assert_eq!(ctx.get("human_reason_code").unwrap(), "spoofed_sender");
+        // The account scoping dimension is NOT exported into the training corpus.
+        assert!(
+            ctx.get("account_id").is_none(),
+            "account_id is scoping-only and must not leak into a model input"
+        );
     }
 
     #[test]

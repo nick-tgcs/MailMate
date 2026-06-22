@@ -10,11 +10,59 @@ use serde_json::{json, Value};
 
 use mailmate_common::action::{BlockedAction, GuardedActionPlan, PlannedAction};
 use mailmate_common::classification::Classification;
+use mailmate_common::ids::RuleId;
 use mailmate_common::proposal::AgentProposal;
 use mailmate_common::workflow::{FiredStep, NeedsAttentionItem};
 use mailmate_core::PlanningOutcome;
 
-/// The bounded classification view the wire carries.
+/// An action MailMate auto-applied, carrying the provenance the per-message panel and Undo
+/// need: **who authored it** (only an active rule auto-applies — the gate) and the inverse
+/// action that **reverses it** (a real Undo, e.g. a move back to the origin folder).
+#[derive(Clone, Debug)]
+pub struct AppliedAction {
+    /// The action that was applied.
+    pub action: PlannedAction,
+    /// Who authored it. Always `active_rule` today: `apply_allowed` only ever applies effects
+    /// from active rules, so an auto-applied action is active-rule-authored by construction.
+    pub authored_by: &'static str,
+    /// The precise active rule that authored it, when the planner threaded it through (the
+    /// per-firing provenance). The wire carries it so the extension can echo it back on Undo —
+    /// closing the loop so a rule's fires (`action_applied`) and undos (`action_undone`) key on
+    /// the *same* `rule_id`, which is what makes the Rules-manager undo-rate honest.
+    pub rule_id: Option<RuleId>,
+    /// The inverse action that reverses this one, when it can be expressed as a safe action
+    /// (a move back to the origin folder; an un-junk). `None` when the inverse is not a
+    /// `PlannedAction` (a tag add) — the extension still knows how to undo those itself.
+    pub reverses_to: Option<PlannedAction>,
+}
+
+/// Project an applied action onto the wire, annotating the safe-action JSON with `authored_by`
+/// and (when expressible) the `reverses_to` inverse the Undo affordance uses.
+#[must_use]
+pub fn applied_action_json(applied: &AppliedAction) -> Value {
+    let mut value = suggested_action_json(&applied.action, "allowed", "auto_applied");
+    if let Value::Object(map) = &mut value {
+        map.insert("authored_by".to_owned(), json!(applied.authored_by));
+        // The authoring rule (when known) rides the wire so the extension echoes it back on Undo;
+        // that round-trip is what lets `action_undone` be stamped with the same `rule_id` as the
+        // `action_applied` it reverses. Omitted when unknown rather than sent as a misleading null.
+        if let Some(rule_id) = &applied.rule_id {
+            map.insert("rule_id".to_owned(), json!(rule_id.as_str()));
+        }
+        if let Some(reverse) = &applied.reverses_to {
+            map.insert(
+                "reverses_to".to_owned(),
+                serde_json::to_value(reverse).unwrap_or(Value::Null),
+            );
+        }
+    }
+    value
+}
+
+/// The bounded classification view the wire carries — including the **salient signals** the
+/// per-message panel renders as correctable explanation chips (the explainability spine). Each
+/// signal carries its `id` (the `signal_marked_wrong` target), human `label`, `kind`, `source`,
+/// signed `weight`, and whether it is `correctable`.
 #[must_use]
 pub fn classification_json(classification: &Classification) -> Value {
     json!({
@@ -23,6 +71,37 @@ pub fn classification_json(classification: &Classification) -> Value {
         "priority": classification.priority.as_str(),
         "labels": classification.labels,
         "needs_review": classification.needs_review,
+        "confidence": classification.confidence,
+        "confidence_band": classification.confidence_band().as_str(),
+        "salient_signals": classification.salient_signals.iter().map(salient_signal_json).collect::<Vec<_>>(),
+        "safety_findings": classification.safety_findings.iter().map(safety_finding_json).collect::<Vec<_>>(),
+    })
+}
+
+/// Project one salient signal onto the wire. The `kind`/`source` enums are rendered as their
+/// stable snake_case labels so the panel can switch on them for iconography without coupling to
+/// Rust variant names.
+#[must_use]
+pub fn salient_signal_json(signal: &mailmate_common::salient::SalientSignal) -> Value {
+    json!({
+        "id": signal.id,
+        "label": signal.label,
+        "kind": signal.kind.as_str(),
+        "source": signal.source.as_str(),
+        "weight": signal.weight,
+        "correctable": signal.correctable,
+    })
+}
+
+/// Project one inform-only safety finding onto the wire (the Safety block). `severity` is the
+/// stable snake_case label so the panel can pick iconography without coupling to variant names.
+#[must_use]
+pub fn safety_finding_json(finding: &mailmate_common::safety::SafetyFinding) -> Value {
+    json!({
+        "id": finding.id,
+        "title": finding.title,
+        "detail": finding.detail,
+        "severity": finding.severity.as_str(),
     })
 }
 
@@ -122,7 +201,7 @@ pub fn classify_response_payload(outcome: &PlanningOutcome, thunderbird_message_
 pub fn classification_ready_payload(
     outcome: &PlanningOutcome,
     thunderbird_message_id: &str,
-    applied: &[PlannedAction],
+    applied: &[AppliedAction],
     subject: &str,
     from: &str,
 ) -> Value {
@@ -132,7 +211,7 @@ pub fn classification_ready_payload(
         "decision_id": plan.decision_id,
         "headers": { "subject": subject, "from": from },
         "classification": classification_json(&outcome.classification),
-        "applied_actions": applied.iter().map(|a| suggested_action_json(a, "allowed", "auto_applied")).collect::<Vec<_>>(),
+        "applied_actions": applied.iter().map(applied_action_json).collect::<Vec<_>>(),
         "review_required_actions": plan
             .review_required_actions
             .iter()
@@ -195,7 +274,30 @@ pub fn proposal_ready_payload(proposal: &AgentProposal) -> Value {
         "risk_level": proposal.risk_level.as_str(),
         "recommended_status": proposal.recommended_status.as_str(),
         "rationale": proposal.rationale,
+        // The conflicts the candidate has with existing active rules (empty for most). A non-empty
+        // list is why this proposal recommends pending_human_review — the card warns the user.
+        "conflicts": conflicts_json(&proposal.conflicts),
     })
+}
+
+/// Project a candidate's detected rule conflicts onto the wire: each `{kind, severity, description,
+/// existing_rule_id}`, in the same shape on the proposal card and the `proposal_ready` notification.
+/// An empty list renders as `[]` (no conflicts → no warning).
+#[must_use]
+pub fn conflicts_json(conflicts: &[mailmate_common::rules::evaluation::RuleConflict]) -> Value {
+    Value::Array(
+        conflicts
+            .iter()
+            .map(|c| {
+                json!({
+                    "kind": c.kind.as_str(),
+                    "severity": c.severity.as_str(),
+                    "description": c.description,
+                    "existing_rule_id": c.existing_rule_id,
+                })
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -214,6 +316,9 @@ mod tests {
             phishing_score: 0.0,
             priority: Priority::High,
             needs_review: true,
+            confidence: 0.0,
+            salient_signals: Vec::new(),
+            safety_findings: Vec::new(),
             provenance: ClassificationProvenance::tier1(vec![]),
         };
         let guarded_plan = GuardedActionPlan {
@@ -222,6 +327,7 @@ mod tests {
                 message_id: MessageId::from("msg_1"),
                 tag: "needs-review".to_owned(),
             }],
+            allowed_authored_by: Vec::new(),
             review_required_actions: vec![PlannedAction::Move {
                 message_id: MessageId::from("msg_1"),
                 to_folder: FolderId::from("Receipts"),
@@ -262,9 +368,17 @@ mod tests {
 
     #[test]
     fn classification_ready_lists_applied_actions_separately() {
-        let applied = vec![PlannedAction::Tag {
-            message_id: MessageId::from("msg_1"),
-            tag: "needs-review".to_owned(),
+        let applied = vec![AppliedAction {
+            action: PlannedAction::Move {
+                message_id: MessageId::from("msg_1"),
+                to_folder: FolderId::from("Receipts"),
+            },
+            authored_by: "active_rule",
+            rule_id: Some(RuleId::from("rule_receipts")),
+            reverses_to: Some(PlannedAction::Move {
+                message_id: MessageId::from("msg_1"),
+                to_folder: FolderId::from("Inbox"),
+            }),
         }];
         let payload = classification_ready_payload(
             &outcome(),
@@ -277,9 +391,19 @@ mod tests {
         assert_eq!(payload["headers"]["subject"], "Q3 invoice");
         assert_eq!(payload["headers"]["from"], "billing@acme.test");
         assert_eq!(payload["applied_actions"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["applied_actions"][0]["kind"], "tag");
+        assert_eq!(payload["applied_actions"][0]["kind"], "move");
         // An applied action is past-tense: auto_applied (Undo), never a pending suggestion.
         assert_eq!(payload["applied_actions"][0]["apply_state"], "auto_applied");
+        // Provenance the panel + Undo need: who authored it, and the inverse that reverses it.
+        assert_eq!(payload["applied_actions"][0]["authored_by"], "active_rule");
+        // The authoring rule_id rides the wire so the extension can echo it back on Undo (closing
+        // the fires/undos loop on the same rule_id).
+        assert_eq!(payload["applied_actions"][0]["rule_id"], "rule_receipts");
+        assert_eq!(payload["applied_actions"][0]["reverses_to"]["kind"], "move");
+        assert_eq!(
+            payload["applied_actions"][0]["reverses_to"]["to_folder"],
+            "Inbox"
+        );
         assert_eq!(
             payload["review_required_actions"].as_array().unwrap().len(),
             1

@@ -86,6 +86,9 @@ fn neutral() -> Classification {
         phishing_score: 0.0,
         priority: Priority::Normal,
         needs_review: false,
+        confidence: 0.0,
+        salient_signals: Vec::new(),
+        safety_findings: Vec::new(),
         provenance: ClassificationProvenance::tier1(vec![]),
     }
 }
@@ -521,6 +524,44 @@ fn suggestion_dismissed_is_audited_not_a_fabricated_correction() {
 }
 
 #[test]
+fn a_draft_edit_divergence_is_audited_with_the_draft_id() {
+    // The edit-divergence learning hook: the user sent a MailMate draft they had edited. There is
+    // no chosen label/folder (a draft is not a classification), so it's recorded as audit
+    // provenance carrying the draft_id — queryable for an edit-rate, fabricating no feedback row.
+    let learning = Arc::new(FakeLearningEngine::new());
+    let audit = Arc::new(FakeAuditRepository::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.learning_engine = learning.clone();
+    let router = HostRouter::from_ports(&ports, audit.clone(), out.clone());
+
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "draft_diverged",
+            "draft_id": "draft_7",
+            "thread_id": "thread_1",
+            "user_initiated": true
+        }),
+    )))
+    .unwrap();
+
+    assert_eq!(one_ok_response(&out)["sink"], "audit");
+    assert!(
+        learning.recorded_feedback().is_empty(),
+        "a draft edit has no chosen label/folder, so it fabricates no feedback row"
+    );
+    let diverged = audit
+        .entries()
+        .iter()
+        .find(|e| e.event_type == "draft_diverged")
+        .cloned()
+        .expect("the divergence was audited");
+    assert_eq!(diverged.payload["draft_id"], "draft_7");
+    assert_eq!(diverged.actor, mailmate_common::actor::Actor::User);
+}
+
+#[test]
 fn action_undone_of_a_move_without_a_target_folder_is_a_record_failed_error() {
     let learning = Arc::new(FakeLearningEngine::new());
     let out = Arc::new(FakeTransport::new());
@@ -617,6 +658,42 @@ fn new_mail_applies_allowed_actions_and_pushes_classification_ready() {
 }
 
 #[test]
+fn new_mail_applied_move_carries_provenance_and_a_reverses_to_for_undo() {
+    // The Phase-1a provenance-spine exit: an auto-applied move must arrive on the wire with
+    // `authored_by` (the apply gate — only active rules auto-apply) and a `reverses_to` inverse
+    // (a move back to the origin folder) so the per-message panel can offer a REAL Undo.
+    let mail = Arc::new(FakeMailClient::new());
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    ports.mail_client = mail.clone();
+    ports.action_planner = Arc::new(FakeActionPlanner::returning(vec![ProposedAction::Move {
+        message_id: MessageId::from("msg_tb_tb_42"),
+        to_folder: FolderId::from("Receipts"),
+    }]));
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    // classify_payload puts the message in folder "inbox" — the origin a move reverses to.
+    block_on(router.handle(request("new_mail", classify_payload("tb_42")))).unwrap();
+
+    let frames = out.sent_frames();
+    match &frames[0] {
+        Frame::Notification { type_, payload, .. } => {
+            assert_eq!(type_, "classification_ready");
+            let applied = &payload["applied_actions"][0];
+            assert_eq!(applied["kind"], "move");
+            assert_eq!(applied["to_folder"], "Receipts");
+            assert_eq!(applied["apply_state"], "auto_applied");
+            // The apply gate: an auto-applied action is active-rule-authored by construction.
+            assert_eq!(applied["authored_by"], "active_rule");
+            // A real Undo: reverse the move back to the origin folder.
+            assert_eq!(applied["reverses_to"]["kind"], "move");
+            assert_eq!(applied["reverses_to"]["to_folder"], "inbox");
+        }
+        other => panic!("expected a notification, got {other:?}"),
+    }
+}
+
+#[test]
 fn new_mail_blocks_a_prohibited_action_and_never_applies_it() {
     let mail = Arc::new(FakeMailClient::new());
     let out = Arc::new(FakeTransport::new());
@@ -643,11 +720,12 @@ fn new_mail_blocks_a_prohibited_action_and_never_applies_it() {
 }
 
 #[test]
-fn draft_reply_returns_a_review_required_draft() {
+fn draft_reply_returns_a_review_required_draft_with_rationale_and_a_clear_guard() {
     let out = Arc::new(FakeTransport::new());
     let mut ports = base_ports();
     ports.reply_drafter = Arc::new(FakeReplyDrafter::returning(DraftedReply {
         safety_notes: vec!["no prices or dates added".to_owned()],
+        rationale: "Polite request for a corrected invoice — no commitments.".to_owned(),
         ..DraftedReply::new("Re: Invoice update", "Hi,\n\nCould you re-send?")
     }));
     let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
@@ -671,6 +749,94 @@ fn draft_reply_returns_a_review_required_draft() {
     assert!(payload["draft_id"].as_str().unwrap().starts_with("draft_"));
     assert_eq!(payload["subject"], "Re: Invoice update");
     assert_eq!(payload["safety_notes"][0], "no prices or dates added");
+    // The model's rationale rides through to the trust surface…
+    assert_eq!(
+        payload["rationale"],
+        "Polite request for a corrected invoice — no commitments."
+    );
+    // …and the model-free guard ran over the (benign) body: present, and all-clear.
+    assert!(
+        payload["commitments"]["findings"].as_array().unwrap().is_empty(),
+        "a benign body has no commitments: {}",
+        payload["commitments"]
+    );
+}
+
+#[test]
+fn draft_reply_runs_the_commitments_guard_over_the_body() {
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    // A body that commits to a date, a price, and a legal position — the guard must surface all
+    // three even though the model attached NO safety notes (the guard never trusts the model).
+    ports.reply_drafter = Arc::new(FakeReplyDrafter::returning(DraftedReply::new(
+        "Re: Order",
+        "Yes — I can ship by Friday for $1,200, and I agree to the contract.",
+    )));
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    block_on(router.handle(request(
+        "draft_reply",
+        json!({ "subject": "Order", "counterparty": "buyer@acme.test", "excerpt": "when and how much?" }),
+    )))
+    .unwrap();
+
+    let payload = one_ok_response(&out);
+    let findings = payload["commitments"]["findings"].as_array().unwrap();
+    let cats: Vec<&str> = findings
+        .iter()
+        .map(|f| f["category"].as_str().unwrap())
+        .collect();
+    assert!(cats.contains(&"date"), "got {cats:?}");
+    assert!(cats.contains(&"price"), "got {cats:?}");
+    assert!(cats.contains(&"legal"), "got {cats:?}");
+    // Every finding cites a real, non-empty span.
+    for f in findings {
+        assert!(!f["text"].as_str().unwrap().is_empty(), "empty span: {f}");
+        assert!(f["end"].as_u64().unwrap() > f["start"].as_u64().unwrap());
+    }
+}
+
+#[test]
+fn regenerate_draft_folds_the_steer_into_guidance_and_reruns_the_guard() {
+    let out = Arc::new(FakeTransport::new());
+    let mut ports = base_ports();
+    let drafter = Arc::new(FakeReplyDrafter::returning(DraftedReply::new(
+        "Re: Order",
+        "Shorter now — let's talk Monday.",
+    )));
+    ports.reply_drafter = drafter.clone();
+    let router = HostRouter::from_ports(&ports, Arc::new(FakeAuditRepository::new()), out.clone());
+
+    block_on(router.handle(request(
+        "regenerate_draft",
+        json!({
+            "subject": "Order",
+            "counterparty": "buyer@acme.test",
+            "excerpt": "can you do better?",
+            "user_instruction": "Decline the discount.",
+            "adjustments": ["Shorter"],
+            "steer": "and propose Monday"
+        }),
+    )))
+    .unwrap();
+
+    let payload = one_ok_response(&out);
+    assert_eq!(payload["requires_human_review"], true);
+    assert!(payload["draft_id"].as_str().unwrap().starts_with("draft_"));
+    // The guard re-ran over the regenerated body ("Monday" is a date).
+    let cats: Vec<&str> = payload["commitments"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["category"].as_str().unwrap())
+        .collect();
+    assert!(cats.contains(&"date"), "got {cats:?}");
+    // The chips + free-text steer reached the drafter, after the base instruction.
+    let req = &drafter.requests()[0];
+    let instruction = req.user_instruction.as_deref().unwrap();
+    assert!(instruction.contains("Decline the discount."), "{instruction}");
+    assert!(instruction.contains("Make it shorter."), "{instruction}");
+    assert!(instruction.contains("and propose Monday"), "{instruction}");
 }
 
 #[test]

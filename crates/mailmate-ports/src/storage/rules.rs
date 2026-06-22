@@ -42,6 +42,19 @@ pub trait RuleRepository: Send + Sync {
         scope: RuleScope,
     ) -> Result<Vec<EvaluatableRule>, StorageError>;
 
+    /// The rules of `kind`/`scope` in an arbitrary lifecycle `status` — the read the Rules manager
+    /// uses to surface **disabled** rules (which the engine snapshot omits) so a human can re-enable
+    /// one they previously turned off.
+    ///
+    /// # Errors
+    /// [`StorageError`] on a backend failure.
+    async fn get_rules_by_status(
+        &self,
+        kind: RuleKind,
+        scope: RuleScope,
+        status: RuleStatus,
+    ) -> Result<Vec<EvaluatableRule>, StorageError>;
+
     /// Persist a new rule in [`Draft`](RuleStatus::Draft) status together with its first
     /// immutable version, atomically. Returns the new rule id.
     ///

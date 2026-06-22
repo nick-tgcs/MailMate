@@ -94,6 +94,27 @@ pub struct MessageData {
     /// Whether remote content was loaded (never loaded for classification by default).
     #[serde(default)]
     pub remote_content_loaded: bool,
+    /// How many prior messages from this sender the client has seen (bounded, best-effort);
+    /// `None` when the client did not compute it. A high count is a strong not-spam signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_seen_count: Option<u32>,
+    /// Whether the sender is in the user's address book; `None` when not looked up. A known
+    /// contact is a strong not-spam signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_in_address_book: Option<bool>,
+}
+
+impl MessageData {
+    /// Whether this message looks like a reply in a conversation the user is part of — the
+    /// signal the **thread guard** keys on (`never auto-junk/auto-file a reply in a thread the
+    /// user joined`). A conservative, header-only proxy: the message is threaded (carries
+    /// `In-Reply-To`/`References`) **and** is not bulk/list mail (a mailing-list digest also
+    /// carries `References`, but is not a personal conversation). It deliberately errs toward
+    /// "leave conversations alone" — the cost of a false positive is only a demotion to review.
+    #[must_use]
+    pub fn is_joined_thread_reply(&self) -> bool {
+        self.headers.is_threaded() && !self.headers.is_bulk_or_list()
+    }
 }
 
 /// The parsed header subset MailMate reasons over.
@@ -119,6 +140,46 @@ pub struct MessageHeaders {
     /// `In-Reply-To`, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<String>,
+    /// `Reply-To`, if present — a different reply-to domain than `From` is a phishing cue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// `List-Id`, marking list / bulk mail (newsletters, mailing lists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_id: Option<String>,
+    /// `List-Unsubscribe`, the source of the one-click unsubscribe affordance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_unsubscribe: Option<String>,
+    /// `List-Unsubscribe-Post` (RFC 8058) — present and `List-Unsubscribe=One-Click` marks a
+    /// link safe to unsubscribe from with a single background POST (no confirmation page).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_unsubscribe_post: Option<String>,
+    /// `Precedence` (e.g. `bulk` / `list` / `junk`) — a bulk-mail signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precedence: Option<String>,
+    /// The raw `Authentication-Results` header, parsed locally into SPF/DKIM/DMARC features
+    /// (the host parses it; no network, no DNS — the verdict the receiving MTA already wrote).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_results: Option<String>,
+}
+
+impl MessageHeaders {
+    /// Whether the message is part of an existing conversation (carries `In-Reply-To` or a
+    /// non-empty `References` chain).
+    #[must_use]
+    pub fn is_threaded(&self) -> bool {
+        self.in_reply_to.is_some() || !self.references.is_empty()
+    }
+
+    /// Whether the message is bulk/list mail (carries `List-Id`, or a `Precedence` of
+    /// `bulk`/`list`/`junk`).
+    #[must_use]
+    pub fn is_bulk_or_list(&self) -> bool {
+        self.list_id.is_some()
+            || self.precedence.as_deref().is_some_and(|p| {
+                let p = p.trim().to_ascii_lowercase();
+                p == "bulk" || p == "list" || p == "junk"
+            })
+    }
 }
 
 /// Attachment metadata. Content is never carried here.
@@ -194,6 +255,8 @@ mod tests {
                 size_bytes: 1234,
             }],
             remote_content_loaded: false,
+            sender_seen_count: None,
+            sender_in_address_book: None,
         }
     }
 
@@ -208,6 +271,32 @@ mod tests {
         assert_eq!(value["to_folder"], "folder_archive");
         let back: MailAction = serde_json::from_value(value).unwrap();
         assert_eq!(back, action);
+    }
+
+    #[test]
+    fn a_joined_thread_reply_is_a_threaded_non_bulk_message() {
+        let mut msg = sample_message();
+        // A bare new message is not a joined-thread reply.
+        assert!(!msg.is_joined_thread_reply());
+
+        // A reply in a conversation (In-Reply-To set) is.
+        msg.headers.in_reply_to = Some("<prev@example.com>".to_owned());
+        assert!(msg.is_joined_thread_reply());
+
+        // …unless it is bulk/list mail (a mailing-list digest carries References too).
+        msg.headers.list_id = Some("<list.example.com>".to_owned());
+        assert!(
+            !msg.is_joined_thread_reply(),
+            "list mail is not a personal conversation"
+        );
+        msg.headers.list_id = None;
+        msg.headers.precedence = Some("bulk".to_owned());
+        assert!(!msg.is_joined_thread_reply());
+
+        // A References chain alone (no In-Reply-To) still counts as threaded.
+        let mut threaded = sample_message();
+        threaded.headers.references = vec!["<a@x>".to_owned()];
+        assert!(threaded.is_joined_thread_reply());
     }
 
     #[test]

@@ -114,3 +114,41 @@ button:hover {
   color: #2e7d32;
   font-size: 12px;
 }
+
+.mm-good {
+  color: #2e7d32;
+}
+
+.mm-paused {
+  color: #b8860b;
+  font-size: 12px;
+}
+
+/* The aggregate breakdown — each line a deep-link into the matching dashboard tab. */
+.mm-agg {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.mm-agg li {
+  margin: 2px 0;
+}
+
+button.mm-link {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #2563eb;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+button.mm-link:hover {
+  text-decoration: underline;
+  filter: none;
+}
+
+button.mm-toggle {
+  margin-left: auto;
+}

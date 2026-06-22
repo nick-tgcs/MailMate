@@ -12,7 +12,7 @@ use mailmate_common::error::RuleEngineError;
 use mailmate_common::rules::evaluation::{
     DecisionExplanation, RuleConflict, RuleEvaluationContext, RuleEvaluationResult,
 };
-use mailmate_common::rules::rule::RuleDraft;
+use mailmate_common::rules::rule::{EvaluatableRule, RuleDraft};
 
 /// Evaluates rules against a message context and reasons about candidate rules.
 #[async_trait]
@@ -45,6 +45,16 @@ pub trait RuleEngine: Send + Sync {
         &self,
         candidate: RuleDraft,
     ) -> Result<Vec<RuleConflict>, RuleEngineError>;
+
+    /// Replace the engine's rule snapshot in place — a hot-reload so a freshly activated or
+    /// status-changed rule takes effect on the next evaluation without rebuilding the engine or
+    /// restarting the host. The default is a no-op: an engine over a fixed fixture (most test
+    /// doubles) simply keeps its rules. The production [`DeterministicRuleEngine`] overrides it.
+    ///
+    /// [`DeterministicRuleEngine`]: https://docs.rs/mailmate-rules
+    fn reload(&self, rules: Vec<EvaluatableRule>) {
+        let _ = rules;
+    }
 }
 
 #[cfg(test)]

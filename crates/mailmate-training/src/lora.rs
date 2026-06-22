@@ -52,8 +52,14 @@ pub fn register_local_adapter(
     LoraAdapterRecord {
         id,
         name: name.into(),
-        adapter_type: artifact.adapter_type,
-        format: artifact.format,
+        // Registration is reached only for a real adapter artifact (the pipeline trains with
+        // `produce_lora`); a small model is never registered as a LoRA, so this is an invariant.
+        adapter_type: artifact
+            .adapter_type
+            .expect("a registrable adapter artifact has an adapter_type"),
+        format: artifact
+            .format
+            .expect("a registrable adapter artifact has a format"),
         base_model_family: artifact.base_model_family.clone(),
         base_model_name: artifact.base_model_name.clone(),
         base_model_revision: None,
@@ -145,8 +151,8 @@ mod tests {
         let artifact = TrainedArtifact {
             kind: TrainedArtifactKind::LoraAdapter,
             artifact_path: "/adapters/local.safetensors".to_owned(),
-            format: AdapterFormat::Safetensors,
-            adapter_type: AdapterType::Lora,
+            format: Some(AdapterFormat::Safetensors),
+            adapter_type: Some(AdapterType::Lora),
             base_model_family: "llama".to_owned(),
             base_model_name: "llama-3".to_owned(),
             tokenizer_hash: Some("tok_x".to_owned()),

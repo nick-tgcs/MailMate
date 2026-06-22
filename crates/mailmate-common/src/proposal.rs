@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::evidence::EvidenceSourceKind;
 use crate::ids::{FeedbackId, ProposalId, RuleId, WorkflowDefId};
+use crate::rules::evaluation::RuleConflict;
 use crate::rules::rule::{RiskLevel, RuleDraft, RuleKind, RuleStatus};
 use crate::time::Timestamp;
 use crate::workflow::WorkflowDraft;
@@ -151,6 +152,20 @@ pub struct EvidenceRef {
     pub id: FeedbackId,
 }
 
+/// The crystallization back-test result captured **at generation time** — the precision and
+/// support the promotion gate actually used to admit this candidate — carried on the proposal so
+/// the Review card can show "precision 0.88 · support 23 msgs" without re-deriving it (the numbers
+/// shown are exactly the numbers the gate judged on).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct BackTest {
+    /// Precision over the domain's whole move history (`correct / fires`). `None` when the
+    /// candidate fired on nothing (no division), which the card renders as "—".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<f64>,
+    /// How many historical messages the candidate reproduced — the back-test support (`fires`).
+    pub support: usize,
+}
+
 /// An AI-/learning-generated proposal requiring human review or shadow testing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AgentProposal {
@@ -184,6 +199,18 @@ pub struct AgentProposal {
     pub target_workflow_id: Option<WorkflowDefId>,
     /// Typed pointers at the feedback rows that justify the proposal.
     pub evidence_refs: Vec<EvidenceRef>,
+    /// The crystallization back-test the gate used to admit this candidate (precision · support),
+    /// captured at generation. `None` for proposals with no back-test (classification candidates,
+    /// or rows written before this field existed — `#[serde(default)]` keeps them loadable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_test: Option<BackTest>,
+    /// Conflicts the candidate has with existing active rules — subsumption / co-match overlap /
+    /// contradiction — detected at generation. A non-empty list is *why* a proposal is forced to
+    /// human review (`recommended_status = pending_human_review`): the human must adjudicate the
+    /// overlap before the rule can fire. The card renders these as the "conflicts" measure.
+    /// `#[serde(default)]` so older rows (and the many proposals with no conflicts) stay loadable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<RuleConflict>,
     /// The provider/learning-engine source label.
     pub source_provider: String,
     /// When emitted.
@@ -202,6 +229,21 @@ pub struct ProposalThresholds {
     pub min_filing_moves: usize,
     /// Minimum same-label, same-domain corrections before a classification rule is proposed.
     pub min_classification_corrections: usize,
+    /// The crystallization back-test precision bar a filing candidate must clear over the
+    /// domain's *whole* move history (agreeing + contradicting) before it is surfaced. A
+    /// candidate that also matches mail the user filed elsewhere scores below this and is
+    /// withheld — this is what makes [`min_filing_moves`](Self::min_filing_moves) honest rather
+    /// than count-only.
+    pub filing_precision_bar: f64,
+    /// The precision bar an *induced* multi-aspect classification candidate must clear over its
+    /// cluster's positives **plus a negative pool** (recent mail the candidate also matches but
+    /// on which the user did something else) before it is surfaced. A candidate that mis-fires on
+    /// the negative pool scores below this and is withheld — the negative sampling is what makes
+    /// a multi-clause rule's precision honest rather than positives-only.
+    pub classification_precision_bar: f64,
+    /// Minimum times the user has sent mail to a domain before a VIP/priority rule is proposed for
+    /// it (learn-from-Sent). People you repeatedly email are people whose inbound mail matters.
+    pub min_outbound_sends: usize,
 }
 
 impl Default for ProposalThresholds {
@@ -209,6 +251,9 @@ impl Default for ProposalThresholds {
         Self {
             min_filing_moves: 3,
             min_classification_corrections: 2,
+            filing_precision_bar: 0.9,
+            classification_precision_bar: 0.9,
+            min_outbound_sends: 3,
         }
     }
 }
@@ -256,10 +301,52 @@ mod tests {
     }
 
     #[test]
+    fn back_test_serializes_compactly_and_is_optional_on_a_proposal() {
+        use serde_json::json;
+        // A populated back-test serializes as { precision, support }.
+        let bt = BackTest {
+            precision: Some(0.88),
+            support: 23,
+        };
+        assert_eq!(
+            serde_json::to_value(bt).unwrap(),
+            json!({ "precision": 0.88, "support": 23 })
+        );
+        // A fired-on-nothing back-test omits precision (rendered as "—" by the card).
+        let empty = BackTest {
+            precision: None,
+            support: 0,
+        };
+        assert_eq!(serde_json::to_value(empty).unwrap(), json!({ "support": 0 }));
+
+        // BACKWARD COMPAT: a stored proposal JSON written before `back_test` existed still loads
+        // (the field defaults to None) — the #[serde(default)] guarantee.
+        let legacy = json!({
+            "id": "prop_old",
+            "proposal_type": "new_rule",
+            "status": "pending_review",
+            "title": "t",
+            "rationale": "r",
+            "risk_level": "low",
+            "recommended_status": "shadow_mode",
+            "rule_draft": null,
+            "target_rule_kind": null,
+            "target_rule_id": null,
+            "evidence_refs": [],
+            "source_provider": "x",
+            "created_at": "2026-01-01T00:00:00Z",
+            "reviewed_at": null
+        });
+        let p: AgentProposal = serde_json::from_value(legacy).unwrap();
+        assert_eq!(p.back_test, None, "a legacy proposal has no back-test");
+    }
+
+    #[test]
     fn default_thresholds_match_the_documented_bar() {
         let t = ProposalThresholds::default();
         assert_eq!(t.min_filing_moves, 3);
         assert_eq!(t.min_classification_corrections, 2);
+        assert_eq!(t.filing_precision_bar, 0.9);
         assert_eq!(ProposalTrigger::all().thresholds, t);
         assert_eq!(ProposalTrigger::all().source_kind, None);
     }

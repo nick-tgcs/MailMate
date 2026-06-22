@@ -172,6 +172,9 @@ impl AiRuleCurator {
             workflow_draft: None,
             target_workflow_id: None,
             evidence_refs: Vec::new(),
+            // The AI curator does not run a filing back-test (its evidence is the AI rationale).
+            back_test: None,
+            conflicts: Vec::new(),
             source_provider: self.source_label.clone(),
             created_at: Timestamp::now(),
             reviewed_at: None,

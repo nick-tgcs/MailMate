@@ -18,8 +18,10 @@
 //! materializes a rule — and even then into shadow/pending, never active.
 
 pub mod curator;
+pub mod decay;
 pub mod engine;
 pub mod evidence;
+pub mod induction;
 pub mod outcomes;
 pub mod promotion;
 pub mod proposals;

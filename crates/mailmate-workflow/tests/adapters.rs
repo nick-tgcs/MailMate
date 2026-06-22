@@ -184,7 +184,7 @@ fn a_due_step_fires_a_review_required_draft_and_records_feedback() {
     let anchor = now().add_days(-5); // step 0 (day3) due 2 days ago, fresh
     let inst_id = h.arm_at(&item, &wf, anchor, 0, anchor.add_days(3));
 
-    let report = block_on(h.scheduler().drain_due(now())).unwrap();
+    let report = block_on(h.scheduler().drain_due(now(), 100)).unwrap();
     assert_eq!(report.fired.len(), 1, "one step fired");
     assert_eq!(report.fired[0].step_index, 0);
     assert!(report.needs_attention.is_empty());
@@ -229,7 +229,7 @@ fn the_no_auto_send_invariant_holds_in_the_emitted_report() {
     let wf = h.seed_workflow("standard");
     let anchor = now().add_days(-5);
     h.arm_at(&item, &wf, anchor, 0, anchor.add_days(3));
-    let report = block_on(h.scheduler().drain_due(now())).unwrap();
+    let report = block_on(h.scheduler().drain_due(now(), 100)).unwrap();
     let json = serde_json::to_string(&report).unwrap();
     assert!(
         !json.contains("send"),
@@ -246,7 +246,7 @@ fn a_long_absence_coalesces_overdue_steps_to_one_draft() {
     let anchor = now().add_days(-20);
     h.arm_at(&item, &wf, anchor, 1, anchor.add_days(7));
 
-    let report = block_on(h.scheduler().drain_due(now())).unwrap();
+    let report = block_on(h.scheduler().drain_due(now(), 100)).unwrap();
     assert_eq!(report.fired.len(), 1, "coalesced to exactly one draft");
     assert_eq!(report.fired[0].step_index, 2, "the latest fresh step fires");
     assert_eq!(
@@ -273,7 +273,7 @@ fn a_stale_instance_past_the_horizon_needs_attention_with_no_draft() {
     let anchor = now().add_days(-40);
     let inst_id = h.arm_at(&item, &wf, anchor, 0, anchor.add_days(3));
 
-    let report = block_on(h.scheduler().drain_due(now())).unwrap();
+    let report = block_on(h.scheduler().drain_due(now(), 100)).unwrap();
     assert!(report.fired.is_empty(), "no draft for a stale instance");
     assert_eq!(report.needs_attention.len(), 1);
     assert_eq!(report.needs_attention[0].reason, "stale_past_horizon");
@@ -339,7 +339,7 @@ fn resolving_a_review_re_arms_the_next_step() {
     let anchor = now().add_days(-5);
     let inst_id = h.arm_at(&item, &wf, anchor, 0, anchor.add_days(3));
     // Fire step 0 → awaiting_review.
-    block_on(h.scheduler().drain_due(now())).unwrap();
+    block_on(h.scheduler().drain_due(now(), 100)).unwrap();
 
     block_on(
         h.engine()
@@ -378,7 +378,7 @@ fn rescheduling_an_awaiting_review_instance_is_rejected_and_does_not_double_fire
     let anchor = now().add_days(-5);
     let inst_id = h.arm_at(&item, &wf, anchor, 0, anchor.add_days(3));
     // Fire step 0 → awaiting_review (cursor now points at the fired step).
-    block_on(h.scheduler().drain_due(now())).unwrap();
+    block_on(h.scheduler().drain_due(now(), 100)).unwrap();
     assert_eq!(
         block_on(h.instances.get(&inst_id)).unwrap().unwrap().status,
         WorkflowInstanceStatus::AwaitingReview
@@ -400,7 +400,7 @@ fn rescheduling_an_awaiting_review_instance_is_rejected_and_does_not_double_fire
     let after = block_on(h.instances.get(&inst_id)).unwrap().unwrap();
     assert_eq!(after.status, WorkflowInstanceStatus::AwaitingReview);
     assert!(after.next_due_at.is_none());
-    let report = block_on(h.scheduler().drain_due(now())).unwrap();
+    let report = block_on(h.scheduler().drain_due(now(), 100)).unwrap();
     assert!(
         report.fired.is_empty(),
         "no second draft for the fired step"
@@ -424,4 +424,48 @@ fn detect_conflicts_flags_a_second_workflow_on_the_same_item() {
     let conflicts = block_on(h.engine().detect_conflicts(&item, &wf_b)).unwrap();
     assert_eq!(conflicts.len(), 1, "the active instance contains the item");
     assert_eq!(conflicts[0].workflow_b_id, wf_b.as_str());
+}
+
+// --- the engine's "missing referent" guards -------------------------------------------------
+// Every engine entry point resolves its referent from a repository and fails with NotFound when
+// it is absent, rather than panicking or arming a dangling instance.
+
+#[test]
+fn arming_an_unknown_pipeline_item_is_not_found() {
+    let h = Harness::new();
+    let wf = h.seed_workflow("standard");
+    let err = block_on(h.engine().arm(PipelineItemId::from("missing_item"), wf)).unwrap_err();
+    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
+}
+
+#[test]
+fn arming_with_an_unknown_workflow_definition_is_not_found() {
+    let h = Harness::new();
+    let item = h.seed_item();
+    let err = block_on(h.engine().arm(item, WorkflowDefId::from("missing_wf"))).unwrap_err();
+    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
+}
+
+#[test]
+fn rescheduling_an_unknown_instance_is_not_found() {
+    let h = Harness::new();
+    let err = block_on(h.engine().reschedule(
+        mailmate_common::ids::WorkflowInstanceId::from("missing_inst"),
+        now().add_days(1),
+        false,
+    ))
+    .unwrap_err();
+    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
+}
+
+#[test]
+fn resolving_a_review_on_an_unknown_instance_is_not_found() {
+    let h = Harness::new();
+    let err = block_on(h.engine().resolve_review(
+        mailmate_common::ids::WorkflowInstanceId::from("missing_inst"),
+        ReviewResolution::Send,
+        now(),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, mailmate_common::error::WorkflowError::NotFound(_)));
 }

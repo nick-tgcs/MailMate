@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "MailMate",
+  "name": "__MSG_extensionName__",
   "version": "0.1.0",
-  "description": "MailMate — local-first learning mail assistant. A Thunderbird UX over the native host: connection health today; the per-message panel and dashboard space follow.",
+  "default_locale": "en",
+  "description": "__MSG_extensionDescription__",
   "browser_specific_settings": {
     "gecko": {
       "id": "mailmate@example.com",
@@ -33,6 +34,7 @@
     "messagesUpdate",
     "messagesModify",
     "accountsRead",
+    "addressBooks",
     "compose",
     "compose.save",
     "storage",

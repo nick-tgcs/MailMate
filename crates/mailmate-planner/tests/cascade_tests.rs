@@ -52,6 +52,7 @@ impl Tier2Classifier for ScriptedTier2 {
         Ok(CalibratedScores {
             scores: self.scores.clone(),
             calibration_version: "scripted-v1".to_owned(),
+            contributions: Vec::new(),
         })
     }
     async fn update(&self, _labeled: LabeledExample) -> Result<(), MlError> {
@@ -106,6 +107,8 @@ fn message() -> MessageData {
         body_text: Some("body".to_owned()),
         attachments: vec![],
         remote_content_loaded: false,
+        sender_seen_count: None,
+        sender_in_address_book: None,
     }
 }
 

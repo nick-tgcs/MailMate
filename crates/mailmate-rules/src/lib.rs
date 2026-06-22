@@ -21,7 +21,7 @@ pub mod conflict;
 pub mod evaluator;
 
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use async_trait::async_trait;
 
@@ -37,20 +37,35 @@ use mailmate_ports::rule_engine::RuleEngine;
 use crate::evaluator::evaluate_condition;
 
 /// The default, deterministic [`RuleEngine`] adapter.
+///
+/// The rule snapshot lives behind an [`RwLock`] so it can be hot-reloaded in place (via
+/// [`reload`](Self::reload)) when the active/shadow set changes — e.g. the moment a human
+/// activates a learned rule — without rebuilding the engine or restarting the host. The
+/// in-process decision record is deliberately kept across a reload so a prior decision stays
+/// explainable.
 #[derive(Debug)]
 pub struct DeterministicRuleEngine {
-    rules: Vec<EvaluatableRule>,
+    rules: RwLock<Arc<Vec<EvaluatableRule>>>,
     decisions: Mutex<HashMap<DecisionId, RuleEvaluationResult>>,
 }
 
 impl DeterministicRuleEngine {
-    /// Build an engine over an immutable rule snapshot.
+    /// Build an engine over a rule snapshot.
     #[must_use]
     pub fn new(rules: Vec<EvaluatableRule>) -> Self {
         Self {
-            rules,
+            rules: RwLock::new(Arc::new(rules)),
             decisions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// A cheap, lock-free-after-clone handle to the current rule snapshot. Cloning the `Arc`
+    /// under the read lock keeps the (sync) evaluation loop from holding the lock.
+    fn snapshot(&self) -> Arc<Vec<EvaluatableRule>> {
+        self.rules
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn record(&self, result: &RuleEvaluationResult) {
@@ -71,7 +86,8 @@ impl RuleEngine for DeterministicRuleEngine {
         let mut applied_effects = Vec::new();
         let mut shadow_outcomes = Vec::new();
 
-        for rule in &self.rules {
+        let rules = self.snapshot();
+        for rule in rules.iter() {
             // draft / pending / disabled / retired / rejected never fire.
             if !rule.status.is_evaluated() {
                 continue;
@@ -144,7 +160,14 @@ impl RuleEngine for DeterministicRuleEngine {
         &self,
         candidate: RuleDraft,
     ) -> Result<Vec<RuleConflict>, RuleEngineError> {
-        Ok(conflict::detect_conflicts(&candidate, &self.rules))
+        Ok(conflict::detect_conflicts(&candidate, &self.snapshot()))
+    }
+
+    /// Replace the rule snapshot in place — the hot-reload behind a just-activated (or
+    /// status-changed) rule taking effect on the next evaluation, without a host restart. The
+    /// decision record is preserved, so explanations of earlier decisions still resolve.
+    fn reload(&self, rules: Vec<EvaluatableRule>) {
+        *self.rules.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(rules);
     }
 }
 
@@ -191,8 +214,78 @@ pub fn crate_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use futures::executor::block_on;
+    use mailmate_common::ids::{DecisionId, RuleId, RuleVersionId};
+    use mailmate_common::rules::condition::{Condition, FieldValue, Operator, Predicate};
+    use mailmate_common::rules::effect::RuleEffect;
+    use mailmate_common::rules::rule::{
+        RiskLevel, RuleKind, RuleScope, RuleStatus, RuleVersion,
+    };
+
     #[test]
     fn crate_name_is_available() {
         assert_eq!(super::crate_name(), "mailmate-rules");
+    }
+
+    fn ctx(decision: &str, domain: &str) -> RuleEvaluationContext {
+        let mut fields = BTreeMap::new();
+        fields.insert("sender_domain".to_owned(), FieldValue::Text(domain.to_owned()));
+        RuleEvaluationContext {
+            decision_id: DecisionId::from(decision),
+            fields,
+        }
+    }
+
+    fn active_filing_rule(domain: &str, folder: &str) -> EvaluatableRule {
+        EvaluatableRule {
+            rule_id: RuleId::from("rule_live"),
+            kind: RuleKind::Action,
+            scope: RuleScope::Domain,
+            band: HierarchyBand::LearnedActive,
+            status: RuleStatus::Active,
+            version: RuleVersion {
+                id: RuleVersionId::from("rv_live"),
+                version_number: 1,
+                condition: Condition::Predicate(Predicate {
+                    field: "sender_domain".to_owned(),
+                    op: Operator::Eq,
+                    value: FieldValue::Text(domain.to_owned()),
+                }),
+                effect: RuleEffect {
+                    move_to: Some(folder.to_owned()),
+                    ..RuleEffect::new()
+                },
+                risk_level: RiskLevel::Low,
+            },
+        }
+    }
+
+    #[test]
+    fn reload_swaps_the_rule_snapshot_and_preserves_recorded_decisions() {
+        // The hot-reload primitive behind a just-activated rule firing without a host restart.
+        let engine = DeterministicRuleEngine::new(vec![]);
+
+        // A decision over the empty rule set applies nothing.
+        let before = block_on(engine.evaluate(ctx("dec_1", "stripe.com"))).unwrap();
+        assert!(before.applied_effects.is_empty(), "no rules yet");
+
+        // Activate a rule by reloading the snapshot in place.
+        engine.reload(vec![active_filing_rule("stripe.com", "Receipts")]);
+
+        // A NEW evaluation now applies the freshly-activated rule.
+        let after = block_on(engine.evaluate(ctx("dec_2", "stripe.com"))).unwrap();
+        assert_eq!(after.applied_effects.len(), 1, "the reloaded rule fires");
+        assert_eq!(
+            after.applied_effects[0].effect.move_to.as_deref(),
+            Some("Receipts")
+        );
+
+        // The decision recorded BEFORE the reload is still explainable — reload swaps the rules
+        // in place, it does not discard the engine's decision record.
+        let explained = block_on(engine.explain(DecisionId::from("dec_1"))).unwrap();
+        assert_eq!(explained.decision_id, DecisionId::from("dec_1"));
     }
 }

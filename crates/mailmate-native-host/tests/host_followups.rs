@@ -43,6 +43,9 @@ fn neutral() -> Classification {
         phishing_score: 0.0,
         priority: Priority::Normal,
         needs_review: false,
+        confidence: 0.0,
+        salient_signals: Vec::new(),
+        safety_findings: Vec::new(),
         provenance: ClassificationProvenance::tier1(vec![]),
     }
 }
@@ -481,6 +484,73 @@ fn a_reply_on_a_tracked_thread_exits_the_sequence_via_record_user_action() {
     assert_eq!(payload["sink"], "workflow_exit");
     assert!(payload["id"].as_str().unwrap().contains(inst.as_str()));
     assert_eq!(h.instances.all()[0].status, WorkflowInstanceStatus::Engaged);
+}
+
+#[test]
+fn a_bounce_on_a_tracked_thread_exits_the_sequence_via_record_user_action() {
+    let h = Harness::new();
+    let wf = h.seed_workflow();
+    let item = h.seed_item();
+    let inst = h.arm_active_now(&item, &wf);
+    let router = h.router();
+    // An NDR from mailer-daemon with a delivery-failure subject — a real bounce.
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "bounce_received",
+            "thread_id": "thread_acme",
+            "sender_email": "MAILER-DAEMON@mx.acme.test",
+            "subject": "Undelivered Mail Returned to Sender"
+        }),
+    )))
+    .unwrap();
+    let payload = one_ok_response(&h.out);
+    assert_eq!(payload["sink"], "workflow_exit");
+    assert!(payload["id"].as_str().unwrap().contains(inst.as_str()));
+    // The sequence is terminal (cancelled) — the unreachable address stops the chase.
+    assert_eq!(
+        h.instances.all()[0].status,
+        WorkflowInstanceStatus::Cancelled
+    );
+    let exit = h
+        .audit
+        .entries()
+        .into_iter()
+        .find(|e| e.event_type == "workflow_exited")
+        .expect("a workflow_exited audit row");
+    assert_eq!(exit.payload["event"], "bounced");
+}
+
+#[test]
+fn an_unconfirmed_bounce_does_not_kill_the_sequence() {
+    let h = Harness::new();
+    let wf = h.seed_workflow();
+    let item = h.seed_item();
+    h.arm_active_now(&item, &wf);
+    let router = h.router();
+    // A `bounce_received` whose message does NOT look like an NDR — the host re-confirms and
+    // declines to exit, so a mis-tagged or spoofed event can't silently kill a live sequence.
+    block_on(router.handle(request(
+        "record_user_action",
+        json!({
+            "event_type": "bounce_received",
+            "thread_id": "thread_acme",
+            "sender_email": "dana@acme.test",
+            "subject": "Re: the proposal — looks good"
+        }),
+    )))
+    .unwrap();
+    assert_eq!(one_ok_response(&h.out)["sink"], "bounce_unconfirmed");
+    assert_eq!(
+        h.instances.all()[0].status,
+        WorkflowInstanceStatus::Active,
+        "an unconfirmed bounce leaves the sequence running"
+    );
+    assert!(h
+        .audit
+        .entries()
+        .iter()
+        .any(|e| e.event_type == "bounce_unconfirmed"));
 }
 
 #[test]

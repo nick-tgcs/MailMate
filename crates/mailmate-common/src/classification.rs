@@ -135,6 +135,44 @@ impl ClassificationProvenance {
     }
 }
 
+/// A calibrated, human-facing confidence band — what the per-message panel shows instead of a
+/// raw probability. Derived from a verdict's [`confidence`](Classification::confidence).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceBand {
+    /// At or above the Tier-2 acceptance bar — MailMate is confident.
+    High,
+    /// A leaning, not a conviction.
+    Medium,
+    /// Little better than a guess — surfaced, not acted on.
+    Low,
+}
+
+impl ConfidenceBand {
+    /// The stable snake_case label used on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+
+    /// Bucket a `[0, 1]` confidence into a band. The `High` cut matches the cascade's default
+    /// Tier-2 acceptance bar, so "high" means "confident enough to have auto-cleared".
+    #[must_use]
+    pub fn from_confidence(confidence: f64) -> Self {
+        if confidence >= 0.85 {
+            Self::High
+        } else if confidence >= 0.6 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+}
+
 /// The P1 verdict on a message: labels, the two safety scores, a priority, and how it was
 /// decided. `needs_review` is set when escalation was *needed* but no Tier-3 provider was
 /// available — the message degrades to review rather than being auto-cleared.
@@ -155,6 +193,22 @@ pub struct Classification {
     /// unavailable to escalate to — the message must be surfaced for human review.
     #[serde(default)]
     pub needs_review: bool,
+    /// The calibrated confidence in the assigned verdict, in `[0, 1]` — a deterministic Tier-1
+    /// rule is `1.0`, a Tier-2 verdict is its top-label probability. The panel renders the
+    /// **band** ([`confidence_band`](Classification::confidence_band)), not the raw number.
+    #[serde(default)]
+    pub confidence: f64,
+    /// The human-readable, optionally-correctable reasons behind this verdict — the
+    /// explainability spine. Built from the *actual* signals that produced the score (top-k
+    /// signed Tier-2 contributions, the fired Tier-1 rules, or an honest Tier-3 AI-assessment
+    /// marker), most-decisive first. Empty when nothing notable drove the verdict.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub salient_signals: Vec<crate::salient::SalientSignal>,
+    /// Inform-only phishing/malware findings about this message — the Safety block the panel
+    /// renders. These never change what MailMate does (not policy, take no action); they are a
+    /// heads-up for the human. Empty when nothing notable was found.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safety_findings: Vec<crate::safety::SafetyFinding>,
     /// How the verdict was reached.
     pub provenance: ClassificationProvenance,
 }
@@ -186,6 +240,12 @@ impl Classification {
             }
         }
         categories
+    }
+
+    /// The calibrated confidence band the panel renders for this verdict.
+    #[must_use]
+    pub fn confidence_band(&self) -> ConfidenceBand {
+        ConfidenceBand::from_confidence(self.confidence)
     }
 
     /// Whether any implied category is sensitive (financial / security / legal).
@@ -269,6 +329,9 @@ mod tests {
             phishing_score: 0.0,
             priority: Priority::Normal,
             needs_review: false,
+            confidence: 0.0,
+            salient_signals: Vec::new(),
+            safety_findings: Vec::new(),
             provenance: ClassificationProvenance::tier1(vec![]),
         }
     }
@@ -320,6 +383,19 @@ mod tests {
         assert_eq!(t3.tier, ClassificationTier::Tier3Llm);
         assert!(t3.escalated);
         assert_eq!(t3.provider_id.as_deref(), Some("mock"));
+    }
+
+    #[test]
+    fn confidence_buckets_into_a_calibrated_band() {
+        assert_eq!(ConfidenceBand::from_confidence(0.95), ConfidenceBand::High);
+        assert_eq!(ConfidenceBand::from_confidence(0.85), ConfidenceBand::High);
+        assert_eq!(ConfidenceBand::from_confidence(0.7), ConfidenceBand::Medium);
+        assert_eq!(ConfidenceBand::from_confidence(0.3), ConfidenceBand::Low);
+        // The band rides off the verdict's confidence.
+        let mut c = classification(&["newsletter"]);
+        c.confidence = 0.9;
+        assert_eq!(c.confidence_band(), ConfidenceBand::High);
+        assert_eq!(c.confidence_band().as_str(), "high");
     }
 
     #[test]

@@ -2,11 +2,13 @@
 //! decision to an agent proposal.
 //!
 //! This is where "require human review for activation of risky rules" becomes a mechanism:
-//! a proposal's recommended rule is created **only** here, on acceptance, and only into the
-//! proposal's recommended status (`shadow_mode`/`pending_human_review`) — **never `active`**.
-//! No path through this adapter activates a rule, so a risky rule cannot go live without a
-//! further, separate human action. Every decision is recorded to `rule_proposal_feedback`
-//! (so the curator loop is learnable) and to the audit timeline.
+//! a proposal's recommended rule is created **only** here, on acceptance, and *materialization*
+//! always enters the proposal's recommended status (`shadow_mode`/`pending_human_review`) —
+//! **never `active`**. A rule goes live only when the accepting decision *also* asks to
+//! activate ([`ReviewDecision::activate`]), which performs a distinct, separately-audited
+//! `rule_activated` transition — so a rule never activates as a side effect of materialization,
+//! and the cautious `accept_for_shadow_mode` path leaves it shadow. Every decision is recorded
+//! to `rule_proposal_feedback` (so the curator loop is learnable) and to the audit timeline.
 
 use std::sync::Arc;
 
@@ -61,15 +63,18 @@ impl DefaultProposalReview {
         }
     }
 
-    /// Materialize the rule an accepted proposal recommends, in its recommended (non-active)
-    /// status. Returns the new rule id for a `new_rule` acceptance; `None` for kinds that
-    /// mutate or reference an existing rule (refine/retire), or that need a manual multi-rule
-    /// restructure (merge/split).
+    /// Materialize the rule an accepted proposal recommends. The rule is created into the
+    /// proposal's recommended (shadow/pending) status; if `activate` is set, it is then turned
+    /// `active` by a *separate, audited* `rule_activated` transition (never a recommended-status
+    /// shortcut). Returns the new rule id **and its resulting lifecycle status** for a `new_rule`
+    /// acceptance; `None` for kinds that mutate or reference an existing rule (refine/retire), or
+    /// that need a manual multi-rule restructure (merge/split).
     async fn materialize(
         &self,
         proposal: &AgentProposal,
+        activate: bool,
         now: Timestamp,
-    ) -> Result<Option<RuleId>, ReviewError> {
+    ) -> Result<Option<(RuleId, RuleStatus)>, ReviewError> {
         match proposal.proposal_type {
             ProposalKind::NewRule => {
                 let draft = proposal
@@ -97,12 +102,27 @@ impl DefaultProposalReview {
                     },
                 };
                 let rule_id = self.rules.save_rule_draft(new_rule).await?;
+                // Always materialize into the recommended (non-active) status first, and audit
+                // that as the ordinary status change. This keeps materialization shadow-only.
                 self.rules
                     .update_rule_status(&rule_id, draft.kind, proposal.recommended_status)
                     .await?;
                 self.append_status_audit(proposal, &rule_id, draft.kind, now)
                     .await?;
-                Ok(Some(rule_id))
+                // Activation, when requested, is a SECOND, explicit transition to `active` with
+                // its own `rule_activated` audit — the separate human decision that turns a rule
+                // live. The policy guard still bounds what an active rule may auto-apply.
+                let final_status = if activate {
+                    self.rules
+                        .update_rule_status(&rule_id, draft.kind, RuleStatus::Active)
+                        .await?;
+                    self.append_activation_audit(proposal, &rule_id, draft.kind)
+                        .await?;
+                    RuleStatus::Active
+                } else {
+                    proposal.recommended_status
+                };
+                Ok(Some((rule_id, final_status)))
             }
             ProposalKind::RefineRule => {
                 // A refine with a draft appends a new version to the target and re-points it;
@@ -253,6 +273,27 @@ impl DefaultProposalReview {
         self.audit.append(entry).await?;
         Ok(())
     }
+
+    /// Audit the explicit activation transition (the second status change that turns a
+    /// just-materialized rule live). Distinct from [`append_status_audit`](Self::append_status_audit)
+    /// so a trust receipt / audit can count deliberate activations separately from the routine
+    /// shadow materialization.
+    async fn append_activation_audit(
+        &self,
+        proposal: &AgentProposal,
+        rule_id: &RuleId,
+        kind: mailmate_common::rules::rule::RuleKind,
+    ) -> Result<(), ReviewError> {
+        let entry = AuditEntry::new(event_type::RULE_ACTIVATED, Actor::User)
+            .with_rule(kind, rule_id.clone())
+            .with_proposal(proposal.id.clone())
+            .with_payload(json!({
+                "to": RuleStatus::Active.as_str(),
+                "proposal_type": proposal.proposal_type.as_str(),
+            }));
+        self.audit.append(entry).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -275,12 +316,14 @@ impl ProposalReview for DefaultProposalReview {
         }
 
         let now = Timestamp::now();
-        let (new_status, created_rule_id) = if decision.outcome.is_acceptance() {
-            let rule_id = self.materialize(&proposal, now).await?;
-            (ProposalStatus::Accepted, rule_id)
+        let (new_status, created) = if decision.outcome.is_acceptance() {
+            let created = self.materialize(&proposal, decision.activate, now).await?;
+            (ProposalStatus::Accepted, created)
         } else {
             (ProposalStatus::Rejected, None)
         };
+        let created_rule_id = created.as_ref().map(|(id, _)| id.clone());
+        let rule_status = created.as_ref().map(|(_, status)| *status);
 
         self.proposals
             .set_status(&proposal.id, new_status, Some(now))
@@ -311,6 +354,7 @@ impl ProposalReview for DefaultProposalReview {
             proposal_id: proposal.id,
             new_status,
             created_rule_id,
+            rule_status,
             feedback_id,
         })
     }

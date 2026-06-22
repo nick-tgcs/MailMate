@@ -16,6 +16,7 @@
 //!
 //! [`DrainReport`]: mailmate_common::workflow::DrainReport
 
+pub mod bounce;
 pub mod cadence;
 pub mod conflict;
 pub mod engine;

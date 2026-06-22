@@ -54,6 +54,7 @@ impl Tier2Classifier for ScriptedTier2 {
         Ok(CalibratedScores {
             scores: self.scores.clone(),
             calibration_version: "scripted-v1".to_owned(),
+            contributions: Vec::new(),
         })
     }
     async fn update(&self, _labeled: LabeledExample) -> Result<(), MlError> {
@@ -76,6 +77,8 @@ fn message(from: &str, subject: &str) -> MessageData {
         body_text: Some("please see attached".to_owned()),
         attachments: vec![],
         remote_content_loaded: false,
+        sender_seen_count: None,
+        sender_in_address_book: None,
     }
 }
 
@@ -224,6 +227,59 @@ fn policy_guard_reviews_an_unsafe_move_from_an_otherwise_matching_rule() {
         .policy_checks
         .iter()
         .any(|c| c.policy_id == "financial_security_legal_move_requires_review"));
+}
+
+#[test]
+fn the_thread_guard_never_auto_junks_a_reply_in_a_joined_thread() {
+    // §3.6 / Phase-1b exit: a junk rule fires on a sender, but the message is a reply in a
+    // conversation the user joined — so the hard guard demotes the junk to review (it is never
+    // auto-applied), while the same rule on a non-threaded message junks outright.
+    let junk_rule = rule(
+        "rule_junk_sender",
+        RuleKind::Action,
+        "sender_domain",
+        Operator::Eq,
+        FieldValue::Text("noisy.example".to_owned()),
+        RuleEffect {
+            mark_junk: Some(true),
+            ..RuleEffect::new()
+        },
+    );
+    let make_service = || {
+        service(
+            vec![],
+            vec![junk_rule.clone()],
+            Arc::new(ScriptedTier2::new(&[("ham", 0.95), ("spam", 0.05)])),
+            None,
+        )
+    };
+
+    // A reply in a thread the user joined (In-Reply-To set, not bulk): junk is held for review.
+    let mut reply = message("someone@noisy.example", "Re: our call");
+    reply.headers.in_reply_to = Some("<prev-msg@noisy.example>".to_owned());
+    let outcome =
+        block_on(make_service().handle_message(reply, TriggerKind::NewMail)).unwrap();
+    assert!(
+        outcome.guarded_plan.allowed_actions.is_empty(),
+        "a joined-thread reply is never auto-junked"
+    );
+    assert_eq!(outcome.guarded_plan.review_required_actions.len(), 1);
+    assert!(outcome
+        .guarded_plan
+        .policy_checks
+        .iter()
+        .any(|c| c.policy_id == "never_auto_act_on_a_joined_thread"));
+
+    // The SAME rule on a fresh, non-threaded message junks outright — the guard is narrow.
+    let fresh = message("someone@noisy.example", "Buy now");
+    let outcome2 =
+        block_on(make_service().handle_message(fresh, TriggerKind::NewMail)).unwrap();
+    assert_eq!(
+        outcome2.guarded_plan.allowed_actions.len(),
+        1,
+        "a non-conversation message still auto-junks"
+    );
+    assert!(outcome2.guarded_plan.review_required_actions.is_empty());
 }
 
 #[test]

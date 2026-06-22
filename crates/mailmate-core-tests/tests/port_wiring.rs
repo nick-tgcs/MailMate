@@ -25,6 +25,9 @@ fn neutral_classification() -> Classification {
         phishing_score: 0.0,
         priority: Priority::Normal,
         needs_review: false,
+        confidence: 0.0,
+        salient_signals: Vec::new(),
+        safety_findings: Vec::new(),
         provenance: ClassificationProvenance::tier1(vec![]),
     }
 }

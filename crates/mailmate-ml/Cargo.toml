@@ -9,13 +9,11 @@ publish = false
 [lints]
 workspace = true
 
-# `burn` is RESERVED: it swaps the in-process trainer's compute backend (and will back the
-# discriminative Tier-2 classifier + in-process AiProvider) once an on-device LoRA adapter
-# exists on Burn primitives. Phase 9 ships the `InProcessTrainer` — an honest small-model
-# trainer that reports `lora: false` and needs no Burn, so the default build/gate stays
-# light. Pulling the heavy `burn` tree is deferred until the LoRA target is real.
-[features]
-burn = []
+# Phase 8 makes `burn` the REAL default compute backend: the on-device Tier-2 classifier
+# trainer (`tier2_burn`) trains a linear model by gradient descent on the CPU `ndarray`
+# backend and writes a loadable Burn record the cascade loads and uses. CPU-only and no
+# `train` (Learner) feature — we own the training loop — so the tree stays as small as a real
+# autodiff framework allows. `mailmate-core` never sees this; only the ports cross the line.
 
 [dependencies]
 mailmate-common = { path = "../mailmate-common" }
@@ -24,6 +22,11 @@ mailmate-ports = { path = "../mailmate-ports" }
 # the trait-OWNER; the dependency points this way (impl -> trait), never the reverse.
 mailmate-training = { path = "../mailmate-training" }
 async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Real on-device ML: CPU ndarray backend + reverse-mode autodiff + the record (de)serializer
+# for the loadable artifact. No GPU/Learner/vision features — we hand-roll the training loop.
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray", "autodiff"] }
 
 [dev-dependencies]
 futures.workspace = true

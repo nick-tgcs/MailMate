@@ -96,6 +96,9 @@ pub enum ExitCondition {
     UserCancel,
     /// The cadence ran out of steps.
     MaxSteps,
+    /// A delivery failure (NDR / bounce) came back for the tracked thread — the address is
+    /// unreachable, so chasing a reply is pointless and the sequence exits.
+    Bounced,
 }
 
 impl ExitCondition {
@@ -108,6 +111,7 @@ impl ExitCondition {
             Self::Lost => "lost",
             Self::UserCancel => "user_cancel",
             Self::MaxSteps => "max_steps",
+            Self::Bounced => "bounced",
         }
     }
 
@@ -120,6 +124,7 @@ impl ExitCondition {
             "lost" => Some(Self::Lost),
             "user_cancel" => Some(Self::UserCancel),
             "max_steps" => Some(Self::MaxSteps),
+            "bounced" => Some(Self::Bounced),
             _ => None,
         }
     }
@@ -494,6 +499,10 @@ pub enum ExitEvent {
     Lost,
     /// The user cancelled → `cancelled`.
     Cancel,
+    /// A delivery failure (NDR / bounce) came back for the tracked thread → `cancelled`. The
+    /// address is unreachable, so the sequence stops; the deal's pipeline stage is left as-is (a
+    /// bounce may be a typo'd address, not a lost deal — the human decides the outcome).
+    Bounced,
 }
 
 impl ExitEvent {
@@ -505,6 +514,7 @@ impl ExitEvent {
             Self::Won => "won",
             Self::Lost => "lost",
             Self::Cancel => "cancel",
+            Self::Bounced => "bounced",
         }
     }
 
@@ -516,6 +526,7 @@ impl ExitEvent {
             "won" => Some(Self::Won),
             "lost" => Some(Self::Lost),
             "cancel" => Some(Self::Cancel),
+            "bounced" => Some(Self::Bounced),
             _ => None,
         }
     }
@@ -526,7 +537,7 @@ impl ExitEvent {
         match self {
             Self::ReplyReceived => WorkflowInstanceStatus::Engaged,
             Self::Won | Self::Lost => WorkflowInstanceStatus::Completed,
-            Self::Cancel => WorkflowInstanceStatus::Cancelled,
+            Self::Cancel | Self::Bounced => WorkflowInstanceStatus::Cancelled,
         }
     }
 
@@ -538,7 +549,8 @@ impl ExitEvent {
             Self::ReplyReceived => Some(PipelineStage::Engaged),
             Self::Won => Some(PipelineStage::Won),
             Self::Lost => Some(PipelineStage::Lost),
-            Self::Cancel => None,
+            // A bounce or a user cancel doesn't reclassify the deal — only the human does.
+            Self::Cancel | Self::Bounced => None,
         }
     }
 }
@@ -721,6 +733,7 @@ mod tests {
             ExitCondition::Lost,
             ExitCondition::UserCancel,
             ExitCondition::MaxSteps,
+            ExitCondition::Bounced,
         ] {
             assert_eq!(ExitCondition::from_db_str(e.as_str()), Some(e));
         }
@@ -814,6 +827,16 @@ mod tests {
         assert_eq!(
             ExitEvent::from_db_str(ExitEvent::Lost.as_str()),
             Some(ExitEvent::Lost)
+        );
+        // A bounce is a terminal, system-detected exit that does not reclassify the deal stage.
+        assert_eq!(
+            ExitEvent::Bounced.resulting_status(),
+            WorkflowInstanceStatus::Cancelled
+        );
+        assert_eq!(ExitEvent::Bounced.resulting_stage(), None);
+        assert_eq!(
+            ExitEvent::from_db_str(ExitEvent::Bounced.as_str()),
+            Some(ExitEvent::Bounced)
         );
     }
 

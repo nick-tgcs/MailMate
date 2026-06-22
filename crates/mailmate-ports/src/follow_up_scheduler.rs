@@ -13,15 +13,21 @@ use mailmate_common::workflow::DrainReport;
 /// Drains due follow-up steps into review-required drafts (catch-up-on-launch).
 #[async_trait]
 pub trait FollowUpScheduler: Send + Sync {
-    /// Drain every due instance at `now`: apply the coalescing/staleness guard, emit at
-    /// most one review-required draft per instance (coalescing the rest), move stale
-    /// instances to `needs_attention`, and return the [`DrainReport`]. Idempotent enough to
-    /// re-run: an instance moved to `awaiting_review`/`needs_attention` clears its
-    /// `next_due_at` and is no longer selected.
+    /// Drain the due instances at `now`, **capped at `batch_cap`** (the soonest-due first): apply
+    /// the coalescing/staleness guard, emit at most one review-required draft per instance
+    /// (coalescing the rest), move stale instances to `needs_attention`, and return the
+    /// [`DrainReport`]. The cap bounds a long-offline catch-up to one batch per drain rather than
+    /// an unbounded storm; the remainder drains on the next tick. Idempotent enough to re-run: an
+    /// instance moved to `awaiting_review`/`needs_attention` clears its `next_due_at` and is no
+    /// longer selected.
     ///
     /// # Errors
     /// [`WorkflowError`] on a storage or drafting failure.
-    async fn drain_due(&self, now: Timestamp) -> Result<DrainReport, WorkflowError>;
+    async fn drain_due(
+        &self,
+        now: Timestamp,
+        batch_cap: usize,
+    ) -> Result<DrainReport, WorkflowError>;
 
     /// Restart recovery. Because a drain only advances an instance after its draft is
     /// produced and persisted, there is no half-fired state to repair; recovery is the

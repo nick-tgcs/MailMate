@@ -35,28 +35,32 @@ use mailmate_common::error::{StorageError, TransportError};
 use mailmate_common::feedback::{
     ClassificationFeedback, FilingFeedback, FollowUpFeedback, RuleProposalFeedback,
 };
-use mailmate_common::rules::rule::{EvaluatableRule, RuleKind, RuleScope};
+use mailmate_common::rules::rule::{EvaluatableRule, RuleKind, RuleScope, RuleStatus};
 use mailmate_core::{ImportExportService, Ports};
 use mailmate_ports::ai_provider::AiProvider;
 use mailmate_ports::clock::Clock;
 use mailmate_ports::feature_extractor::FeatureExtractor;
 use mailmate_ports::rule_engine::RuleEngine;
 use mailmate_ports::storage::{FeedbackRepository, RuleRepository};
+use mailmate_ports::tier2_classifier::Tier2Classifier;
 use mailmate_ports::transport::Transport;
 
 use mailmate_ai::http::HttpClient;
 use mailmate_ai::TaskReplyDrafter;
 use mailmate_learning::{AiRuleCurator, DefaultLearningEngine, DefaultProposalReview};
-use mailmate_ml::{DeterministicFeatureExtractor, InProcessTrainer, LogisticRegressionClassifier};
+use mailmate_ml::{
+    DeterministicFeatureExtractor, InProcessTrainer, LogisticRegressionClassifier, SwappableTier2,
+};
 use mailmate_planner::{CascadeClassifier, DefaultActionPlanner};
 use mailmate_policy::HardPolicyGuard;
 use mailmate_rules::DeterministicRuleEngine;
 use mailmate_storage::{
-    open_and_migrate, restore_database, SqliteAdapterRepository, SqliteAuditRepository,
+    ensure_dir_owner_only, open_and_migrate, restore_database, SqliteAdapterRepository,
+    SqliteAuditRepository, SqliteDataRightsRepository,
     SqliteBackend, SqliteConflictRepository, SqliteDatasetRepository, SqliteEvalRunRepository,
-    SqliteFeedbackRepository, SqlitePipelineItemRepository, SqliteProposalRepository,
-    SqliteRuleRepository, SqliteWorkflowInstanceRepository, SqliteWorkflowRepository,
-    StorageConfig, StoragePath,
+    SqliteFeedbackRepository, SqliteMessageRepository, SqlitePipelineItemRepository,
+    SqliteProposalRepository, SqliteReminderRepository, SqliteRuleRepository,
+    SqliteWorkflowInstanceRepository, SqliteWorkflowRepository, StorageConfig, StoragePath,
 };
 use mailmate_training::{DefaultTrainingPipeline, FeedbackTrainingSource};
 use mailmate_workflow::{DefaultExitDetector, DefaultFollowUpScheduler, DefaultWorkflowEngine};
@@ -65,7 +69,8 @@ use crate::clock::SystemClock;
 use crate::config::{AppConfig, ConfigError};
 use crate::http_client::StdHttpClient;
 use crate::provider::build_provider;
-use crate::router::{AdminSuite, FollowUpSuite, HostRouter};
+use crate::tier2_training::Tier2TrainingService;
+use crate::router::{AdminSuite, FollowUpSuite, HostRouter, RuleReload};
 use crate::secret_store::FileSecretStore;
 use crate::thunderbird::{ThunderbirdMailClient, WriterTransport};
 
@@ -127,7 +132,17 @@ pub fn build_app(
     let storage_config = config.storage_config(data_dir);
     let backend = open_and_migrate(&storage_config)?;
     let secrets = secrets_path(&storage_config, data_dir);
-    let router = build_router(&config, &backend, out, secrets)?;
+    let tier2_weights = tier2_weights_path(&storage_config, data_dir);
+    // Persist `set_*` writes to the config's on-disk home under the data dir (or `MAILMATE_CONFIG`),
+    // so a provider configured in one short-lived host process is still there for the next one.
+    let router = build_router(
+        &config,
+        &backend,
+        out,
+        secrets,
+        Some(resolve_config_path(data_dir)),
+        Some(tier2_weights),
+    )?;
     Ok(App {
         router,
         backend,
@@ -140,6 +155,10 @@ pub fn build_app(
 /// driven both by [`build_app`] in production and by the composition tests with an in-memory
 /// backend + a fake transport.
 ///
+/// `config_path` is where the admin `set_*` writes persist (production passes
+/// `<data_dir>/config.toml`); `None` keeps the config in-memory for the session, which the
+/// composition tests use so they touch no disk.
+///
 /// # Errors
 /// [`RuntimeError::Storage`] if seeding a rule snapshot from the repository fails.
 pub fn build_router(
@@ -147,10 +166,13 @@ pub fn build_router(
     backend: &Arc<SqliteBackend>,
     out: Arc<dyn Transport>,
     secrets_path: PathBuf,
+    config_path: Option<PathBuf>,
+    tier2_weights_path: Option<PathBuf>,
 ) -> Result<HostRouter, RuntimeError> {
     // --- Repositories (all over the one backend) ---
     let rules = Arc::new(SqliteRuleRepository::new(backend.clone()));
     let audit = Arc::new(SqliteAuditRepository::new(backend.clone()));
+    let messages = Arc::new(SqliteMessageRepository::new(backend.clone()));
     let feedback = Arc::new(SqliteFeedbackRepository::new(backend.clone()));
     let proposals = Arc::new(SqliteProposalRepository::new(backend.clone()));
     let conflicts = Arc::new(SqliteConflictRepository::new(backend.clone()));
@@ -160,6 +182,8 @@ pub fn build_router(
     let datasets = Arc::new(SqliteDatasetRepository::new(backend.clone()));
     let lora_adapters = Arc::new(SqliteAdapterRepository::new(backend.clone()));
     let eval_runs = Arc::new(SqliteEvalRunRepository::new(backend.clone()));
+    let data_rights = Arc::new(SqliteDataRightsRepository::new(backend.clone()));
+    let reminders = Arc::new(SqliteReminderRepository::new(backend.clone()));
 
     // The one feedback store, viewed as each single-owner kind.
     let classification_feedback: Arc<dyn FeedbackRepository<ClassificationFeedback>> =
@@ -174,10 +198,44 @@ pub fn build_router(
     let secret_store = Arc::new(FileSecretStore::new(secrets_path));
     let feature_extractor: Arc<dyn FeatureExtractor> =
         Arc::new(DeterministicFeatureExtractor::new());
-    let tier2 = Arc::new(LogisticRegressionClassifier::new(
-        TIER2_POSITIVE,
-        TIER2_NEGATIVE,
-    ));
+    // The always-on online Tier-2 classifier (logistic regression) persists its learning to disk
+    // when a path is configured (production), so a correction taught in one short-lived host
+    // process is still learned by the next; the composition tests pass `None` to stay in-memory.
+    let online_tier2: Arc<dyn Tier2Classifier> = Arc::new(match &tier2_weights_path {
+        Some(path) => LogisticRegressionClassifier::with_persistence(
+            TIER2_POSITIVE,
+            TIER2_NEGATIVE,
+            path.clone(),
+        ),
+        None => LogisticRegressionClassifier::new(TIER2_POSITIVE, TIER2_NEGATIVE),
+    });
+    // Phase 8: wrap the Tier-2 in a `SwappableTier2` so a freshly-trained, held-out-gated Burn
+    // artifact can hot-swap it in place (no host restart). The candidate/active artifact dirs sit
+    // beside the weights file; at startup a previously-activated artifact becomes the initial
+    // backing, else the online model is the cold-start fallback.
+    let tier2_model_dirs = tier2_weights_path.as_ref().map(|p| {
+        let base = p
+            .parent()
+            .map_or_else(|| PathBuf::from("tier2_model"), |dir| dir.join("tier2_model"));
+        (base.join("candidate"), base.join("active"))
+    });
+    let initial_tier2: Arc<dyn Tier2Classifier> = tier2_model_dirs
+        .as_ref()
+        .and_then(|(_, active)| Tier2TrainingService::load_active(active))
+        .unwrap_or(online_tier2);
+    let swappable_tier2 = Arc::new(SwappableTier2::new(initial_tier2));
+    let tier2: Arc<dyn Tier2Classifier> = swappable_tier2.clone();
+    let tier2_training = tier2_model_dirs.map(|(candidate, active)| {
+        Tier2TrainingService::new(
+            swappable_tier2.clone(),
+            classification_feedback.clone(),
+            candidate,
+            active,
+            TIER2_POSITIVE,
+            TIER2_NEGATIVE,
+        )
+        .with_tuning(config.tier2.max_rows, config.tier2.precision_gate)
+    });
     // Build the configured provider from `[ai]` over the host's local HTTP transport. With no
     // provider configured (or an incomplete one), this degrades to UnavailableProvider — every
     // provider-typed collaborator still stands up and honestly reports "needs a provider".
@@ -186,8 +244,8 @@ pub fn build_router(
         build_provider(&config.ai, secret_store.as_ref(), http_client.clone());
 
     // --- Deterministic engines, seeded from the stored rule snapshots ---
-    let classification_snapshot = rule_snapshot(rules.as_ref(), RuleKind::Classification)?;
-    let action_snapshot = rule_snapshot(rules.as_ref(), RuleKind::Action)?;
+    let classification_snapshot = block_on(rule_snapshot(rules.as_ref(), RuleKind::Classification))?;
+    let action_snapshot = block_on(rule_snapshot(rules.as_ref(), RuleKind::Action))?;
     let mut all_rules = classification_snapshot.clone();
     all_rules.extend(action_snapshot.clone());
 
@@ -198,6 +256,16 @@ pub fn build_router(
     let curator_rule_engine: Arc<dyn RuleEngine> =
         Arc::new(DeterministicRuleEngine::new(all_rules));
 
+    // Keep handles to the three engines so the router can hot-reload them in place the moment a
+    // rule is activated/materialized (without a host restart). They are the SAME Arc instances
+    // the cascade/planner/curator hold, so reloading here updates what those see.
+    let rule_reload = RuleReload {
+        rules: rules.clone(),
+        classification_engine: classification_rule_engine.clone(),
+        action_engine: action_rule_engine.clone(),
+        curator_engine: curator_rule_engine.clone(),
+    };
+
     let classification_engine = Arc::new(CascadeClassifier::new(
         classification_rule_engine,
         tier2.clone(),
@@ -206,12 +274,20 @@ pub fn build_router(
     let policy_guard = Arc::new(HardPolicyGuard::new());
 
     // --- The learning loop + curator + review + drafter + training ---
-    let learning_engine = Arc::new(DefaultLearningEngine::new(
-        classification_feedback.clone(),
-        filing_feedback.clone(),
-        audit.clone(),
-        proposals.clone(),
-    ));
+    let learning_engine = Arc::new(
+        DefaultLearningEngine::new(
+            classification_feedback.clone(),
+            filing_feedback.clone(),
+            audit.clone(),
+            proposals.clone(),
+        )
+        // Give it the rule snapshot so a proposal pass also surfaces human-gated retire
+        // proposals for active rules the user keeps undoing (Phase 7 decay)…
+        .with_rules(rules.clone())
+        // …and the clock so it also surfaces retire proposals for rules that have gone *stale*
+        // (no fires in the idle window) — the time-based half of Phase-7 decay.
+        .with_clock(clock.clone()),
+    );
     let rule_curator = Arc::new(AiRuleCurator::new(
         provider.clone(),
         learning_engine.clone(),
@@ -290,16 +366,25 @@ pub fn build_router(
         proposals,
         // The live, mutable config the `set_*` writes mutate; seeded from the loaded config.
         config: Arc::new(Mutex::new(config.clone())),
-        // Persist writes back to the file the config came from (`MAILMATE_CONFIG`), if any.
-        config_path: env_nonempty("MAILMATE_CONFIG").map(PathBuf::from),
+        // Where those writes persist: `<data_dir>/config.toml` in production, `None` in tests.
+        config_path,
         secret_store,
         // The shared HTTP transport, reused for `list_models` provider discovery.
         http: http_client,
     };
 
-    Ok(HostRouter::from_ports(&ports, audit, out)
+    let mut router = HostRouter::from_ports(&ports, audit, out)
         .with_followups(suite)
-        .with_admin(admin))
+        .with_followup_batch_cap(config.followups.drain_batch_cap)
+        .with_admin(admin)
+        .with_rule_reload(rule_reload)
+        .with_messages(messages)
+        .with_data_rights(data_rights)
+        .with_reminders(reminders, config.followups.reminder_batch_cap);
+    if let Some(service) = tier2_training {
+        router = router.with_tier2_training(service);
+    }
+    Ok(router)
 }
 
 /// Run the host: open the database, assemble the router over the stdio transport, drain
@@ -310,11 +395,48 @@ pub fn build_router(
 /// [`RuntimeError`] if the app cannot be built, the startup drain fails to emit, or the serve
 /// loop ends on a fatal transport error.
 pub fn serve(config: AppConfig, data_dir: &Path) -> Result<(), RuntimeError> {
+    // The 0700 data-dir guarantee MUST land before anything else touches the directory: the
+    // logger (next line) creates `host.log` inside it, which would otherwise create the dir at
+    // the process umask and rob the backend of its chance to lock it. Create + lock here, once.
+    ensure_dir_owner_only(data_dir)?;
+    // Stand the file log up first so even a build_app failure is recorded. stderr is discarded by
+    // the confined Thunderbird snap and stdout is the framed protocol, so the file is our only voice.
+    let level = crate::logging::level_from_env();
+    let log_path = crate::logging::init(data_dir, level);
+    install_panic_logger();
+    log::info!(
+        "host starting: pid={} data_dir={} log={} level={level:?}",
+        std::process::id(),
+        data_dir.display(),
+        log_path.display(),
+    );
+
     let out: Arc<dyn Transport> = Arc::new(WriterTransport::new(stdout()));
     let app = build_app(config, data_dir, out)?;
+    log::info!(
+        "host ready: providers={} followups_tick={}s catch_up_on_launch={}",
+        app.config.ai.providers.len(),
+        app.config.followups.tick_seconds,
+        app.config.followups.catch_up_on_launch,
+    );
+
+    // Seed the cold-start starter rules as drafts so a fresh install has something to review and
+    // one-tap activate in session one. Idempotent (skips on a name collision), so it is safe to
+    // run on every launch.
+    match block_on(app.router.bootstrap_starter_rules()) {
+        Ok(summary) => log::info!(
+            "starter rules: {} seeded, {} already present",
+            summary.imported,
+            summary.skipped.len()
+        ),
+        Err(e) => log::warn!("starter-rule bootstrap failed: {e}"),
+    }
 
     if app.config.followups.catch_up_on_launch {
-        block_on(app.router.drain_followups())?;
+        // Drain to empty at launch (batch-capped per pass) so a backlog accumulated while the host
+        // was offline fully clears even when no periodic tick is configured (tick_seconds = 0).
+        block_on(app.router.drain_followups_to_empty())?;
+        block_on(app.router.drain_reminders_to_empty())?;
     }
 
     // Mine recurring feedback for deterministic rule candidates at launch and surface any new
@@ -333,6 +455,10 @@ pub fn serve(config: AppConfig, data_dir: &Path) -> Result<(), RuntimeError> {
 
     let mut reader = stdin().lock();
     let result = app.router.serve_blocking(&mut reader);
+    match &result {
+        Ok(()) => log::info!("host stopping: peer hung up (EOF)"),
+        Err(e) => log::warn!("host stopping: transport error: {e}"),
+    }
 
     // Tear the worker down before returning so the process exits cleanly on EOF.
     stop.store(true, Ordering::Relaxed);
@@ -340,6 +466,17 @@ pub fn serve(config: AppConfig, data_dir: &Path) -> Result<(), RuntimeError> {
         let _ = handle.join();
     }
     result.map_err(RuntimeError::from)
+}
+
+/// Install a panic hook that records the panic to the host log before the default hook runs. A
+/// panic inside an async handler (driven by `block_on`) otherwise vanishes — stderr is discarded —
+/// leaving the channel to drop with no explanation in the log.
+fn install_panic_logger() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("panic: {info}");
+        default(info);
+    }));
 }
 
 /// Back up the configured database to `dest` (a consistent `VACUUM INTO` snapshot).
@@ -424,14 +561,39 @@ pub fn resolve_data_dir() -> PathBuf {
     std::env::temp_dir().join("mailmate")
 }
 
-/// Resolve the effective config: load `MAILMATE_CONFIG` if set, else the default config.
+/// The path the host loads its config from at startup and persists every `set_*` admin write
+/// back to: `MAILMATE_CONFIG` if set, else `<data_dir>/config.toml`. Native-messaging hosts are
+/// short-lived — Thunderbird re-spawns one per port, and an MV3 event page drops the port when it
+/// suspends — so without an on-disk home a configured provider lives only in the now-dead process's
+/// memory, which surfaced as a persistent "Provider: none" after the next reconnect. Keeping the
+/// config beside the database and the secret store (all under the data dir) makes provider/settings
+/// writes survive a restart.
+#[must_use]
+pub fn resolve_config_path(data_dir: &Path) -> PathBuf {
+    env_nonempty("MAILMATE_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("config.toml"))
+}
+
+/// Resolve the effective config. An explicit `MAILMATE_CONFIG` is honored strictly (a named file
+/// that fails to load/validate is an error). Otherwise the default home `<data_dir>/config.toml`
+/// is loaded when it exists, falling back to the safe default on first run — a missing default-home
+/// file is not an error, so a clean install just starts with zero providers.
 ///
 /// # Errors
-/// [`RuntimeError::Config`] if `MAILMATE_CONFIG` points at a file that fails to load/validate.
+/// [`RuntimeError::Config`] if an explicit `MAILMATE_CONFIG` (or an *existing* default-home file)
+/// fails to load or validate.
 pub fn resolve_config() -> Result<AppConfig, RuntimeError> {
     match env_nonempty("MAILMATE_CONFIG") {
         Some(path) => Ok(AppConfig::load(Path::new(&path))?),
-        None => Ok(AppConfig::default()),
+        None => {
+            let path = resolve_data_dir().join("config.toml");
+            if path.exists() {
+                Ok(AppConfig::load(&path)?)
+            } else {
+                Ok(AppConfig::default())
+            }
+        }
     }
 }
 
@@ -446,16 +608,49 @@ fn secrets_path(storage: &StorageConfig, data_dir: &Path) -> PathBuf {
     }
 }
 
+/// The Tier-2 weights cache lives beside the database (or under the data dir for an in-memory
+/// DB), so the always-on classifier's online learning survives a host restart.
+fn tier2_weights_path(storage: &StorageConfig, data_dir: &Path) -> PathBuf {
+    match &storage.path {
+        StoragePath::File(db) => db.parent().map_or_else(
+            || data_dir.join("tier2_weights.json"),
+            |dir| dir.join("tier2_weights.json"),
+        ),
+        StoragePath::InMemory => data_dir.join("tier2_weights.json"),
+    }
+}
+
 /// The active+shadow rule snapshot of `kind` across every scope — the immutable view the
 /// deterministic engine evaluates. Empty on a fresh database (the zero-config posture).
-fn rule_snapshot(
+pub(crate) async fn rule_snapshot(
     rules: &dyn RuleRepository,
     kind: RuleKind,
 ) -> Result<Vec<EvaluatableRule>, StorageError> {
     let mut snapshot = Vec::new();
     for scope in SCOPES {
-        snapshot.extend(block_on(rules.get_active_rules(kind, scope))?);
-        snapshot.extend(block_on(rules.get_shadow_rules(kind, scope))?);
+        snapshot.extend(rules.get_active_rules(kind, scope).await?);
+        snapshot.extend(rules.get_shadow_rules(kind, scope).await?);
+    }
+    Ok(snapshot)
+}
+
+/// The Rules-manager view of `kind`: the evaluated snapshot (active + shadow) **plus** disabled
+/// rules across every scope. Disabled rules are absent from the engine snapshot, but the manager
+/// must show them so a human can re-enable one they previously turned off.
+pub(crate) async fn rule_manager_snapshot(
+    rules: &dyn RuleRepository,
+    kind: RuleKind,
+) -> Result<Vec<EvaluatableRule>, StorageError> {
+    // De-dup invariant: each rule has exactly ONE scope and ONE status, so the active+shadow
+    // snapshot and the disabled query return disjoint sets — no rule appears twice. If rules ever
+    // gain multiple scopes, switch to a `HashSet` keyed on `rule_id` here.
+    let mut snapshot = rule_snapshot(rules, kind).await?;
+    for scope in SCOPES {
+        snapshot.extend(
+            rules
+                .get_rules_by_status(kind, scope, RuleStatus::Disabled)
+                .await?,
+        );
     }
     Ok(snapshot)
 }
@@ -486,6 +681,7 @@ fn run_ticker(router: &HostRouter, tick: Duration, stop: &AtomicBool) {
             break;
         }
         let _ = block_on(router.drain_followups());
+        let _ = block_on(router.drain_reminders());
         let _ = block_on(router.generate_proposals());
     }
 }
@@ -510,8 +706,30 @@ mod tests {
         // A fresh DB is migration-current.
         assert_eq!(
             app.backend.applied_migration_versions().unwrap(),
-            vec![1, 2, 3, 4, 5, 6]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_data_dir_is_locked_0700_before_the_logger_writes_into_it() {
+        use std::os::unix::fs::PermissionsExt;
+        // Reproduce the `serve` ordering: the guarantee must hold before anything (the logger)
+        // creates files inside the data dir. A fresh, not-yet-existing data dir is created+locked
+        // by `ensure_dir_owner_only`; then we mimic `logging::init` (create_dir_all + a file) and
+        // confirm the mode is still owner-only — a file written into an already-0700 dir cannot
+        // loosen it.
+        let parent = tempfile::tempdir().unwrap();
+        let data_dir = parent.path().join("mailmate");
+        assert!(!data_dir.exists());
+
+        ensure_dir_owner_only(&data_dir).unwrap();
+        // What the logger does next:
+        let _ = std::fs::create_dir_all(&data_dir);
+        std::fs::write(data_dir.join("host.log"), b"start\n").unwrap();
+
+        let mode = std::fs::metadata(&data_dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "got {:o}", mode & 0o777);
     }
 
     #[test]
@@ -520,6 +738,18 @@ mod tests {
         std::env::set_var("MAILMATE_DATA_DIR", "/tmp/mailmate-test-dir");
         assert_eq!(resolve_data_dir(), PathBuf::from("/tmp/mailmate-test-dir"));
         std::env::remove_var("MAILMATE_DATA_DIR");
+    }
+
+    #[test]
+    fn resolve_config_path_defaults_to_config_toml_under_the_data_dir() {
+        // With no MAILMATE_CONFIG override, the config's on-disk home sits beside the database
+        // under the data dir — the home that makes a configured provider survive a host restart.
+        // (No test sets MAILMATE_CONFIG, so removing it here is safe and keeps the default branch.)
+        std::env::remove_var("MAILMATE_CONFIG");
+        assert_eq!(
+            resolve_config_path(Path::new("/data/dir")),
+            PathBuf::from("/data/dir/config.toml")
+        );
     }
 
     #[test]
@@ -554,7 +784,7 @@ mod tests {
         let backend = open_and_migrate(&config.storage_config(dir.path())).unwrap();
         assert_eq!(
             backend.applied_migration_versions().unwrap(),
-            vec![1, 2, 3, 4, 5, 6]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
     }
 

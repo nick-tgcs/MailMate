@@ -69,6 +69,7 @@ impl ReplyDrafter for TaskReplyDrafter {
             subject: response.subject,
             body: response.body,
             safety_notes: response.safety_notes,
+            rationale: response.rationale,
         })
     }
 }
@@ -112,7 +113,8 @@ mod tests {
                 parsed_json: serde_json::json!({
                     "subject": "Re: Quote",
                     "body": "Hi,\n\nThanks for sending this over.",
-                    "safety_notes": ["No dates, prices, or payment changes were added."]
+                    "safety_notes": ["No dates, prices, or payment changes were added."],
+                    "rationale": "Polite acknowledgement, no commitments — matches your usual tone."
                 }),
                 schema_validated_by: None,
             })
@@ -133,6 +135,11 @@ mod tests {
         let drafted = block_on(drafter.draft(request)).unwrap();
         assert_eq!(drafted.subject, "Re: Quote");
         assert_eq!(drafted.safety_notes.len(), 1);
+        assert!(
+            drafted.rationale.contains("matches your usual tone"),
+            "the model's rationale must reach the DraftedReply: {:?}",
+            drafted.rationale
+        );
 
         let prompt = provider.last_user_prompt.lock().unwrap().clone();
         assert!(prompt.contains("Politely ask"));

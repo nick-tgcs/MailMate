@@ -8,9 +8,37 @@
 //! user never consented to store.
 //!
 //! Redaction is deliberately dependency-free and deterministic (no regex engine in the leaf
-//! domain crate): it scrubs email-shaped tokens and long digit runs (phone / card / account
-//! numbers). It over-redacts rather than under-redacts — a date may be scrubbed as a number
-//! — because for privacy the safe direction is to remove too much.
+//! domain crate): char-scanning passes, idempotent, ordered. It over-redacts rather than
+//! under-redacts — a date may be scrubbed as a number — because for privacy the safe
+//! direction is to remove too much.
+//!
+//! # Redaction coverage matrix (Phase 8)
+//! `redact_text` (the full down-level scrub, applied at the `Redacted` ceiling) covers, in
+//! pass order:
+//! | Category | Detector | Placeholder |
+//! |---|---|---|
+//! | Credentials — OpenAI `sk-`, GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`, AWS `AKIA`/`ASIA`, JWT `eyJ….….…` | prefix + ≥16-char body / 3 base64url segments, substring (catches secrets embedded in URLs) | `[secret]` |
+//! | Financial — IBAN (`GB29NWBK…`, contiguous **and** space-grouped) | 2 letters + 2 digits + 11–30 upper-alnum | `[iban]` |
+//! | URLs — `http://`, `https://`, `www.` | scheme/`www.` run to whitespace, trailing punctuation trimmed | `[url]` |
+//! | Email addresses (incl. dotless intranet/localhost) | local`@`domain run | `[email]` |
+//! | Long digit runs — phone / card / account numbers (≥7 digits, any grouping) | digit-heavy run | `[redacted-number]` |
+//!
+//! **Credentials and IBANs are scrubbed at EVERY ceiling, including `Full`** ([`scrub_secrets`]):
+//! a raw-body export the user consented to is about email *content*, never a place for an API
+//! key or a bank account number to leave the machine. URLs / emails / long numbers are
+//! content and survive a `Full` ceiling; they are scrubbed only when down-levelling to
+//! `Redacted`.
+//!
+//! # NOT redacted (documented gaps — `Redacted` is a best-effort PII scrub, not anonymisation)
+//! - Person / organisation **names**, street **addresses**, and free-text identifiers (no NER).
+//! - **Short** numbers (< 7 digits): a 4-digit PIN, a 5-digit ZIP, a 6-digit OTP survive.
+//! - Credentials with **no recognised prefix/shape** (bespoke tokens, base64 blobs that are
+//!   not JWTs), and non-IBAN account formats (US routing/account pairs as plain words).
+//! - Anything inside an **attachment** or an image (only text bodies are scrubbed).
+//!
+//! A `Full`-ceiling export retains everything in this list by design; only the `[secret]`/
+//! `[iban]` classes are unconditional. The `Metadata` ceiling — the safe default — strips all
+//! body content outright, so none of these gaps apply there.
 
 use mailmate_common::error::ExportError;
 use mailmate_common::retention::RetentionLevel;
@@ -18,6 +46,13 @@ use mailmate_common::training::{CandidateOutput, ExportPrivacyLevel, SafetyFlag,
 
 const EMAIL_PLACEHOLDER: &str = "[email]";
 const NUMBER_PLACEHOLDER: &str = "[redacted-number]";
+const SECRET_PLACEHOLDER: &str = "[secret]";
+const IBAN_PLACEHOLDER: &str = "[iban]";
+const URL_PLACEHOLDER: &str = "[url]";
+
+/// Minimum body length after a credential prefix (`sk-`, `ghp_`, …) before it is treated as a
+/// real key. Real tokens are long; this keeps `sk-` in `task-12` from matching.
+const MIN_SECRET_BODY: usize = 16;
 
 /// Whether a char can appear inside an email local/domain part.
 fn is_email_char(c: char) -> bool {
@@ -99,10 +134,233 @@ fn redact_numbers(input: &str) -> String {
     out
 }
 
-/// Scrub PII (emails, long digit runs) from `input`. Deterministic and idempotent.
+/// A char usable inside a secret body (`sk-…`, `ghp_…`, JWT segment).
+fn is_secret_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+}
+
+/// Does `chars[i..]` start with the literal `pat`?
+fn matches_at(chars: &[char], i: usize, pat: &str) -> bool {
+    let pat: Vec<char> = pat.chars().collect();
+    i + pat.len() <= chars.len() && chars[i..i + pat.len()] == pat[..]
+}
+
+/// True when position `i` begins a fresh token (start of input, or the previous char is not
+/// alphanumeric) — keeps prefix detectors from firing mid-word.
+fn at_token_boundary(chars: &[char], i: usize) -> bool {
+    i == 0 || !chars[i - 1].is_ascii_alphanumeric()
+}
+
+/// The GitHub token prefixes (`ghp_` personal, `gho_`/`ghu_`/`ghs_`/`ghr_` scoped, and the
+/// fine-grained `github_pat_`).
+const GH_PREFIXES: &[&str] = &["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
+/// AWS access-key-id prefixes (long-term `AKIA`, temporary `ASIA`).
+const AWS_PREFIXES: &[&str] = &["AKIA", "ASIA"];
+
+/// If a credential (API key / token / JWT) starts at `chars[i]`, return its exclusive end.
+fn match_credential(chars: &[char], i: usize) -> Option<usize> {
+    if !at_token_boundary(chars, i) {
+        return None;
+    }
+    let n = chars.len();
+    // A JWT: `eyJ…` base64url . base64url . base64url (header.payload.signature).
+    if matches_at(chars, i, "eyJ") {
+        if let Some(end) = match_jwt(chars, i) {
+            return Some(end);
+        }
+    }
+    // AWS key ids: a fixed prefix then ≥16 upper-alnum chars.
+    for p in AWS_PREFIXES {
+        if matches_at(chars, i, p) {
+            let start = i + p.chars().count();
+            let mut j = start;
+            while j < n && (chars[j].is_ascii_uppercase() || chars[j].is_ascii_digit()) {
+                j += 1;
+            }
+            if j - start >= MIN_SECRET_BODY {
+                return Some(j);
+            }
+        }
+    }
+    // Prefix tokens: `sk-` / `pk-` (provider keys) and the GitHub family, then ≥16 body chars.
+    let prefixes = ["sk-", "sk_", "pk-", "pk_"];
+    for p in prefixes.iter().copied().chain(GH_PREFIXES.iter().copied()) {
+        if matches_at(chars, i, p) {
+            let start = i + p.chars().count();
+            let mut j = start;
+            while j < n && is_secret_char(chars[j]) {
+                j += 1;
+            }
+            if j - start >= MIN_SECRET_BODY {
+                return Some(j);
+            }
+        }
+    }
+    None
+}
+
+/// Match a JWT starting at `chars[i]` (already known to begin `eyJ`): three `.`-separated
+/// base64url segments. Returns the exclusive end of the third segment.
+fn match_jwt(chars: &[char], i: usize) -> Option<usize> {
+    let n = chars.len();
+    let seg = |from: usize| {
+        let mut j = from;
+        while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '_' | '-')) {
+            j += 1;
+        }
+        j
+    };
+    let e1 = seg(i);
+    if e1 - i < 8 || e1 >= n || chars[e1] != '.' {
+        return None;
+    }
+    let e2 = seg(e1 + 1);
+    if e2 - (e1 + 1) < 8 || e2 >= n || chars[e2] != '.' {
+        return None;
+    }
+    let e3 = seg(e2 + 1);
+    if e3 - (e2 + 1) < 4 {
+        return None;
+    }
+    Some(e3)
+}
+
+/// Replace credential-shaped substrings with [`SECRET_PLACEHOLDER`]. Substring (not just
+/// token-prefix) so a key embedded in a URL query is caught too.
+fn scrub_credentials(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(end) = match_credential(&chars, i) {
+            out.push_str(SECRET_PLACEHOLDER);
+            i = end;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// If an IBAN starts at `chars[start]` (2 letters, 2 digits, then 11–30 upper-alnum body),
+/// return its exclusive end. Handles the contiguous machine form **and** the space-grouped
+/// print form (`GB29 NWBK 6016 …`), counting only upper-alnum so prose breaks the match.
+fn match_iban(chars: &[char], start: usize) -> Option<usize> {
+    let n = chars.len();
+    let is_body = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit();
+    if start + 4 > n
+        || !(chars[start].is_ascii_uppercase()
+            && chars[start + 1].is_ascii_uppercase()
+            && chars[start + 2].is_ascii_digit()
+            && chars[start + 3].is_ascii_digit())
+    {
+        return None;
+    }
+    let mut j = start;
+    let mut alnum = 0usize;
+    let mut last_end = start;
+    loop {
+        let mut g = 0;
+        while j < n && is_body(chars[j]) && alnum < 34 {
+            j += 1;
+            g += 1;
+            alnum += 1;
+        }
+        if g == 0 {
+            break;
+        }
+        last_end = j;
+        // Continue across a single space only if a body char follows (group separator).
+        if j + 1 < n && chars[j] == ' ' && is_body(chars[j + 1]) {
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    let right_ok = last_end >= n || !is_body(chars[last_end]);
+    ((15..=34).contains(&alnum) && right_ok).then_some(last_end)
+}
+
+/// Replace IBAN-shaped spans with [`IBAN_PLACEHOLDER`].
+fn redact_ibans(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if at_token_boundary(&chars, i) {
+            if let Some(end) = match_iban(&chars, i) {
+                out.push_str(IBAN_PLACEHOLDER);
+                i = end;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Whether a char is sentence punctuation that should not be swallowed into a URL placeholder.
+fn is_trailing_punct(c: char) -> bool {
+    matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\'')
+}
+
+/// If a URL starts at `chars[i]` (`http://`, `https://`, or a `www.` at a token boundary),
+/// return its exclusive end with trailing sentence punctuation trimmed off.
+fn match_url(chars: &[char], i: usize) -> Option<usize> {
+    let n = chars.len();
+    let scheme_len = if matches_at(chars, i, "https://") {
+        8
+    } else if matches_at(chars, i, "http://") {
+        7
+    } else if matches_at(chars, i, "www.") && at_token_boundary(chars, i) {
+        4
+    } else {
+        return None;
+    };
+    let mut j = i + scheme_len;
+    while j < n && !chars[j].is_whitespace() {
+        j += 1;
+    }
+    while j > i + scheme_len && is_trailing_punct(chars[j - 1]) {
+        j -= 1;
+    }
+    Some(j)
+}
+
+/// Replace URLs with [`URL_PLACEHOLDER`].
+fn redact_urls(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(end) = match_url(&chars, i) {
+            out.push_str(URL_PLACEHOLDER);
+            i = end;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Scrub the categories that must NEVER leave the machine regardless of export ceiling:
+/// credentials (API keys, tokens, JWTs) and IBANs. Applied even at a `Full` (raw-body)
+/// ceiling, because a consented raw-body corpus is about email content, not secrets.
+/// Deterministic and idempotent.
+#[must_use]
+pub fn scrub_secrets(input: &str) -> String {
+    redact_ibans(&scrub_credentials(input))
+}
+
+/// Scrub PII from `input` for a `Redacted`-ceiling export: the full coverage matrix —
+/// credentials and IBANs (always), then URLs, emails, and long digit runs. Deterministic and
+/// idempotent. See the module-level matrix for exactly what is and is not covered.
 #[must_use]
 pub fn redact_text(input: &str) -> String {
-    redact_numbers(&redact_emails(input))
+    redact_numbers(&redact_emails(&redact_urls(&scrub_secrets(input))))
 }
 
 /// Deterministically detect forbidden-commitment / unsafe-content categories in `text`.
@@ -182,6 +440,27 @@ fn redact_output(output: &CandidateOutput) -> CandidateOutput {
     CandidateOutput::new(redact_text(&output.body))
 }
 
+fn scrub_secrets_output(output: &CandidateOutput) -> CandidateOutput {
+    CandidateOutput::new(scrub_secrets(&output.body))
+}
+
+/// Scrub credentials / IBANs from every body field of `example`, leaving content intact. The
+/// unconditional secret floor applied at any ceiling, including `Full`.
+fn scrub_example_secrets(mut example: TrainingExample) -> TrainingExample {
+    example.candidate_output = example.candidate_output.as_ref().map(scrub_secrets_output);
+    example.user_corrected_output = example
+        .user_corrected_output
+        .as_ref()
+        .map(scrub_secrets_output);
+    example.input.context_features.thread_summary = example
+        .input
+        .context_features
+        .thread_summary
+        .as_deref()
+        .map(scrub_secrets);
+    example
+}
+
 /// Reduce `example` to at most `ceiling`. An example already within the ceiling is returned
 /// unchanged; a `Full` example at a `Redacted` ceiling has its bodies scrubbed; any example
 /// above a `Metadata` ceiling has its body content stripped entirely. Total — it never
@@ -192,10 +471,13 @@ pub fn enforce_privacy(
     ceiling: ExportPrivacyLevel,
 ) -> TrainingExample {
     if example.privacy_level <= ceiling {
-        return example;
+        // Within the requested ceiling — but credentials and IBANs are scrubbed at EVERY
+        // ceiling, including `Full`: a consented raw-body corpus is about email content, never
+        // a place for an API key or bank account number to leave the machine.
+        return scrub_example_secrets(example);
     }
     match ceiling {
-        ExportPrivacyLevel::Full => example, // unreachable: nothing is above Full
+        ExportPrivacyLevel::Full => scrub_example_secrets(example), // unreachable: nothing is above Full
         ExportPrivacyLevel::Redacted => {
             example.candidate_output = example.candidate_output.as_ref().map(redact_output);
             example.user_corrected_output =
@@ -408,5 +690,102 @@ mod tests {
         assert!(
             assert_ceiling_allowed(ExportPrivacyLevel::Metadata, RetentionLevel::Metadata).is_ok()
         );
+    }
+
+    #[test]
+    fn credentials_are_scrubbed() {
+        for (input, secret) in [
+            ("token sk-abcdefGHIJKLMNOP1234567890 ok", "sk-abcdefGHIJKLMNOP"),
+            ("gh ghp_ABCDEFGHIJKLMNOPQRSTuvwxyz0123 done", "ghp_ABCDEFGHIJKLMNOP"),
+            (
+                "fine github_pat_11ABCDEFG0aAAaAAaAaa_bbbbCCCCdddd here",
+                "github_pat_11",
+            ),
+            ("aws AKIAIOSFODNN7EXAMPLE rotated", "AKIAIOSFODNN7EXAMPLE"),
+            (
+                "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w end",
+                "eyJhbGci",
+            ),
+        ] {
+            let red = redact_text(input);
+            assert!(red.contains(SECRET_PLACEHOLDER), "{input:?} -> {red:?}");
+            assert!(
+                !red.contains(secret),
+                "secret survived: {input:?} -> {red:?}"
+            );
+        }
+        // A short `sk-` fragment in an ordinary word is NOT a key.
+        assert_eq!(redact_text("the task-12 is due"), "the task-12 is due");
+    }
+
+    #[test]
+    fn credentials_embedded_in_a_url_are_scrubbed_before_the_url() {
+        // The credential floor runs before URL scrubbing, so the key never survives even when
+        // it rides inside a query string. (`redact_text` then collapses the URL too.)
+        let red = redact_text("see https://api.example.com/v1?token=ghp_ABCDEFGHIJKLMNOPqrstuvwx0 now");
+        assert!(!red.contains("ghp_ABCDEFGHIJKLMNOP"), "{red:?}");
+        // The whole thing is gone (secret scrubbed, then URL collapsed).
+        assert!(red.contains(URL_PLACEHOLDER) || red.contains(SECRET_PLACEHOLDER), "{red:?}");
+    }
+
+    #[test]
+    fn ibans_contiguous_and_space_grouped_are_redacted() {
+        for input in [
+            "pay to GB29NWBK60161331926819 today",
+            "pay to GB29 NWBK 6016 1331 9268 19 today",
+            "DE89 3704 0044 0532 0130 00 confirmed",
+        ] {
+            let red = redact_text(input);
+            assert!(red.contains(IBAN_PLACEHOLDER), "{input:?} -> {red:?}");
+            assert!(!red.contains("NWBK"), "{red:?}");
+            assert!(!red.contains("3704"), "{red:?}");
+        }
+        // Not every "two letters two digits" prefix is an IBAN: a short code is left alone.
+        assert_eq!(redact_text("ref GB29 ok"), "ref GB29 ok");
+        // An all-caps phrase does not get eaten as an IBAN (lowercase breaks it).
+        assert_eq!(redact_text("GB29 hello there"), "GB29 hello there");
+    }
+
+    #[test]
+    fn urls_are_scrubbed_at_the_redacted_matrix() {
+        for input in [
+            "visit https://example.com/path?q=1 please",
+            "visit http://example.com today",
+            "visit www.example.com/page now",
+        ] {
+            let red = redact_text(input);
+            assert!(red.contains(URL_PLACEHOLDER), "{input:?} -> {red:?}");
+            assert!(!red.contains("example.com"), "{red:?}");
+        }
+        // Trailing sentence punctuation survives the placeholder.
+        assert_eq!(
+            redact_text("see https://x.io."),
+            format!("see {URL_PLACEHOLDER}.")
+        );
+    }
+
+    #[test]
+    fn the_full_matrix_is_idempotent() {
+        let input = "key sk-ABCDEFGHIJKLMNOP0123 at https://x.io/a?e=j@k.com pay GB29NWBK60161331926819 call +1 555 123 4567";
+        let once = redact_text(input);
+        assert_eq!(redact_text(&once), once, "idempotent: {once:?}");
+    }
+
+    #[test]
+    fn a_full_ceiling_export_still_scrubs_credentials_and_ibans() {
+        // The Phase-8 exit: a Full (raw-body) export cannot leave the machine carrying a
+        // secret. Content (the greeting, the URL host) survives; the key and IBAN do not.
+        let body = "Hi! Use sk-LIVEabcdefGHIJKLMN0123456789 and wire to GB29NWBK60161331926819. See https://example.com";
+        let ex = example_at(ExportPrivacyLevel::Full, body);
+        let out = enforce_privacy(ex, ExportPrivacyLevel::Full);
+        assert_eq!(out.privacy_level, ExportPrivacyLevel::Full, "still a Full export");
+        let scrubbed = out.candidate_output.unwrap().body;
+        assert!(scrubbed.contains(SECRET_PLACEHOLDER), "{scrubbed:?}");
+        assert!(scrubbed.contains(IBAN_PLACEHOLDER), "{scrubbed:?}");
+        assert!(!scrubbed.contains("sk-LIVE"), "{scrubbed:?}");
+        assert!(!scrubbed.contains("NWBK"), "{scrubbed:?}");
+        // Full keeps content: the URL host is NOT scrubbed at a Full ceiling.
+        assert!(scrubbed.contains("example.com"), "Full keeps content: {scrubbed:?}");
+        assert!(scrubbed.contains("Hi!"), "{scrubbed:?}");
     }
 }

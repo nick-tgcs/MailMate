@@ -22,6 +22,7 @@ members = [
     "crates/mailmate-storage",
     "crates/mailmate-policy",
     "crates/mailmate-rules",
+    "crates/mailmate-guard",
     "crates/mailmate-ai",
     "crates/mailmate-ml",
     "crates/mailmate-planner",
@@ -88,6 +89,12 @@ toml = "=1.1.2"
 # no-backend-leakage guard keeps it out of core/ports/common. Replaced a hand-rolled std::net
 # HTTP/1.1 client — crate-first for solved infra; gives https (cloud providers) for free.
 ureq = { version = "=3.3.0", features = ["json"] }
+# Lightweight logging facade for the native host's file log (`host.log`): captures the host's own
+# request/outcome lines AND the transport crate's (`ureq`) records — the only diagnostics window for
+# a native-messaging child whose stdout is the framed protocol and whose stderr the confined
+# Thunderbird snap discards. EDGE-ONLY (the mailmate-native-host composition root); a logging facade,
+# not a backend, so the no-backend-leakage guard is unaffected.
+log = "=0.4.32"
 # Dev-only: hermetic temp files/dirs for the file-backed-storage and composition-root tests
 # (declared here because Cargo inherits `<dep>.workspace = true` only from this table).
 tempfile = "=3.27.0"

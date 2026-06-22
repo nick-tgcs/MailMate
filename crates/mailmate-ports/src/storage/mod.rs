@@ -19,11 +19,13 @@ use mailmate_common::error::StorageError;
 
 pub mod audit;
 pub mod conflicts;
+pub mod data_rights;
 pub mod drafts;
 pub mod feedback;
 pub mod messages;
 pub mod pipeline_items;
 pub mod proposals;
+pub mod reminders;
 pub mod rules;
 pub mod senders;
 pub mod shadow_outcomes;
@@ -33,11 +35,13 @@ pub mod workflows;
 
 pub use audit::AuditRepository;
 pub use conflicts::ConflictRepository;
+pub use data_rights::DataRightsRepository;
 pub use drafts::DraftRepository;
 pub use feedback::FeedbackRepository;
 pub use messages::MessageRepository;
 pub use pipeline_items::PipelineItemRepository;
 pub use proposals::ProposalRepository;
+pub use reminders::ReminderRepository;
 pub use rules::RuleRepository;
 pub use senders::SenderRepository;
 pub use shadow_outcomes::ShadowOutcomeRepository;

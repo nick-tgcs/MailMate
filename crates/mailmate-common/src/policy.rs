@@ -104,6 +104,11 @@ pub struct PolicyContext {
     /// Whether a human hard rule explicitly allows moving this (possibly sensitive) mail.
     #[serde(default)]
     pub explicit_move_allowance: bool,
+    /// Whether the message is a reply in a conversation the user joined — the **thread guard**
+    /// signal. When set, an auto-junk/auto-file of this message is demoted to review (never
+    /// auto-applied), unless the user is manually overriding.
+    #[serde(default)]
+    pub is_joined_thread: bool,
     /// What triggered planning.
     #[serde(default)]
     pub trigger: TriggerKind,

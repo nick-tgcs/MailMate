@@ -1,0 +1,58 @@
+{
+  "extensionName": {
+    "message": "MailMate",
+    "description": "The add-on name shown in Thunderbird."
+  },
+  "extensionDescription": {
+    "message": "A local-first, learning mail assistant for Thunderbird. Triages your inbox, explains every call and learns your corrections as on-device rules, drafts review-required replies, tracks follow-ups and reminders, and keeps all data on your machine with one-click export and delete.",
+    "description": "The add-on description."
+  },
+  "panelReading": {
+    "message": "Reading this message…",
+    "description": "Shown while the host classifies the open message."
+  },
+  "panelTimedOut": {
+    "message": "MailMate is taking longer than usual.",
+    "description": "Shown when classification exceeds the timeout."
+  },
+  "panelClassifyFailed": {
+    "message": "Couldn't classify this message yet.",
+    "description": "Shown when classification returns an error."
+  },
+  "panelNoMessage": {
+    "message": "Open a message to see what MailMate thinks of it.",
+    "description": "Shown when no message is displayed."
+  },
+  "panelHostUnreachable": {
+    "message": "MailMate host unreachable. Your mail is unaffected.",
+    "description": "Shown when the native host is down."
+  },
+  "actionRetry": {
+    "message": "Retry",
+    "description": "Retry button label."
+  },
+  "actionClassifyNow": {
+    "message": "Classify now",
+    "description": "Button to re-run classification."
+  },
+  "dashApproveAllSafe": {
+    "message": "Approve all safe",
+    "description": "Review-card button: apply every safe suggested action at once."
+  },
+  "dashDismiss": {
+    "message": "Dismiss",
+    "description": "Review-card button: dismiss this card's suggestions."
+  },
+  "dashExplain": {
+    "message": "Explain",
+    "description": "Review-card button: show why MailMate made this call."
+  },
+  "dashInboxTriaged": {
+    "message": "Inbox triaged — nothing waiting",
+    "description": "Review tab empty state title."
+  },
+  "dashDismissed": {
+    "message": "Dismissed",
+    "description": "Toast shown after a review card is dismissed."
+  }
+}

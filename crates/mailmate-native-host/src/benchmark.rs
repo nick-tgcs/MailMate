@@ -82,6 +82,8 @@ fn sample_message(from: &str, subject: &str) -> MessageData {
         body_text: Some("a representative body of moderate length".to_owned()),
         attachments: vec![],
         remote_content_loaded: false,
+        sender_seen_count: None,
+        sender_in_address_book: None,
     }
 }
 

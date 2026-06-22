@@ -234,7 +234,7 @@ fn instance_arm_due_listing_and_state_update() {
     assert!(loaded.honours_due_invariant());
 
     // It is due "now" (past < now) and is selected by the drain query.
-    let due = block_on(instances.list_due(Timestamp::now())).unwrap();
+    let due = block_on(instances.list_due(Timestamp::now(), 100)).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].id, inst_id);
 
@@ -244,7 +244,7 @@ fn instance_arm_due_listing_and_state_update() {
         "beta",
         Some(Timestamp::parse_rfc3339("2999-01-01T00:00:00Z").unwrap()),
     );
-    let due_now = block_on(instances.list_due(Timestamp::now())).unwrap();
+    let due_now = block_on(instances.list_due(Timestamp::now(), 100)).unwrap();
     assert_eq!(due_now.len(), 1, "only the overdue instance is due");
 
     // Moving to awaiting_review clears next_due_at → no longer selected.
@@ -255,7 +255,7 @@ fn instance_arm_due_listing_and_state_update() {
     assert_eq!(after.current_step_index, 1);
     assert!(after.next_due_at.is_none());
     assert!(after.honours_due_invariant());
-    let still_due = block_on(instances.list_due(Timestamp::now())).unwrap();
+    let still_due = block_on(instances.list_due(Timestamp::now(), 100)).unwrap();
     assert!(
         !still_due.iter().any(|i| i.id == inst_id),
         "awaiting_review instance is not drained"
@@ -297,11 +297,34 @@ fn due_comparison_is_exact_at_the_sub_second_boundary() {
     // `now` is 0.5s later — the SAME whole second. The step is due and MUST be selected
     // (a naive RFC3339 TEXT compare would mis-order `…00Z` vs `…00.5Z` and drop it).
     let now = Timestamp::parse_rfc3339("2026-06-20T00:00:00.5Z").unwrap();
-    let due_now = block_on(instances.list_due(now)).unwrap();
+    let due_now = block_on(instances.list_due(now, 100)).unwrap();
     assert!(
         due_now.iter().any(|i| i.id == inst),
         "a whole-second due step is selected when now is later within the same second"
     );
+}
+
+#[test]
+fn list_due_is_bounded_by_the_limit_and_returns_the_soonest_first() {
+    let backend = backend();
+    let instances = SqliteWorkflowInstanceRepository::new(Arc::clone(&backend));
+    // Five instances due at staggered, ascending times (all in the past relative to `now`).
+    for i in 0..5 {
+        let due = Timestamp::parse_rfc3339(&format!("2026-06-20T00:0{i}:00Z")).unwrap();
+        arm_one(&backend, &format!("cap{i}"), Some(due));
+    }
+    let now = Timestamp::parse_rfc3339("2026-06-21T00:00:00Z").unwrap();
+
+    // The cap bounds the batch to the three soonest-due instances.
+    let batch = block_on(instances.list_due(now, 3)).unwrap();
+    assert_eq!(batch.len(), 3, "the batch cap bounds the drain");
+    assert!(
+        batch.windows(2).all(|w| w[0].next_due_at <= w[1].next_due_at),
+        "ordered soonest-due first"
+    );
+    // A zero cap drains nothing; a generous cap returns all five.
+    assert!(block_on(instances.list_due(now, 0)).unwrap().is_empty());
+    assert_eq!(block_on(instances.list_due(now, 100)).unwrap().len(), 5);
 }
 
 #[test]

@@ -21,13 +21,13 @@ struct Migration {
     sqlite: &'static str,
 }
 
-/// Every embedded migration, in ascending version order. Phase 2 ships the foundational
-/// schema; Phase 7 appends `0002` (rule versions) and `0003` (audit and feedback); Phase 8
-/// appends `0004` (the curator's `rule_conflicts` + `rule_proposal_feedback`); Phase 9
-/// appends `0005` (the training layer's `training_datasets` + `lora_adapters` +
-/// `lora_eval_runs`); Phase 11 appends `0006` (the follow-up surface: `pipeline_items`,
+/// Every embedded migration, in ascending version order. `0001` ships the foundational schema;
+/// `0002` adds rule versions and `0003` audit + feedback; `0004` adds the curator's
+/// `rule_conflicts` + `rule_proposal_feedback`; `0005` the training layer (`training_datasets` +
+/// `lora_adapters` + `lora_eval_runs`); `0006` the follow-up surface (`pipeline_items`,
 /// `workflow_definitions`/`*_versions`/`*_instances`, `followup_feedback`,
-/// `workflow_shadow_outcomes`, `workflow_conflicts`).
+/// `workflow_shadow_outcomes`, `workflow_conflicts`); `0007` the placement-idempotency index; and
+/// `0008` (Phase 9) the `reminders` table for durable notify-only remind-me / snooze timers.
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -64,6 +64,18 @@ const MIGRATIONS: &[Migration] = &[
         name: "0006_followups",
         common: include_str!("../../../migrations/common/0006_followups.sql"),
         sqlite: include_str!("../../../migrations/sqlite/0006_followups.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "0007_placement_idempotency",
+        common: include_str!("../../../migrations/common/0007_placement_idempotency.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0007_placement_idempotency.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "0008_reminders",
+        common: include_str!("../../../migrations/common/0008_reminders.sql"),
+        sqlite: include_str!("../../../migrations/sqlite/0008_reminders.sql"),
     },
 ];
 
@@ -183,15 +195,15 @@ mod tests {
         let first = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert_eq!(
             first,
-            vec![1, 2, 3, 4, 5, 6],
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
             "fresh DB applies 0001..0006 in order"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
         // Re-running is a no-op (covers the "migration from prior version" idempotency).
         let second = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert!(second.is_empty(), "re-run applies nothing");
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -211,10 +223,10 @@ mod tests {
         let applied = apply_all(&mut conn, Dialect::Sqlite).unwrap();
         assert_eq!(
             applied,
-            vec![2, 3, 4, 5, 6],
+            vec![2, 3, 4, 5, 6, 7, 8],
             "only the not-yet-applied migrations run"
         );
-        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(applied_versions(&conn).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]

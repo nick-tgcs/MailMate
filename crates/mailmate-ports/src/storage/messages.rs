@@ -66,6 +66,15 @@ pub trait MessageRepository: Send + Sync {
         &self,
         message_id: &MessageId,
     ) -> Result<Vec<StoredFeature>, StorageError>;
+
+    /// The **down-level purge**: NULL every retained `body_text` and clear `body_retained`,
+    /// returning how many bodies were purged. Called when the user lowers retention below
+    /// body-retention so "turn the dial down and the bodies are gone" is true immediately.
+    /// `body_hash` (identity/dedup) is kept — a hash is not the body.
+    ///
+    /// # Errors
+    /// [`StorageError`] on a backend failure.
+    async fn purge_bodies(&self) -> Result<u64, StorageError>;
 }
 
 #[cfg(test)]

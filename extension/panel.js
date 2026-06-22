@@ -38,6 +38,11 @@ const DEFAULT_CATEGORIES = [
   "Travel",
 ];
 
+// The category vocabulary the host advertises on get_settings (Phase 1b). Fetched once at boot so
+// the wrong-category menu offers the host's human labels rather than a hardcoded list; falls back
+// to DEFAULT_CATEGORIES when the host is older or unreachable.
+let hostCategories = null;
+
 // Kinds the panel can apply locally — applyPlannedAction (drafts.js) handles exactly these. A
 // suggest action whose kind is NOT here (require_review, create_draft) is a marker, not a button:
 // it gets an informational row, never an Apply that could only fail with an internal error.
@@ -54,6 +59,58 @@ const els = {
 let displayed = null;
 // The last connection phase we acted on, so the live status listener reacts to TRANSITIONS only.
 let lastPhase = null;
+// A monotonic token per classify() call: the async-state machine's stale-result race guard. A
+// reply whose token is no longer current (the user moved to another message, or re-triggered) is
+// dropped, so a slow response can never overwrite the panel for a message you've moved past.
+let classifyToken = 0;
+// Bound the classify wait so a wedged host shows a recoverable "taking longer" state with a Retry,
+// not an indefinite spinner.
+const CLASSIFY_TIMEOUT_MS = 8000;
+
+// i18n seam: resolve a message key through browser.i18n when present, else the English fallback.
+// English-only v1, but the seam exists — a future locale ships `_locales/<lang>/messages.json`
+// with no code change. Degrades safely in jsdom/tests where browser.i18n is absent.
+function t(key, fallback) {
+  try {
+    if (typeof browser !== "undefined" && browser.i18n && browser.i18n.getMessage) {
+      const m = browser.i18n.getMessage(key);
+      if (m) {
+        return m;
+      }
+    }
+  } catch (e) {
+    // fall through to the fallback
+  }
+  return fallback;
+}
+
+// Resolve/reject `promise`, but reject with a tagged MMTimeout if `ms` elapses first.
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error("classification timed out");
+      err.name = "MMTimeout";
+      reject(err);
+    }, ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+// The status region is a live region so a screen reader announces each state transition
+// (loading → verdict / timed-out / host-down). Reduced-motion is honoured in panel.css.
+if (els.body) {
+  els.body.setAttribute("aria-live", "polite");
+  els.body.setAttribute("aria-atomic", "true");
+}
 
 // --- Boot ----------------------------------------------------------------------------
 
@@ -69,12 +126,28 @@ async function boot() {
     renderConnection(status);
     return;
   }
+  // Fetch the host's category vocabulary once (best-effort) so corrections use real labels.
+  loadCategories();
   displayed = await resolveDisplayedMessage();
   if (!displayed) {
     renderNoMessage();
     return;
   }
   await classify();
+}
+
+// Best-effort fetch of the host's category vocabulary. Never blocks boot or throws: a failure
+// leaves `hostCategories` null and the menu falls back to DEFAULT_CATEGORIES.
+async function loadCategories() {
+  try {
+    const reply = await send({ type: "mm:settings" });
+    const cats = reply && reply.ok && reply.settings && reply.settings.categories;
+    if (Array.isArray(cats) && cats.length) {
+      hostCategories = cats.map((c) => c.label || c.key).filter(Boolean);
+    }
+  } catch (e) {
+    // leave the fallback in place
+  }
 }
 
 // Resolve the message shown in the tab this popup is anchored to.
@@ -100,12 +173,26 @@ async function resolveDisplayedMessage() {
 }
 
 async function classify() {
-  renderLoading("Reading this message…");
+  const token = ++classifyToken;
+  const messageId = displayed.id;
+  renderLoading(t("panelReading", "Reading this message…"));
+
   let reply;
   try {
-    reply = await send({ type: "mm:classify", messageId: displayed.id });
+    reply = await withTimeout(send({ type: "mm:classify", messageId }), CLASSIFY_TIMEOUT_MS);
   } catch (e) {
-    renderClassifyError(e && e.message ? e.message : String(e));
+    if (isStale(token, messageId)) {
+      return; // a newer classify (or a message switch) superseded this one
+    }
+    if (e && e.name === "MMTimeout") {
+      renderTimedOut();
+    } else {
+      renderClassifyError(e && e.message ? e.message : String(e));
+    }
+    return;
+  }
+  // Stale-result race guard: drop a reply for a message the panel has moved past.
+  if (isStale(token, messageId)) {
     return;
   }
   if (!reply.ok) {
@@ -121,21 +208,34 @@ async function classify() {
   renderVerdict(reply);
 }
 
+// True when a classify reply is no longer the one the panel is waiting for.
+function isStale(token, messageId) {
+  return token !== classifyToken || !displayed || displayed.id !== messageId;
+}
+
+function renderTimedOut() {
+  clear();
+  els.body.append(para(t("panelTimedOut", "MailMate is taking longer than usual."), "mm-muted"));
+  els.body.append(button(t("actionRetry", "Retry"), "mm-primary", () => classify()));
+}
+
 // --- Connection / edge states --------------------------------------------------------
 
 function renderConnection(status) {
   clear();
   if (status.phase === "version_mismatch") {
-    para("MailMate's helper is on a different protocol version. Update whichever is older.");
+    els.body.append(
+      para("MailMate's helper is on a different protocol version. Update whichever is older."),
+    );
   } else if (status.phase === "connecting") {
-    para("Connecting to MailMate…", "mm-muted");
+    els.body.append(para("Connecting to MailMate…", "mm-muted"));
   } else {
-    para("MailMate host unreachable. Your mail is unaffected.");
+    els.body.append(para(t("panelHostUnreachable", "MailMate host unreachable. Your mail is unaffected.")));
     if (status.reason) {
-      para(`Reason: ${status.reason}`, "mm-reason");
+      els.body.append(para(`Reason: ${status.reason}`, "mm-reason"));
     }
   }
-  const retry = button("↻ Retry", "mm-primary", async () => {
+  const retry = button(`↻ ${t("actionRetry", "Retry")}`, "mm-primary", async () => {
     retry.disabled = true;
     const reply = await send({ type: "mm:reconnect" });
     const next = reply.status || {
@@ -155,19 +255,21 @@ function renderConnection(status) {
 
 function renderNoMessage() {
   clear();
-  para("Open a message to see what MailMate thinks of it.", "mm-muted");
+  els.body.append(para(t("panelNoMessage", "Open a message to see what MailMate thinks of it."), "mm-muted"));
 }
 
 function renderClassifyError(reason) {
   clear();
-  para("Couldn't classify this message yet.");
-  para(reason, "mm-reason");
-  els.body.append(button("Classify now", "mm-primary", () => classify()));
+  els.body.append(para(t("panelClassifyFailed", "Couldn't classify this message yet.")));
+  if (reason) {
+    els.body.append(para(reason, "mm-reason"));
+  }
+  els.body.append(button(t("actionClassifyNow", "Classify now"), "mm-primary", () => classify()));
 }
 
 function renderLoading(text) {
   clear();
-  para(text, "mm-muted");
+  els.body.append(para(text, "mm-muted"));
 }
 
 // --- The verdict ---------------------------------------------------------------------
@@ -195,17 +297,28 @@ function renderVerdict(data) {
   }
   els.body.append(bar, para(band.text, "mm-band"));
 
-  // One-line "why", with an expander for the policy checks + labels.
+  // Action-first: the primary things you'd want to do, on every message, before any explanation.
+  renderPrimaryActions(data, decisionId);
+
+  // The inform-only Safety block (phishing/malware heads-up) — surfaced high, takes no action.
+  renderSafety(c);
+
+  // The "why": the correctable salient-signal chips (the explainability spine), then the
+  // one-line summary + the policy-checks expander.
+  renderSignals(c, decisionId);
   if (explanation.summary) {
     els.body.append(para(explanation.summary, "mm-summary"));
   }
   appendWhy(explanation);
 
-  els.body.append(document.createElement("hr")).className = "mm-rule";
+  const hr = document.createElement("hr");
+  hr.className = "mm-rule";
+  els.body.append(hr);
 
-  // Action blocks, partitioned by apply_state — the visual spine. Within the suggest bucket we
-  // further split locally-applyable safe mutations (Apply / Dismiss) from non-applyable markers
-  // like require_review / create_draft, which get an informational row and NEVER a failing Apply.
+  // Host suggestions, partitioned by apply_state — the crystallized/learned offers. Within the
+  // suggest bucket we split locally-applyable safe mutations (Apply / Dismiss) from non-applyable
+  // markers like require_review / create_draft, which get an informational row and NEVER a
+  // failing Apply.
   const auto = actions.filter((a) => a.apply_state === "auto_applied");
   const suggest = actions.filter((a) => a.apply_state === "suggest");
   const applyable = suggest.filter((a) => APPLYABLE_KINDS.has(a.kind));
@@ -214,7 +327,13 @@ function renderVerdict(data) {
   applyable.forEach((a) => els.body.append(suggestRow(a, decisionId)));
   review.forEach((a) => els.body.append(reviewRow(a)));
   blocked.forEach((b) => els.body.append(blockedRow(b)));
-  if (!auto.length && !applyable.length && !review.length && !blocked.length) {
+
+  // Cold-start / low-confidence: when the host is still unsure and there is nothing to suggest,
+  // show a designed "still learning" state instead of a bare "0 allowed, 1 need review".
+  const nothingToDo = !auto.length && !applyable.length && !review.length && !blocked.length;
+  if (nothingToDo && c.needs_review) {
+    els.body.append(coldStartCard(c));
+  } else if (nothingToDo) {
     els.body.append(para("Nothing to do — this looks handled.", "mm-muted"));
   }
 
@@ -226,17 +345,162 @@ function renderVerdict(data) {
   // Corrections — always available, always one click.
   appendCorrections(c, decisionId, risky);
 
-  // Explain deep-link — the dashboard space lands in a later milestone, so it's present but
-  // inert rather than a dead link that lies about working.
+  // Explain deep-link — opens the dashboard timeline for this message.
   const hr2 = document.createElement("hr");
   hr2.className = "mm-rule";
   els.body.append(hr2);
-  const explain = button("ⓘ Explain in dashboard ▸", "mm-link", null);
-  explain.disabled = true;
-  explain.title = "The dashboard timeline arrives in a later update.";
+  const explain = button("ⓘ Explain in dashboard ▸", "mm-link", () => openExplainInDashboard());
   const footer = div("mm-footer");
   footer.append(explain);
   els.body.append(footer);
+}
+
+// The action-first bar: the primary things to do with a message, present on every verdict.
+// File to… reuses the move picker; Junk & block / Mark read / Draft reply hit their background
+// handlers; Unsubscribe appears only when the host parsed a List-Unsubscribe affordance.
+function renderPrimaryActions(data, decisionId) {
+  const bar = div("mm-primary-actions");
+  const fileTo = button("📁 File to…", "mm-pa", () => toggleMenu(fileTo, () => moveMenu()));
+  const junk = button("🚫 Junk & block", "mm-pa", () =>
+    runPrimary(junk, { type: "mm:junk", messageId: displayed.id }, "Marked as junk — learning from this."),
+  );
+  const read = button("✓ Mark read", "mm-pa", () =>
+    runPrimary(read, { type: "mm:markRead", messageId: displayed.id }, "Marked read."),
+  );
+  const draft = button("✍ Draft reply", "mm-pa", () =>
+    runPrimary(draft, { type: "mm:draftReply", messageId: displayed.id }, "Opened a reply draft."),
+  );
+  bar.append(fileTo, junk, read, draft);
+
+  const u = data.result.unsubscribe;
+  if (u) {
+    const unsub = button("✉ Unsubscribe", "mm-pa", () =>
+      runPrimary(
+        unsub,
+        { type: "mm:unsubscribe", unsubscribe: u, messageId: displayed.id },
+        u.mailto ? "Opened an unsubscribe email — review and send." : "Unsubscribe sent.",
+      ),
+    );
+    bar.append(unsub);
+  }
+  els.body.append(bar);
+}
+
+// Fire a one-shot primary action: disable the button, send, toast the outcome, re-enable on
+// failure. The action either mutates mail or opens a compose; on success we re-classify so the
+// verdict/badge reflect the new state.
+async function runPrimary(btn, message, okText) {
+  btn.disabled = true;
+  const reply = await send(message);
+  if (reply.ok) {
+    toast(okText);
+    // A compose/unsubscribe opens a window; re-classifying would race the popup closing, so only
+    // mail-state mutations (junk/read) refresh the verdict.
+    if (message.type === "mm:junk" || message.type === "mm:markRead") {
+      await classify();
+    } else {
+      btn.disabled = false;
+    }
+  } else {
+    btn.disabled = false;
+    toast(reply.error || "Couldn't do that.");
+  }
+}
+
+// The correctable salient-signal chips: the real reasons behind the verdict. A correctable chip
+// (a deterministic model feature) carries an "✕" that records a `signal_marked_wrong` correction;
+// a rule/AI signal is shown but not correctable here (you steer those elsewhere).
+function renderSignals(c, decisionId) {
+  const signals = c.salient_signals || [];
+  if (!signals.length) {
+    return;
+  }
+  els.body.append(para("Why MailMate thinks this:", "mm-signals-label"));
+  const wrap = div("mm-signals");
+  const prior = (c.labels && c.labels[0]) || null;
+  signals.forEach((s) => {
+    const chip = div("mm-signal" + (s.correctable ? " mm-signal--correctable" : ""));
+    chip.append(span(s.label, "mm-signal__label"));
+    if (s.correctable) {
+      const wrong = button("✕", "mm-signal__wrong", async () => {
+        wrong.disabled = true;
+        const reply = await send({
+          type: "mm:signalWrong",
+          decisionId,
+          messageId: displayed.id,
+          signalId: s.id,
+          priorLabel: prior,
+        });
+        if (reply.ok) {
+          toast("Thanks — I'll weigh that less.");
+          chip.classList.add("mm-signal--rejected");
+          wrong.remove();
+        } else {
+          wrong.disabled = false;
+          toast(reply.error || "Couldn't record that.");
+        }
+      });
+      wrong.title = "This reason is wrong";
+      chip.append(wrong);
+    }
+    wrap.append(chip);
+  });
+  els.body.append(wrap);
+}
+
+// The inform-only Safety block: phishing/malware findings the host surfaced. Renders a severity
+// glyph + title (+ detail); it never offers an action — it is a heads-up, not policy.
+function renderSafety(c) {
+  const findings = c.safety_findings || [];
+  if (!findings.length) {
+    return;
+  }
+  const box = div("mm-safety");
+  box.append(para("⚠ Safety", "mm-safety__title"));
+  findings.forEach((f) => {
+    const item = div(`mm-safety__item mm-safety--${f.severity || "info"}`);
+    item.append(span(`${severityGlyph(f.severity)} ${f.title}`, "mm-safety__h"));
+    if (f.detail) {
+      item.append(para(f.detail, "mm-safety__d"));
+    }
+    box.append(item);
+  });
+  els.body.append(box);
+}
+
+function severityGlyph(severity) {
+  switch (severity) {
+    case "danger":
+      return "⛔";
+    case "warning":
+      return "⚠";
+    default:
+      return "ⓘ";
+  }
+}
+
+// The cold-start / still-learning card: shown when the host is unsure and there is nothing to
+// suggest, instead of a bare "0 allowed, 1 need review". Honest and encouraging.
+function coldStartCard(c) {
+  const card = div("mm-coldstart");
+  card.append(para("Still learning your mail", "mm-coldstart__title"));
+  const hasSignals = (c.salient_signals || []).length > 0;
+  card.append(
+    para(
+      hasSignals
+        ? "Here's what I can already see (above). Correct anything that's off and I'll get sharper fast."
+        : "I don't have a confident read yet. File or correct a few like this and I'll learn your preferences quickly.",
+      "mm-muted",
+    ),
+  );
+  return card;
+}
+
+// Open the dashboard timeline for the displayed message (the Explain deep-link). The dashboard
+// reads the `explain` hash to focus the message; absent that handler it still opens the space.
+function openExplainInDashboard() {
+  const id = displayed && displayed.id != null ? String(displayed.id) : "";
+  send({ type: "mm:openDashboard", explain: id });
 }
 
 function appendWhy(explanation) {
@@ -434,7 +698,7 @@ function categoryMenu(decisionId, current) {
       toast(reply.error || "Couldn't record that.");
     }
   };
-  DEFAULT_CATEGORIES.forEach((label) => {
+  (hostCategories || DEFAULT_CATEGORIES).forEach((label) => {
     const isNow = current && label.toLowerCase() === current.toLowerCase();
     const chip = button(isNow ? `${label} ✓` : label, "mm-chip", () => choose(label));
     if (isNow) {
@@ -535,11 +799,18 @@ function isRisky(c) {
   );
 }
 
-// A *banded* confidence (Low / Medium / High / Very high) — never the raw score. For a risky
-// verdict the band comes from the dominant spam/phishing signal; for a benign one the host's own
-// needs_review flag is the honest "am I sure?" signal. A calibrated numeric band is a host
-// addition; until then this is an explicitly coarse, non-lying view.
+// A *banded* confidence — never the raw score. The host now emits a calibrated `confidence_band`
+// (high / medium / low); the panel renders that. `needs_review` always overrides to the honest
+// "Needs review" label, whatever the band. The pre-host-band client derivation is kept as a
+// fallback for an older host that emits no band (degrade, never lie).
 function confidenceBand(c) {
+  if (c.needs_review) {
+    return { text: "Needs review", fill: 4 };
+  }
+  const fillByBand = { high: 8, medium: 5, low: 3 };
+  if (c.confidence_band && fillByBand[c.confidence_band] !== undefined) {
+    return { text: `${cap(c.confidence_band)} confidence`, fill: fillByBand[c.confidence_band] };
+  }
   const score = Math.max(c.spam_score || 0, c.phishing_score || 0);
   if (isRisky(c)) {
     if (score >= 0.85) return { text: "Very high confidence", fill: 9 };
@@ -547,9 +818,7 @@ function confidenceBand(c) {
     if (score >= 0.45) return { text: "Medium confidence", fill: 5 };
     return { text: "Low confidence", fill: 3 };
   }
-  return c.needs_review
-    ? { text: "Needs review", fill: 5 }
-    : { text: "High confidence", fill: 8 };
+  return { text: "High confidence", fill: 8 };
 }
 
 function actionText(a, past) {

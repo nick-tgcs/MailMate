@@ -48,6 +48,23 @@ const DEFAULT_CATEGORIES = [
   "Travel",
 ];
 
+// Inline provider setup (onboarding step 3) — the few bits of options.js's provider machinery the
+// walkthrough needs, kept here so setup is self-contained (no eject to the preferences tab). Each
+// kind's default endpoint pre-fills a working URL; loopback endpoints auto-list their model catalog
+// (hitting localhost is not egress) so the Model field becomes a dropdown without a button.
+const OB_KIND_DEFAULTS = {
+  ollama: "http://localhost:11434",
+  lm_studio: "http://localhost:1234/v1",
+  llama_cpp: "http://localhost:8080",
+  openai_compatible: "https://api.openai.com/v1",
+};
+const OB_PROVIDER_KINDS = Object.keys(OB_KIND_DEFAULTS);
+const OB_KIND_DEFAULT_VALUES = new Set(Object.values(OB_KIND_DEFAULTS));
+const obModelCache = new Map();
+const obProbeKey = (p) => `${p.kind}|${p.endpoint}`;
+const obIsLocal = (url) =>
+  /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:\/|$)/i.test((url || "").trim());
+
 // --- State ----------------------------------------------------------------------------
 
 let activeTab = "review";
@@ -94,6 +111,22 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+// i18n seam: resolve a message key through browser.i18n when present, else the English fallback.
+// English-only v1, but the seam exists so a future locale ships `_locales/<lang>/messages.json`
+// with no code change. Mirrors panel.js's helper; degrades safely in jsdom/tests where
+// browser.i18n is absent or a key is unset (the fallback is the live English copy).
+function t(key, fallback) {
+  try {
+    if (typeof browser !== "undefined" && browser.i18n && browser.i18n.getMessage) {
+      const m = browser.i18n.getMessage(key);
+      if (m) return m;
+    }
+  } catch (e) {
+    // fall through to the fallback
+  }
+  return fallback;
+}
+
 // --- Boot -----------------------------------------------------------------------------
 
 async function boot() {
@@ -131,7 +164,7 @@ async function enterApp() {
 }
 
 const FOCUS_TAB_KEY = "mm:focusTab";
-const VALID_TABS = ["review", "followups", "proposals", "activity"];
+const VALID_TABS = ["review", "followups", "proposals", "rules", "activity"];
 
 // Read + clear the deep-link tab a notification click stashed, returning a valid tab or null.
 async function consumeFocusTab() {
@@ -234,11 +267,14 @@ function wireHeader() {
     await renderTab(activeTab);
     toast("Refreshed");
   });
+  // Re-open the first-run walkthrough on demand — onboarding is otherwise shown once and hidden for
+  // good, leaving no way back to "the setup". Finishing it returns to the app via finishOnboarding.
+  $("mm-help").addEventListener("click", () => renderOnboarding(0));
   $("mm-settings").addEventListener("click", async () => {
     try {
       await browser.runtime.openOptionsPage();
     } catch {
-      toast("The Settings page lands with configuration (Milestone 4)", true);
+      toast("Couldn't open Settings — reload the add-on (about:debugging → Reload)", true);
     }
   });
   $("mm-pause").addEventListener("click", togglePause);
@@ -246,7 +282,7 @@ function wireHeader() {
     try {
       await browser.runtime.openOptionsPage();
     } catch {
-      toast("Provider setup lands with configuration (Milestone 4)", true);
+      toast("Couldn't open provider settings — reload the add-on (about:debugging → Reload)", true);
     }
   });
 }
@@ -311,6 +347,7 @@ async function renderTab(name) {
   if (name === "activity") return renderActivity();
   if (name === "proposals") return renderProposals();
   if (name === "followups") return renderFollowups();
+  if (name === "rules") return renderRules();
 }
 
 function setTabCount(name, count) {
@@ -335,9 +372,13 @@ async function renderReview() {
   const c = content();
   clear(c);
 
+  // The first-run backfill affordance / live progress sits above the queue, so a fresh install
+  // can populate suggestions from existing mail in one tap.
+  await renderBackfill(c);
+
   if (!items.length) {
     c.appendChild(
-      emptyState("✓", "Inbox triaged — nothing waiting", [
+      emptyState("✓", t("dashInboxTriaged", "Inbox triaged — nothing waiting"), [
         "Crystallized rules file safely in the background.",
         "New suggestions appear here whenever MailMate isn't yet sure — correct them in one click and it learns.",
       ]),
@@ -345,14 +386,206 @@ async function renderReview() {
     return;
   }
 
-  for (const item of items) c.appendChild(reviewCard(item));
+  // The queue is a keyboard-navigable list: j/k or ↑/↓ move between cards, and the focused card
+  // is triaged without the mouse (Enter/a = approve-all-safe, e = explain, x/Del = dismiss).
+  const queue = el("div", {
+    class: "mm-queue",
+    attrs: { role: "list", "aria-label": "Review queue", "aria-keyshortcuts": "j k ArrowUp ArrowDown Enter e x" },
+  });
+  items.forEach((item, i) => queue.appendChild(reviewCard(item, i === 0)));
+  wireQueueKeyboard(queue);
+  c.appendChild(queue);
 }
 
-function reviewCard(item) {
+// Keyboard triage over the review queue (full a11y): a roving-tabindex list where exactly one
+// card is in the tab order, the arrow/vim keys move focus, and single keys fire the focused
+// card's actions. Typing into a field is never hijacked. Tested in jsdom via synthetic
+// KeyboardEvents (focus moves + the right action button is clicked).
+function wireQueueKeyboard(queue) {
+  const cards = () => [...queue.querySelectorAll(".mm-card[data-card]")];
+
+  function focusCard(list, idx) {
+    if (!list.length) return;
+    const clamped = Math.max(0, Math.min(idx, list.length - 1));
+    for (const card of list) card.setAttribute("tabindex", "-1");
+    const target = list[clamped];
+    target.setAttribute("tabindex", "0");
+    target.focus();
+  }
+
+  queue.addEventListener("keydown", (e) => {
+    // Never eat modifier chords (Ctrl/Cmd/Alt-<key> belong to the browser / screen reader), and
+    // never steal keys typed into an input/textarea/select within a card.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const tag = e.target && e.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+    const list = cards();
+    if (!list.length) return;
+    const focused = e.target.closest ? e.target.closest(".mm-card[data-card]") : null;
+    const current = focused ? list.indexOf(focused) : -1;
+
+    // Single-letter action shortcuts fire ONLY when the card itself holds focus — not when a child
+    // button is focused (Tab-ing onto "Approve all safe" then pressing 'x' must not dismiss).
+    // Navigation keys (arrows/j/k/Home/End) still work from anywhere in the queue.
+    const fire = (act) => {
+      if (!focused || e.target !== focused) return;
+      const btn = focused.querySelector(`[data-act="${act}"]:not([disabled])`);
+      if (btn) {
+        btn.click();
+        e.preventDefault();
+      }
+    };
+
+    switch (e.key) {
+      case "ArrowDown":
+      case "j":
+        focusCard(list, current < 0 ? 0 : current + 1);
+        e.preventDefault();
+        break;
+      case "ArrowUp":
+      case "k":
+        focusCard(list, current < 0 ? 0 : current - 1);
+        e.preventDefault();
+        break;
+      case "Home":
+        focusCard(list, 0);
+        e.preventDefault();
+        break;
+      case "End":
+        focusCard(list, list.length - 1);
+        e.preventDefault();
+        break;
+      case "Enter":
+      case "a":
+        fire("approve");
+        break;
+      case "e":
+        fire("explain");
+        break;
+      case "x":
+      case "Delete":
+      case "Backspace":
+        fire("dismiss");
+        break;
+      default:
+        break;
+    }
+  });
+}
+
+// --- First-run backfill ("Triage my existing mail") -----------------------------------
+//
+// One tap sweeps already-present mail through the same classify path (the host applies nothing
+// and mines deliberate folder placements to warm suggestions). The background owns the paging;
+// the dashboard renders an idle one-tap / a live progress chip / a finished summary, driven by
+// `mm:backfillStatus`, and polls while a run is in flight.
+
+let backfillPoll = null;
+
+async function renderBackfill(container) {
+  const box = el("div", { class: "mm-backfill", attrs: { id: "mm-backfill" } });
+  container.appendChild(box);
+  await paintBackfill(box);
+}
+
+async function paintBackfill(box) {
+  if (!box || !box.isConnected) return; // the tab moved on; stop touching a detached node
+  const status = await send({ type: "mm:backfillStatus" });
+  if (!box.isConnected) return; // detached while we awaited the status — do not paint into a dead node
+  const st = status && status.ok ? status : {};
+  clear(box);
+
+  if (st.running) {
+    const total = st.total ? String(st.total) : "…";
+    box.appendChild(
+      el("span", {
+        class: "mm-backfill__chip",
+        text: st.paused
+          ? `Paused · ${st.done || 0}/${total} triaged`
+          : `Triaging your mail · ${st.done || 0}/${total}`,
+      }),
+    );
+    const toggle = el("button", { class: "mm-backfill__btn", text: st.paused ? "Resume" : "Pause" });
+    toggle.addEventListener("click", async () => {
+      await send({ type: "mm:backfillControl", action: st.paused ? "resume" : "pause" });
+      await paintBackfill(box);
+    });
+    const stop = el("button", { class: "mm-backfill__btn mm-backfill__btn--stop", text: "Stop" });
+    stop.addEventListener("click", async () => {
+      await send({ type: "mm:backfillControl", action: "cancel" });
+      await paintBackfill(box);
+    });
+    box.append(toggle, stop);
+    schedulePoll(box);
+    return;
+  }
+
+  stopPoll();
+  if (st.done_at) {
+    // A finished run summarizes what it surfaced (and links onward to the warmed proposals).
+    const n = st.classified || 0;
+    const review = st.needs_review || 0;
+    box.appendChild(
+      el("span", {
+        class: "mm-backfill__chip mm-backfill__chip--done",
+        text: review
+          ? `Triaged ${n} messages · ${review} need a look`
+          : `Triaged ${n} messages — suggestions are warming up`,
+      }),
+    );
+    return;
+  }
+
+  // Idle: the one-tap invitation.
+  box.appendChild(
+    el("span", {
+      class: "mm-backfill__hint",
+      text: "New here? Scan what's already in your folders to warm up suggestions — nothing is moved.",
+    }),
+  );
+  const start = el("button", { class: "mm-backfill__start", text: "Triage my existing mail" });
+  start.addEventListener("click", async () => {
+    start.disabled = true;
+    const r = await send({ type: "mm:triageExisting" });
+    if (!r || r.ok === false) {
+      toast(r && r.error ? r.error : "Couldn't start triage", true);
+      start.disabled = false;
+      return;
+    }
+    await paintBackfill(box);
+  });
+  box.appendChild(start);
+}
+
+function schedulePoll(box) {
+  stopPoll();
+  backfillPoll = setTimeout(() => paintBackfill(box), 900);
+}
+
+function stopPoll() {
+  if (backfillPoll) {
+    clearTimeout(backfillPoll);
+    backfillPoll = null;
+  }
+}
+
+function reviewCard(item, isFirst = false) {
   const cls = item.classification || {};
   const tbId = item.thunderbird_message_id;
   const decisionId = item.decision_id;
-  const card = el("div", { class: "mm-card" });
+  // A listitem in the keyboard-navigable queue. Roving tabindex: only the first card is in the
+  // tab order (0); the rest are reachable by arrow/vim keys (-1). The aria-label is what a screen
+  // reader announces on focus — subject, sender, and the one-line verdict.
+  const card = el("div", {
+    class: "mm-card",
+    attrs: {
+      role: "listitem",
+      "data-card": "1",
+      tabindex: isFirst ? "0" : "-1",
+      "aria-label": `${subjectOf(item)} — from ${fromOf(item)}. ${verdictLine(cls)}`,
+    },
+  });
 
   const risk = riskOf(cls);
   const top = el("div", { class: "mm-card__top" }, [
@@ -383,14 +616,14 @@ function reviewCard(item) {
 
   const actions = el("div", { class: "mm-card__actions" });
   if (suggestions.length) {
-    const approveAll = el("button", { class: "mm-btn mm-btn--primary", text: "Approve all safe" });
+    const approveAll = el("button", { class: "mm-btn mm-btn--primary", text: t("dashApproveAllSafe", "Approve all safe"), attrs: { "data-act": "approve" } });
     approveAll.addEventListener("click", () => approveAllSafe(suggestions, decisionId, tbId, card, item));
     actions.appendChild(approveAll);
   }
-  const dismiss = el("button", { class: "mm-btn", text: "Dismiss" });
+  const dismiss = el("button", { class: "mm-btn", text: t("dashDismiss", "Dismiss"), attrs: { "data-act": "dismiss" } });
   dismiss.addEventListener("click", () => dismissCard(item, card));
   actions.appendChild(dismiss);
-  const explain = el("button", { class: "mm-btn", text: "Explain" });
+  const explain = el("button", { class: "mm-btn", text: t("dashExplain", "Explain"), attrs: { "data-act": "explain" } });
   explain.addEventListener("click", () => explainInActivity(tbId));
   actions.appendChild(explain);
   card.appendChild(actions);
@@ -501,7 +734,7 @@ async function dismissCard(item, card) {
   }
   await resolveReview(item);
   card.remove();
-  toast("Dismissed");
+  toast(t("dashDismissed", "Dismissed"));
   await refreshReviewCount();
 }
 
@@ -658,27 +891,183 @@ async function renderProposals() {
   for (const p of proposals) c.appendChild(proposalCard(p));
 }
 
+// --- Rule → English -------------------------------------------------------------------------
+//
+// Render a rule's condition→effect AST (the same JSON the host stores: `{all|any|not}` over
+// `{field,op,value}` predicates + a RuleEffect) as a readable sentence. Shared by the Proposals
+// card and the Rules-manager tab so a learned rule always reads the same way. Pure + total: an
+// unknown field/op falls back to its raw token rather than throwing, so a forward-compatible
+// rule from a newer host still renders something honest.
+
+const FIELD_LABELS = {
+  sender_domain: "sender domain",
+  sender_email: "sender",
+  sender_seen_count: "times seen from this sender",
+  subject_normalized: "subject",
+  subject: "subject",
+  is_spam: "spam",
+  is_phishing: "phishing",
+  thread_id: "thread",
+  "classification.labels": "label",
+  "classification.priority": "priority",
+  account_id: "account",
+  folder_id: "folder",
+};
+const fieldLabel = (f) => FIELD_LABELS[f] || String(f || "").replace(/[._]/g, " ");
+
+const OP_LABELS = {
+  eq: "is",
+  in: "is one of",
+  contains: "contains",
+  contains_any: "contains any of",
+  contains_all: "contains all of",
+  gt: "is more than",
+  gte: "is at least",
+  lt: "is less than",
+  lte: "is at most",
+  before: "is before",
+  after: "is after",
+  exists: "is present",
+  matches_regex: "matches",
+};
+
+function formatRuleValue(value) {
+  if (value == null) return "";
+  if (Array.isArray(value)) return value.map((v) => `“${v}”`).join(", ");
+  if (typeof value === "string") return `“${value}”`;
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return String(value);
+}
+
+function predicateToEnglish(pred) {
+  const field = fieldLabel(pred.field);
+  const op = OP_LABELS[pred.op] || String(pred.op || "");
+  if (pred.op === "exists") return `${field} is present`;
+  if (pred.op === "matches_regex") return `${field} matches /${pred.value}/`;
+  const val = formatRuleValue(pred.value);
+  return val ? `${field} ${op} ${val}` : `${field} ${op}`;
+}
+
+// Only an and/or combinator needs parens for precedence when nested inside another; a `not (...)`
+// is already self-delimiting and a leaf predicate needs none.
+function clauseToEnglish(cond, nested) {
+  if (cond && nested && (Array.isArray(cond.all) || Array.isArray(cond.any))) {
+    return `(${conditionToEnglish(cond)})`;
+  }
+  return conditionToEnglish(cond);
+}
+
+function conditionToEnglish(cond) {
+  if (!cond || typeof cond !== "object") return "any message";
+  if (Array.isArray(cond.all)) {
+    if (!cond.all.length) return "any message";
+    return cond.all.map((c) => clauseToEnglish(c, true)).join(" and ");
+  }
+  if (Array.isArray(cond.any)) {
+    if (!cond.any.length) return "any message";
+    return cond.any.map((c) => clauseToEnglish(c, true)).join(" or ");
+  }
+  if (cond.not) return `not (${conditionToEnglish(cond.not)})`;
+  return predicateToEnglish(cond);
+}
+
+function effectToEnglish(effect) {
+  if (!effect || typeof effect !== "object") return "do nothing";
+  const parts = [];
+  if (effect.move != null) parts.push(`move to ${effect.move}`);
+  if (Array.isArray(effect.tag) && effect.tag.length) parts.push(`tag with ${effect.tag.join(", ")}`);
+  if (effect.mark_junk === true) parts.push("mark as junk");
+  if (effect.mark_junk === false) parts.push("unmark as junk");
+  if (Array.isArray(effect.set_labels) && effect.set_labels.length) parts.push(`label as ${effect.set_labels.join(", ")}`);
+  if (effect.priority != null) parts.push(`set priority ${effect.priority}`);
+  if (Array.isArray(effect.require_review_for) && effect.require_review_for.length) {
+    parts.push(`hold ${effect.require_review_for.join(", ")} for review`);
+  }
+  return parts.length ? parts.join(", ") : "do nothing";
+}
+
+// `draft` is a RuleDraft / rule version: { condition, effect, ... }. Returns a full sentence.
+function ruleToEnglish(draft) {
+  if (!draft || typeof draft !== "object") return "";
+  return `When ${conditionToEnglish(draft.condition)} → ${effectToEnglish(draft.effect)}.`;
+}
+
+// The glyph class for a risk level — total over the four RiskLevel variants (critical/high/
+// medium/low) and any unexpected token (→ low). A bare ternary silently rendered `critical` as
+// `low`; this maps it explicitly.
+const RISK_GLYPH = { critical: "critical", high: "high", medium: "med", low: "low" };
+const riskGlyphClass = (risk) => RISK_GLYPH[String(risk || "low").toLowerCase()] || "low";
+
+// "precision 0.88 · support 23 msgs", or "support N msgs" when precision is absent (fired on
+// nothing), or "" when there is no back-test at all.
+function backTestSummary(bt) {
+  if (!bt || typeof bt !== "object") return "";
+  const support = `support ${bt.support} msg${bt.support === 1 ? "" : "s"}`;
+  return typeof bt.precision === "number" ? `precision ${bt.precision.toFixed(2)} · ${support}` : support;
+}
+
 function proposalCard(p) {
   const risk = (p.risk_level || "low").toLowerCase();
   const card = el("div", { class: "mm-card" });
   card.appendChild(
     el("div", { class: "mm-card__top" }, [
-      el("span", { class: `mm-glyph mm-glyph--${risk === "high" ? "high" : risk === "medium" ? "med" : "low"}`, text: "◆" }),
+      el("span", { class: `mm-glyph mm-glyph--${riskGlyphClass(risk)}`, text: "◆" }),
       el("span", { class: "mm-card__title", text: p.title || p.proposal_type }),
       el("span", { class: "mm-card__from", text: `${p.proposal_type} · ${risk} risk` }),
     ]),
   );
   card.appendChild(el("p", { class: "mm-card__sub", text: p.rationale || "" }));
+  // The candidate rule in English + the back-test the gate admitted it on — so the card is
+  // reviewable without drilling into a detail view (the Phase-6 exit: a proposal shows its rule
+  // in English with back-test numbers).
+  if (p.rule_draft) {
+    card.appendChild(el("p", { class: "mm-rule-en", text: ruleToEnglish(p.rule_draft) }));
+  }
+  const bt = backTestSummary(p.back_test);
+  if (bt) card.appendChild(el("p", { class: "mm-card__sub mm-muted", text: bt }));
+  // Conflicts with existing active rules (subsumption/overlap/contradiction). A non-empty list is
+  // why the host recommends pending_human_review — surface it so the user adjudicates with eyes
+  // open instead of blindly approving an overlapping rule.
+  const conflicts = Array.isArray(p.conflicts) ? p.conflicts : [];
+  if (conflicts.length) {
+    const block = el("div", { class: "mm-card__conflicts" });
+    block.appendChild(
+      el("p", {
+        class: "mm-card__sub mm-warn",
+        text: `⚠ Conflicts with ${conflicts.length} existing rule${conflicts.length === 1 ? "" : "s"} — needs your review`,
+      }),
+    );
+    for (const c of conflicts) {
+      block.appendChild(el("p", { class: "mm-card__sub mm-muted", text: `· ${c.description || c.kind || "conflict"}` }));
+    }
+    card.appendChild(block);
+  }
   card.appendChild(
     el("p", { class: "mm-card__sub mm-muted", text: `Recommended: ${p.recommended_status || "review"}` }),
   );
   card.appendChild(el("hr", { class: "mm-card__hr" }));
 
-  // Every approval materializes the rule into its recommended status (shadow / pending-review) —
-  // a rule that runs and logs but never acts on its own until you later promote it. There is no
-  // one-click "→ active": activation is a separate, deliberate step, so even a HIGH-risk approval
-  // here is safe (the rule shadows, it does not act). Rejection feeds the curator's negative signal.
   const actions = el("div", { class: "mm-card__actions" });
+  // A retire proposal references an EXISTING rule (no new draft to shadow): accepting it retires
+  // that rule, so the card must say so — never the new-rule "Approve → shadow" wording, which
+  // would promise a shadow step that does not happen.
+  if (p.proposal_type === "retire_rule") {
+    const retireBtn = el("button", { class: "mm-btn mm-btn--primary", text: "Approve → retire rule" });
+    retireBtn.title = "Retire the rule you keep undoing — it stops acting (you can re-learn it later)";
+    retireBtn.addEventListener("click", () => reviewProposal(p, "accept_for_shadow_mode", card));
+    const keep = el("button", { class: "mm-btn", text: "Keep rule" });
+    keep.addEventListener("click", () => reviewProposal(p, "reject", card));
+    actions.appendChild(retireBtn);
+    actions.appendChild(keep);
+    card.appendChild(actions);
+    return card;
+  }
+
+  // Every new-rule approval materializes the rule into its recommended status (shadow / pending-
+  // review) — a rule that runs and logs but never acts on its own until you later promote it.
+  // There is no one-click "→ active": activation is a separate, deliberate step, so even a
+  // HIGH-risk approval here is safe (the rule shadows, it does not act). Rejection feeds the
+  // curator's negative signal.
   const approve = el("button", { class: "mm-btn mm-btn--primary", text: "Approve → shadow" });
   approve.title = "Materialize as a shadow rule (runs + logs, never acts until you promote it)";
   approve.addEventListener("click", () => reviewProposal(p, "accept_for_shadow_mode", card));
@@ -714,6 +1103,98 @@ async function reviewProposal(p, decision, card) {
   // mode the card promised.
   toast(decision === "reject" ? "Rejected" : `Approved → ${p.recommended_status || "shadow"}`);
   await renderProposals(); // re-pull so the tab count + any remaining cards are accurate
+}
+
+// --- Tab: Rules manager ---------------------------------------------------------------
+//
+// Every evaluated (active + shadow) and disabled rule, grouped by lifecycle, each rendered in
+// English (reusing ruleToEnglish) with its backed correction signal and a one-click status flip.
+// Disabling/enabling/promoting hot-reloads the host engines, so the change is live immediately.
+
+const RULE_GROUPS = [
+  ["active", "Active — acting on their own"],
+  ["shadow_mode", "Shadow — testing, never acts"],
+  ["disabled", "Disabled — off until you re-enable"],
+];
+
+async function renderRules() {
+  const reply = await send({ type: "mm:listRules" });
+  const c = document.getElementById("mm-content");
+  clear(c);
+  if (!reply.ok) {
+    c.appendChild(el("p", { class: "mm-muted", text: reply.error || "Couldn't load rules." }));
+    return;
+  }
+  const rules = reply.rules || [];
+  if (!rules.length) {
+    c.appendChild(
+      el("p", { class: "mm-muted", text: "No learned rules yet. As you correct MailMate it proposes rules; the ones you approve appear here." }),
+    );
+    return;
+  }
+  const byStatus = {};
+  for (const r of rules) (byStatus[r.status] ||= []).push(r);
+  for (const [status, heading] of RULE_GROUPS) {
+    const group = byStatus[status];
+    if (!group || !group.length) continue;
+    c.appendChild(el("h3", { class: "mm-band__title", text: `${heading} · ${group.length}` }));
+    for (const r of group) c.appendChild(ruleCard(r));
+  }
+}
+
+function ruleCard(r) {
+  const card = el("div", { class: "mm-card" });
+  const risk = (r.risk_level || "low").toLowerCase();
+  card.appendChild(
+    el("div", { class: "mm-card__top" }, [
+      el("span", { class: `mm-glyph mm-glyph--${riskGlyphClass(risk)}`, text: "▣" }),
+      el("span", { class: "mm-card__title", text: `${r.kind} rule` }),
+      el("span", { class: `mm-pill mm-pill--${r.status}`, text: (r.status || "").replace(/_/g, " ") }),
+    ]),
+  );
+  card.appendChild(el("p", { class: "mm-rule-en", text: ruleToEnglish({ condition: r.condition, effect: r.effect }) }));
+
+  // The backed correction signal: undos of this rule's auto-applied actions. `null` = not yet
+  // tracked (never a misleading "0 corrections"); 0 = a genuine clean record.
+  const undo = r.undo_count;
+  const undoText =
+    undo == null
+      ? "corrections: not tracked yet"
+      : undo === 0
+        ? "no corrections yet — looking good"
+        : `you undid this rule ${undo} time${undo === 1 ? "" : "s"}`;
+  card.appendChild(el("p", { class: "mm-card__sub mm-muted", text: undoText }));
+
+  const actions = el("div", { class: "mm-card__actions" });
+  if (r.status === "disabled") {
+    const enable = el("button", { class: "mm-btn mm-btn--primary", text: "Enable" });
+    enable.addEventListener("click", () => setRuleStatus(r, "active", card));
+    actions.appendChild(enable);
+  } else {
+    if (r.status === "shadow_mode") {
+      const promote = el("button", { class: "mm-btn mm-btn--primary", text: "Activate" });
+      promote.title = "Promote this shadow rule to active so it can act on its own";
+      promote.addEventListener("click", () => setRuleStatus(r, "active", card));
+      actions.appendChild(promote);
+    }
+    const disable = el("button", { class: "mm-btn", text: "Disable" });
+    disable.addEventListener("click", () => setRuleStatus(r, "disabled", card));
+    actions.appendChild(disable);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+async function setRuleStatus(r, status, card) {
+  for (const b of card.querySelectorAll("button")) b.disabled = true;
+  const reply = await send({ type: "mm:setRuleStatus", ruleId: r.rule_id, kind: r.kind, status });
+  if (!reply.ok) {
+    for (const b of card.querySelectorAll("button")) b.disabled = false;
+    toast(reply.error || "couldn't change that rule", true);
+    return;
+  }
+  toast(status === "disabled" ? "Rule disabled" : status === "active" ? "Rule enabled" : "Rule updated");
+  await renderRules(); // re-pull so the rule re-groups under its new status
 }
 
 // --- Tab 2: Follow-ups pipeline -------------------------------------------------------
@@ -950,9 +1431,10 @@ function onboardStep2(root, index) {
 }
 
 function onboardStep3(root, index) {
-  // The provider card is filled in async from the host's REAL settings — never hardcode
-  // "no provider", which would be a lie the moment one is configured.
-  const card = el("div", { class: "mm-ob__card", text: "Checking for an AI provider…" });
+  // Provider setup happens INLINE in this card — no jump out to the preferences tab (which looked
+  // different, lost the wizard's place, and left this step's status stale). The card drives the
+  // host directly and re-renders from its confirmed state after every change.
+  const card = el("div", { class: "mm-ob__card" });
   onboardShell(
     root,
     index,
@@ -963,49 +1445,14 @@ function onboardStep3(root, index) {
       }),
       el("p", {
         class: "mm-muted",
-        text: "Those rules come from you. MailMate watches how you file and correct mail, and when it sees the same safe choice enough times — say, three messages from one sender moved to the same folder — it proposes a rule in the Proposals tab for you to approve. It never activates one on its own; as approved rules prove out, it starts handling that pattern automatically — one-tap Undo, and never for sending or deleting. None of this needs a provider.",
+        text: "Off by default. Without one, “draft a reply” just says “drafting needs a provider” — nothing else changes. Set one up right here, or skip with Continue and add it later in Settings.",
       }),
       card,
-      el("p", {
-        class: "mm-muted",
-        text: "A provider is off by default. Without one, “draft a reply” simply says “drafting needs a provider” instead of failing — nothing else changes. You can add or change one anytime in Settings.",
-      }),
     ],
     () => renderOnboarding(1),
     () => renderOnboarding(3),
   );
-  send({ type: "mm:settings" }).then((reply) => {
-    clear(card);
-    const s = reply && reply.ok ? reply.settings : null;
-    const providers = (s && s.providers) || [];
-    const active = s && s.default_provider;
-    let configured = false;
-    let line;
-    if (!s) {
-      line = "◌ Provider status needs the helper — connect it to manage providers";
-    } else if (active) {
-      const p = providers.find((x) => x.id === active);
-      line = `● Provider: ${active}${p && p.kind ? ` (${p.kind})` : ""} — reply drafting available`;
-      configured = true;
-    } else if (providers.length) {
-      line = "◌ A provider is added but none is set as default — pick one in Settings to enable drafting";
-    } else {
-      line = "◌ No provider configured — reply drafting is off (everything else works)";
-    }
-    card.appendChild(el("div", { text: line }));
-    const setup = el("button", {
-      class: "mm-btn",
-      text: configured ? "Manage in Settings →" : "Set up a provider →",
-    });
-    setup.addEventListener("click", async () => {
-      try {
-        await browser.runtime.openOptionsPage();
-      } catch {
-        toast("Open MailMate's Settings to add a provider", true);
-      }
-    });
-    card.appendChild(setup);
-  });
+  renderProviderSetup(card);
 }
 
 function onboardStep4(root, index) {
@@ -1025,6 +1472,221 @@ function onboardStep4(root, index) {
     finishOnboarding,
     "Finish",
   );
+}
+
+// Render the live provider state into the onboarding card, then let the user enable or set one up
+// without leaving the walkthrough. Re-called after every change so the card always shows the host's
+// confirmed state (the old card polled once and went stale the moment a provider was added).
+async function renderProviderSetup(card) {
+  clear(card);
+  card.appendChild(el("div", { class: "mm-muted", text: "Checking for an AI provider…" }));
+  const reply = await send({ type: "mm:settings" });
+  clear(card);
+  const s = reply && reply.ok ? reply.settings : null;
+  if (!s) {
+    card.appendChild(el("div", { text: "◌ Provider status needs the helper — connect it (Step 2) to manage providers." }));
+    return;
+  }
+  const providers = s.providers || [];
+  const activeId = s.default_provider || null;
+
+  if (activeId) {
+    const p = providers.find((x) => x.id === activeId) || { id: activeId };
+    card.appendChild(el("div", { text: `● Provider: ${p.id}${p.kind ? ` (${p.kind})` : ""} — reply drafting is on.` }));
+    if (p.model) card.appendChild(el("div", { class: "mm-muted", text: `Model: ${p.model}` }));
+    const change = el("button", { class: "mm-btn", text: "Change provider" });
+    change.addEventListener("click", () => renderProviderForm(card, p));
+    card.appendChild(el("div", { class: "mm-ob__formnav" }, [change]));
+    return;
+  }
+
+  if (providers.length) {
+    const p = providers[0];
+    card.appendChild(el("div", { text: `◌ “${p.id}” is set up but not enabled for drafting yet.` }));
+    const use = el("button", { class: "mm-btn mm-btn--primary", text: `Use “${p.id}” for drafting` });
+    use.addEventListener("click", async () => {
+      use.disabled = true;
+      const r = await send({ type: "mm:setProvider", providerId: p.id, setDefault: true });
+      if (r && r.ok) {
+        toast("Provider enabled — drafting is on");
+        renderProviderSetup(card);
+      } else {
+        use.disabled = false;
+        toast((r && r.error) || "Couldn't enable that provider", true);
+      }
+    });
+    const other = el("button", { class: "mm-btn", text: "Set up a different one" });
+    other.addEventListener("click", () => renderProviderForm(card, null));
+    card.appendChild(el("div", { class: "mm-ob__formnav" }, [use, other]));
+    return;
+  }
+
+  renderProviderForm(card, null);
+}
+
+// The compact provider form: kind + endpoint + model (a dropdown for local endpoints) + an optional
+// key for cloud. "Use this provider" writes it AND makes it the default in one step, so drafting is
+// actually on afterwards — unlike the options page's Add, which leaves it non-default (a separate,
+// confusing step). `editing` pre-fills from an existing provider; null is a fresh setup.
+function renderProviderForm(card, editing) {
+  clear(card);
+  const initialKind = (editing && editing.kind) || "ollama";
+
+  const kind = el("select");
+  for (const k of OB_PROVIDER_KINDS) kind.appendChild(el("option", { text: k, attrs: { value: k } }));
+  kind.value = initialKind;
+
+  const endpoint = el("input", { attrs: { type: "text", placeholder: "http://localhost:11434" } });
+  endpoint.value = (editing && editing.endpoint) || OB_KIND_DEFAULTS[initialKind] || "";
+
+  let pickedModel = (editing && editing.model) || "";
+  const model = obModelField(
+    () => ({ kind: kind.value, endpoint: endpoint.value.trim() }),
+    pickedModel,
+    (v) => (pickedModel = v),
+  );
+
+  const key = el("input", { attrs: { type: "password", placeholder: "API key (cloud providers only)" } });
+  const keyRow = obField("API key", key);
+  const syncKey = () => (keyRow.hidden = obIsLocal(endpoint.value.trim()));
+  syncKey();
+
+  endpoint.addEventListener("change", () => {
+    model.refresh();
+    syncKey();
+  });
+  kind.addEventListener("change", () => {
+    const cur = endpoint.value.trim();
+    if (!cur || OB_KIND_DEFAULT_VALUES.has(cur)) {
+      endpoint.value = OB_KIND_DEFAULTS[kind.value] || "";
+    }
+    model.refresh();
+    syncKey();
+  });
+
+  const save = el("button", { class: "mm-btn mm-btn--primary", text: "Use this provider" });
+  save.addEventListener("click", async () => {
+    const ep = endpoint.value.trim();
+    const providerId = (editing && editing.id) || kind.value;
+    save.disabled = true;
+    const r = await send({
+      type: "mm:setProvider",
+      providerId,
+      kind: kind.value,
+      endpoint: ep || undefined,
+      model: (pickedModel || "").trim() || undefined,
+      setDefault: true,
+    });
+    if (!r || !r.ok) {
+      save.disabled = false;
+      toast((r && r.error) || "Couldn't save the provider", true);
+      return;
+    }
+    if (!obIsLocal(ep) && key.value) {
+      const ks = await send({ type: "mm:setSecret", providerId, secret: key.value });
+      if (!ks || !ks.ok) toast((ks && ks.error) || "Provider saved, but the key didn't", true);
+    }
+    toast("Provider enabled — drafting is on");
+    renderProviderSetup(card);
+  });
+
+  const buttons = [save];
+  if (editing) {
+    const cancel = el("button", { class: "mm-btn", text: "Cancel" });
+    cancel.addEventListener("click", () => renderProviderSetup(card));
+    buttons.push(cancel);
+  }
+
+  card.appendChild(obField("Kind", kind));
+  card.appendChild(obField("Endpoint", endpoint));
+  card.appendChild(obField("Model", model.node));
+  card.appendChild(keyRow);
+  card.appendChild(el("div", { class: "mm-ob__formnav" }, buttons));
+}
+
+// A labeled field row for the inline provider form.
+function obField(label, control) {
+  return el("div", { class: "mm-ob__field" }, [el("label", { text: label }), control]);
+}
+
+// The Model control for onboarding: a <select> once a non-empty catalog is known for the current
+// endpoint, a free-text <input> otherwise. Local (loopback) endpoints auto-list as soon as the URL
+// is in place; a refresh button and a "type manually" escape always exist. Mirrors options.js's
+// modelField, trimmed to what the walkthrough needs. probe() yields the live { kind, endpoint }.
+function obModelField(probe, initialValue, onChange) {
+  const node = el("div", { class: "mm-ob__model" });
+  let value = initialValue || "";
+  let manual = false;
+  let listing = false;
+  const set = (v) => {
+    value = v;
+    onChange(v);
+  };
+
+  async function discover(explicit) {
+    const p = probe();
+    if (listing || !p.endpoint) return;
+    const key = obProbeKey(p);
+    if (!explicit && obModelCache.has(key)) return; // already probed (success or empty) — don't repeat
+    listing = true;
+    paint();
+    const reply = await send({ type: "mm:listModels", kind: p.kind, endpoint: p.endpoint, providerId: null });
+    listing = false;
+    const models = reply && reply.ok ? reply.models || [] : [];
+    obModelCache.set(key, models);
+    if (explicit) {
+      if (!reply || !reply.ok) toast((reply && reply.error) || "Couldn't list models", true);
+      else if (!models.length) toast(`No models found at ${p.endpoint}`, true);
+      else toast(`${models.length} model${models.length === 1 ? "" : "s"} found`);
+    }
+    if (models.length && !value) set(models[0]);
+    manual = false;
+    paint();
+  }
+
+  function paint() {
+    clear(node);
+    const models = obModelCache.get(obProbeKey(probe())) || [];
+    if (models.length && !manual) {
+      const select = el("select");
+      const opts = value && !models.includes(value) ? [value, ...models] : models;
+      for (const m of opts) select.appendChild(el("option", { text: m, attrs: { value: m } }));
+      select.value = value || models[0];
+      if (select.value !== value) set(select.value);
+      select.addEventListener("change", () => set(select.value));
+      const refreshBtn = el("button", { class: "mm-btn mm-btn--icon", text: "↻", title: "Refresh model list" });
+      refreshBtn.disabled = listing;
+      refreshBtn.addEventListener("click", () => discover(true));
+      const manualBtn = el("button", { class: "mm-linkbtn", text: "type manually" });
+      manualBtn.addEventListener("click", () => {
+        manual = true;
+        paint();
+      });
+      node.append(select, refreshBtn, manualBtn);
+    } else {
+      const input = el("input", { attrs: { type: "text", placeholder: "model (e.g. llama3)" } });
+      input.value = value;
+      input.addEventListener("input", () => set(input.value));
+      const listBtn = el("button", { class: "mm-btn", text: listing ? "Listing…" : "List models" });
+      listBtn.disabled = listing;
+      listBtn.addEventListener("click", () => discover(true));
+      node.append(input, listBtn);
+    }
+  }
+
+  function refresh() {
+    manual = false;
+    paint();
+    maybeAuto();
+  }
+  function maybeAuto() {
+    const p = probe();
+    if (p.endpoint && obIsLocal(p.endpoint) && !obModelCache.has(obProbeKey(p))) discover(false);
+  }
+
+  paint();
+  maybeAuto();
+  return { node, refresh };
 }
 
 async function finishOnboarding() {
@@ -1178,6 +1840,16 @@ browser.runtime.onMessage.addListener((message) => {
       // A new proposal arrived — refresh the badge always, rebuild cards only if the tab is open.
       refreshProposalCount();
       if (activeTab === "proposals") renderProposals();
+      // The same-session crystallization "aha": a freshly-learned rule just appeared. Celebrate it
+      // by name (the host dedups, so each proposal_ready is a genuinely new learning), and point
+      // the user at where to review it — unless they're already on the Proposals tab.
+      if (message.title) {
+        toast(
+          activeTab === "proposals"
+            ? `MailMate just learned: ${message.title}`
+            : `MailMate just learned: ${message.title} — see Proposals`,
+        );
+      }
     } else if (message.event === "followups") {
       // A follow-up came due / went stale — refresh the badge always, rebuild if the tab is open.
       refreshFollowupCount();
