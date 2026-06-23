@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy, llvm-tools
       - uses: Swatinem/rust-cache@v2
@@ -52,7 +52,7 @@ jobs:
           - { name: windows-x86_64, os: windows-latest, triple: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: ${{ matrix.target.triple }}
       - uses: Swatinem/rust-cache@v2
