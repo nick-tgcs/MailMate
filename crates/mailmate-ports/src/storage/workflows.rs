@@ -100,11 +100,17 @@ pub trait WorkflowInstanceRepository: Send + Sync {
     async fn get(&self, id: &WorkflowInstanceId) -> Result<Option<WorkflowInstance>, StorageError>;
 
     /// The due instances at `now`: `status IN (active, snoozed) AND next_due_at <= now`,
-    /// ordered by `next_due_at` (the scheduler drain — the load-bearing index).
+    /// ordered by `next_due_at` and capped at `limit` (the scheduler drain — the load-bearing
+    /// index). The cap bounds a long-offline catch-up to one batch per drain; a `limit` of 0
+    /// returns nothing.
     ///
     /// # Errors
     /// [`StorageError`] on a backend failure.
-    async fn list_due(&self, now: Timestamp) -> Result<Vec<WorkflowInstance>, StorageError>;
+    async fn list_due(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<WorkflowInstance>, StorageError>;
 
     /// All non-terminal instances anchored on `thread_id` (the reply-exit lookup).
     ///

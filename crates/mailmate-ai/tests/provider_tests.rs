@@ -120,6 +120,7 @@ fn schema_valid_but_policy_invalid_response_is_rejected_by_a_later_layer() {
         actions: vec![ProposedAction::SendDraft {
             draft_id: DraftId::fresh(),
         }],
+        authored_by: Vec::new(),
     };
     let guarded =
         run_async(HardPolicyGuard::new().evaluate_action_plan(PolicyContext::default(), plan))

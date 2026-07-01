@@ -323,6 +323,8 @@ fn proposal() -> AgentProposal {
             kind: EvidenceSourceKind::Filing,
             id: FeedbackId::from("filfb_1"),
         }],
+        back_test: None,
+        conflicts: Vec::new(),
         source_provider: "learning-engine".to_owned(),
         created_at: Timestamp::now(),
         reviewed_at: None,

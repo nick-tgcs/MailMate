@@ -18,6 +18,7 @@ fn evaluate(
         decision_id: DecisionId::fresh(),
         message_id: Some(MessageId::fresh()),
         actions,
+        authored_by: Vec::new(),
     };
     block_on(HardPolicyGuard::new().evaluate_action_plan(context, plan)).unwrap()
 }

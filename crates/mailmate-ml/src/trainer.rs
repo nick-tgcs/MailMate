@@ -5,9 +5,10 @@
 //! the examples; a LoRA job is *refused* ([`TrainerError::Unsupported`]) because this
 //! backend does not advertise `lora`. That refusal is the architecture's "honest
 //! capabilities" rule in code: the pipeline never assumes on-device LoRA exists. Batteries-
-//! included LoRA is not in Burn core, so an on-device LoRA adapter stays a deferred target;
-//! the `burn` cargo feature is reserved to swap *this trainer's compute backend* once one is
-//! real, without changing the seam.
+//! included LoRA is not in Burn core, so an on-device LoRA adapter stays a deferred target for
+//! this LLM-SFT path. (The real Burn compute backend ships in Phase 8 for the *discriminative*
+//! Tier-2 classifier — see [`crate::tier2_burn`] — which is a different model from this
+//! class-prior small-model fit.)
 //!
 //! The "fit" here is a genuine maximum-likelihood class-prior over the example targets — a
 //! real, auditable small model — rather than a stub: it consumes the training data and
@@ -18,9 +19,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 
 use mailmate_common::error::TrainerError;
-use mailmate_common::hashing::stable_hash_hex;
 use mailmate_common::ids::TrainerId;
-use mailmate_common::training::{AdapterFormat, AdapterType};
 use mailmate_training::trainer::{
     TrainedArtifact, TrainedArtifactKind, TrainerBackend, TrainerCapabilities, TrainingJob,
 };
@@ -59,16 +58,10 @@ impl InProcessTrainer {
 #[async_trait]
 impl TrainerBackend for InProcessTrainer {
     fn id(&self) -> TrainerId {
-        // The id reflects what is actually running: a Burn compute backend only when the
-        // feature is enabled, otherwise the pure-Rust in-process fit.
-        #[cfg(feature = "burn")]
-        {
-            TrainerId::from("trainer_burn")
-        }
-        #[cfg(not(feature = "burn"))]
-        {
-            TrainerId::from("trainer_inprocess")
-        }
+        // The class-prior SmallModel fit is a pure-Rust in-process trainer for the LLM-SFT
+        // `TrainingJob` path; the real Burn compute backend lives in the discriminative Tier-2
+        // classifier trainer (`tier2_burn`), not here.
+        TrainerId::from("trainer_inprocess")
     }
 
     fn capabilities(&self) -> TrainerCapabilities {
@@ -96,7 +89,6 @@ impl TrainerBackend for InProcessTrainer {
         }
 
         let prior = Self::fit_class_prior(&job);
-        let tag = stable_hash_hex(&[job.dataset_id.as_str(), job.base_model_name.as_str()]);
         let mut metrics = BTreeMap::new();
         metrics.insert("examples".to_owned(), job.examples.len() as f64);
         metrics.insert("classes".to_owned(), prior.len() as f64);
@@ -106,9 +98,12 @@ impl TrainerBackend for InProcessTrainer {
 
         Ok(TrainedArtifact {
             kind: TrainedArtifactKind::SmallModel,
-            artifact_path: format!("/models/inprocess/{tag}.bin"),
-            format: AdapterFormat::Safetensors,
-            adapter_type: AdapterType::Lora,
+            // The class-prior fit is held in `training_metrics`, not written to disk: a
+            // SmallModel has no on-disk adapter, and the real loadable artifact lands in the
+            // on-device-ML phase. So the descriptor is honestly path-less and adapter-less.
+            artifact_path: String::new(),
+            format: None,
+            adapter_type: None,
             base_model_family: job.base_model_family.clone(),
             base_model_name: job.base_model_name.clone(),
             tokenizer_hash: None,

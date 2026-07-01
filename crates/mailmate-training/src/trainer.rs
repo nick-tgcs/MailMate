@@ -104,12 +104,14 @@ pub enum TrainedArtifactKind {
 pub struct TrainedArtifact {
     /// The kind of artifact.
     pub kind: TrainedArtifactKind,
-    /// Where the weights were written.
+    /// Where the weights were written (empty when the fit is in-memory and not yet persisted).
     pub artifact_path: String,
-    /// The on-disk weight format.
-    pub format: AdapterFormat,
-    /// The adapter kind (for a LoRA; `Lora` for a small model is meaningless but harmless).
-    pub adapter_type: AdapterType,
+    /// The on-disk weight format — `Some` only for a real adapter; `None` for a non-adapter
+    /// small model (a class-prior fit is neither safetensors nor a PyTorch checkpoint).
+    pub format: Option<AdapterFormat>,
+    /// The adapter kind — `Some` only for a real adapter; `None` for a non-adapter small model
+    /// (an adapter type is meaningless for a small model, so it is honestly absent).
+    pub adapter_type: Option<AdapterType>,
     /// The base-model family the artifact is compatible with.
     pub base_model_family: String,
     /// The exact base model it was trained against.

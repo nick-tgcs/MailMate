@@ -131,7 +131,8 @@ pub async fn draft_reply(
     let messages = vec![
         PromptMessage::system(
             "You are MailMate's reply drafter. Return ONLY JSON with: subject (string), \
-             body (string), safety_notes (array of strings). The draft is for human review \
+             body (string), safety_notes (array of strings), rationale (string: one short \
+             sentence on why this draft, in the user's voice). The draft is for human review \
              and will never be sent automatically. Do not include any prose.",
         ),
         PromptMessage::user(user),
@@ -255,7 +256,8 @@ pub fn draft_schema() -> Value {
         "properties": {
             "subject": { "type": "string" },
             "body": { "type": "string" },
-            "safety_notes": { "type": "array", "items": { "type": "string" } }
+            "safety_notes": { "type": "array", "items": { "type": "string" } },
+            "rationale": { "type": "string" }
         }
     })
 }

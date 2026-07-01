@@ -5,18 +5,22 @@
 //! caller outside `mailmate-ai::providers` knows any of it; the rest of the system speaks
 //! only the `AiProvider` port and the shared `mailmate-common::ai` vocabulary.
 
+pub mod discovery;
 pub mod llama_cpp;
 pub mod lm_studio;
 pub mod mock;
 pub mod ollama;
 pub mod openai_compatible;
+pub mod swappable;
 pub mod unavailable;
 
+pub use discovery::list_models;
 pub use llama_cpp::LlamaCppAdapter;
 pub use lm_studio::LmStudioAdapter;
 pub use mock::MockProvider;
 pub use ollama::OllamaAdapter;
 pub use openai_compatible::OpenAiCompatibleAdapter;
+pub use swappable::SwappableProvider;
 pub use unavailable::UnavailableProvider;
 
 use mailmate_common::ai::{MessageRole, PromptMessage, StructuredResponse};

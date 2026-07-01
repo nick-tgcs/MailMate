@@ -27,6 +27,10 @@ use mailmate_ports::tier2_classifier::Tier2Classifier;
 
 use crate::Ports;
 
+/// The fallback `human_label` for a rejected-signal correction when no prior AI label is known —
+/// the signal id itself rides in `human_reason_code`, so the row stays unambiguous.
+const SIGNAL_MARKED_WRONG_LABEL: &str = "signal_marked_wrong";
+
 /// The provenance/prediction context for a correction — what the AI had predicted (so the
 /// feedback row records divergence and polarity) and the sender domain (so the captured row
 /// is clusterable by the learning engine). Everything is optional; an empty context records
@@ -35,6 +39,12 @@ use crate::Ports;
 pub struct CorrectionContext {
     /// The sender's domain, retained for deterministic domain-clustered proposals.
     pub sender_domain: Option<String>,
+    /// The account the corrected message belongs to, folded into a classification correction's
+    /// salient features so multi-aspect induction can cluster *per account* and scope a learned
+    /// rule to [`RuleScope::Account`](mailmate_common::rules::rule::RuleScope::Account). When
+    /// absent, induction clusters account-agnostically and the rule degrades to `Global` — honest,
+    /// never a false account scope.
+    pub account_id: Option<String>,
     /// The label the AI had assigned on the spam axis (`spam`/`ham`/…), if any.
     pub ai_label: Option<String>,
     /// The AI's confidence, if a model produced the prediction.
@@ -119,6 +129,40 @@ fn build_feedback(
         UserCorrection::CorrectLabel { message_id, label } => TaskFeedback::Classification(
             classification_row(message_id, label.clone(), features, context),
         ),
+        // A tag add/remove teaches the same classification table under the tag key, but its
+        // polarity comes from the DIRECTION (add = positive, remove = negative), independent of
+        // any prior AI label — so an explicit tag is a clean, first-class category signal.
+        UserCorrection::TagChanged {
+            message_id,
+            tag,
+            added,
+        } => {
+            let mut row = classification_row(message_id, tag.clone(), features, context);
+            row.polarity = if *added {
+                FeedbackPolarity::Positive
+            } else {
+                FeedbackPolarity::Negative
+            };
+            TaskFeedback::Classification(row)
+        }
+        // "This reason is wrong": a rejected salient signal. It teaches a negative
+        // classification-feedback row whose `human_reason_code` is the signal id (a feature key
+        // or rule id) and whose label echoes the prior verdict, so a feature the user keeps
+        // rejecting is durable evidence against any rule that would lean on it. Negative by
+        // construction (the user is removing support, not asserting a new label).
+        UserCorrection::SignalMarkedWrong {
+            message_id,
+            signal_id,
+        } => {
+            let label = context
+                .ai_label
+                .clone()
+                .unwrap_or_else(|| SIGNAL_MARKED_WRONG_LABEL.to_owned());
+            let mut row = classification_row(message_id, label, features, context);
+            row.human_reason_code = Some(signal_id.clone());
+            row.polarity = FeedbackPolarity::Negative;
+            TaskFeedback::Classification(row)
+        }
         UserCorrection::LearnFiling {
             message_id,
             to_folder,
@@ -154,6 +198,13 @@ fn classification_row(
     let mut salient = features.clone();
     if let Some(domain) = &context.sender_domain {
         salient.insert("sender_domain", FeatureValue::Text(domain.clone()));
+    }
+    // Fold the account into the salient features (key `account_id`) so multi-aspect induction can
+    // cluster per account. It is a SCOPING dimension, not a predicate: induction reads it to choose
+    // `RuleScope::Account` but never emits an `account_id == X` clause (the runtime field
+    // environment carries no account_id, so such a clause would be dead on arrival).
+    if let Some(account) = &context.account_id {
+        salient.insert("account_id", FeatureValue::Text(account.clone()));
     }
     ClassificationFeedbackRow {
         id: ClassificationFeedback::fresh_id(),
@@ -217,6 +268,31 @@ mod tests {
     }
 
     #[test]
+    fn a_correction_folds_the_account_into_salient_features_for_per_account_induction() {
+        // The account rides into the captured row as the `account_id` salient feature, so multi-
+        // aspect induction can cluster per account and scope the learned rule to that account.
+        let correction = UserCorrection::CorrectLabel {
+            message_id: MessageId::from("msg_1"),
+            label: "suspicious".to_owned(),
+        };
+        let context = CorrectionContext {
+            account_id: Some("work".to_owned()),
+            ..ctx_with_domain("acme.test")
+        };
+        let feedback = build_feedback(&correction, &FeatureVector::new(), &context);
+        match feedback {
+            TaskFeedback::Classification(row) => {
+                assert_eq!(
+                    row.salient_features.get("account_id"),
+                    Some(&FeatureValue::Text("work".to_owned())),
+                    "the account is captured as a scoping feature"
+                );
+            }
+            TaskFeedback::Filing(_) => panic!("expected a classification row"),
+        }
+    }
+
+    #[test]
     fn an_agreeing_prior_prediction_is_positive_reinforcement() {
         let correction = UserCorrection::MarkSpam {
             message_id: MessageId::from("msg_1"),
@@ -249,6 +325,33 @@ mod tests {
                 assert_eq!(
                     row.salient_features.get("sender_domain"),
                     Some(&FeatureValue::Text("acme.test".to_owned()))
+                );
+            }
+            TaskFeedback::Filing(_) => panic!("expected a classification row"),
+        }
+    }
+
+    #[test]
+    fn signal_marked_wrong_builds_a_negative_row_keyed_on_the_rejected_signal() {
+        let correction = UserCorrection::SignalMarkedWrong {
+            message_id: MessageId::from("msg_1"),
+            signal_id: "auth_fail".to_owned(),
+        };
+        // The prior verdict was "phishing"; rejecting a reason keeps that label but records the
+        // signal as the reason code, with a negative polarity (support is being removed).
+        let context = CorrectionContext {
+            ai_label: Some("phishing".to_owned()),
+            ..ctx_with_domain("evil.test")
+        };
+        let feedback = build_feedback(&correction, &FeatureVector::new(), &context);
+        match feedback {
+            TaskFeedback::Classification(row) => {
+                assert_eq!(row.human_label, "phishing");
+                assert_eq!(row.human_reason_code.as_deref(), Some("auth_fail"));
+                assert_eq!(row.polarity, FeedbackPolarity::Negative);
+                assert_eq!(
+                    row.salient_features.get("sender_domain"),
+                    Some(&FeatureValue::Text("evil.test".to_owned()))
                 );
             }
             TaskFeedback::Filing(_) => panic!("expected a classification row"),

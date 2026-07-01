@@ -11,16 +11,20 @@
 // capabilities. There is intentionally no send path — drafts are saved for human review.
 
 /* exported openDraftFromResponse, executeMailCommand, applyPlannedAction, consumeHostMove,
-   getComposeDraft */
+   consumeHostTag, getComposeDraft, stashComposeDraft */
 
 // The MailMate draft context for an open compose window, keyed by compose tab id. The
-// composeAction review panel reads this (the safety verdict + draft id the compose window itself
-// can't show) via the background; it is cleared when the compose tab closes. Body is intentionally
-// NOT stored — it already lives, editable, in the compose window; the panel only annotates it.
+// composeAction review panel reads this (the rationale + commitments guard + draft id the compose
+// window itself can't show) via the background; it is cleared when the compose tab closes.
 const composeDrafts = new Map();
 
 function getComposeDraft(tabId) {
   return composeDrafts.get(tabId) || null;
+}
+
+// Replace the stashed context for a compose tab (used after a Regenerate re-draft).
+function stashComposeDraft(tabId, ctx) {
+  if (tabId != null) composeDrafts.set(tabId, ctx);
 }
 
 // Forget a compose context when its window closes (no per-tab leak across a session).
@@ -49,31 +53,89 @@ function consumeHostMove(headerMessageId) {
   return false;
 }
 
-// Open a draft from a `draft_reply` response payload. Saved as a draft; never sent.
-async function openDraftFromResponse(payload, inReplyToMessageId) {
+// Tags MailMate itself just applied, keyed by stable Message-ID → the set of tag keys. The
+// onUpdated tag listener consumes these so a host-applied tag is not echoed back as a
+// user-taught `tag_changed` signal (the twin of consumeHostMove; the Phase-10 echo-suppression
+// pattern, now for the tags-as-signal path).
+const hostTags = new Map();
+
+function rememberHostTag(headerMessageId, tag) {
+  if (!headerMessageId) {
+    return;
+  }
+  const set = hostTags.get(headerMessageId) || new Set();
+  set.add(tag);
+  hostTags.set(headerMessageId, set);
+}
+
+// True (consuming the record) if MailMate itself just added `tag` to `headerMessageId`.
+function consumeHostTag(headerMessageId, tag) {
+  const set = headerMessageId ? hostTags.get(headerMessageId) : null;
+  if (set && set.has(tag)) {
+    set.delete(tag);
+    if (set.size === 0) {
+      hostTags.delete(headerMessageId);
+    }
+    return true;
+  }
+  return false;
+}
+
+// Open a draft from a `draft_reply` response payload. Saved as a draft; never sent. `request` is
+// the original draft context (when known): it is stashed so the compose panel's Regenerate can
+// re-draft with a steer over the same thread/counterparty/excerpt.
+async function openDraftFromResponse(payload, inReplyToMessageId, request) {
   const details = {
     subject: payload.subject,
     plainTextBody: payload.body,
     isPlainText: true,
   };
+  // Reply from the identity that owns the replied-to message's account, so the From line is right.
+  const identity = inReplyToMessageId != null ? await identityForMessage(inReplyToMessageId) : null;
+  if (identity && identity.id) details.identityId = identity.id;
   let tab;
   if (inReplyToMessageId != null) {
     tab = await browser.compose.beginReply(Number(inReplyToMessageId), "replyToSender", details);
   } else {
     tab = await browser.compose.beginNew(details);
   }
-  // Persist as a draft for review — the review surface shows payload.safety_notes alongside.
+  // Persist as a draft for review — the review surface shows the commitments guard alongside.
   await browser.compose.saveMessage(tab.id, { mode: "draft" });
-  // Stash the review context so the composeAction panel can annotate this draft (rationale +
-  // safety verdict the compose window can't show on its own).
+  // Stash the review context so the composeAction panel can annotate this draft (rationale + the
+  // typed commitments guard + the request, so Regenerate can re-draft) — the compose window can't
+  // show those on its own. Body is intentionally NOT stored; it's editable in the compose area.
   composeDrafts.set(tab.id, {
     draft_id: payload.draft_id || null,
     subject: payload.subject || "",
     safety_notes: payload.safety_notes || [],
+    commitments: payload.commitments || null,
     requires_human_review: payload.requires_human_review !== false, // advisory by construction
     rationale: payload.rationale || (payload.explanation && payload.explanation.summary) || null,
+    request: request || null,
+    reply_to_message_id: inReplyToMessageId != null ? Number(inReplyToMessageId) : null,
+    // The identity the reply goes out from ("Replying from: …" in the panel), when known.
+    from_identity: identity && identity.email ? identity.email : null,
+    // The body MailMate drafted, kept ONLY to detect later user edits (the edit-divergence signal);
+    // it never leaves the extension and is dropped when the tab closes.
+    drafted_body: payload.body || "",
   });
   return tab;
+}
+
+// The identity ({ id, email }) whose account owns `messageId`, so a reply goes out from the right
+// address. Best-effort: any failure (no identity, API absent) returns null and Thunderbird picks
+// its default.
+async function identityForMessage(messageId) {
+  try {
+    const header = await browser.messages.get(Number(messageId));
+    const accountId = header && header.folder && header.folder.accountId;
+    if (!accountId || !browser.identities) return null;
+    const identities = await browser.identities.list(accountId);
+    if (!identities || !identities.length) return null;
+    return { id: identities[0].id, email: identities[0].email || null };
+  } catch {
+    return null;
+  }
 }
 
 // Execute one host `mail_command` (apply / create_draft) and return an execution result the
@@ -113,7 +175,7 @@ async function applyPlannedAction(action) {
         // resulting onMoved echo is not re-reported as a user filing correction.
         const header = await browser.messages.get(messageId);
         rememberHostMove(header.headerMessageId, action.to_folder);
-        const folder = await resolveFolder(action.to_folder);
+        const folder = resolveFolder(header.folder.accountId, action.to_folder);
         await browser.messages.move([messageId], folder);
         break;
       }
@@ -135,20 +197,23 @@ async function applyPlannedAction(action) {
   return { event_type: "action_applied", thunderbird_message_id: String(messageId), result: "ok" };
 }
 
-// Add a tag key to a message, preserving existing tags.
+// Add a tag key to a message, preserving existing tags. Remembers the host-applied tag (by
+// stable Message-ID) BEFORE updating, so the resulting onUpdated echo is not re-reported as a
+// user-taught tag signal.
 async function addTag(messageId, tag) {
   const header = await browser.messages.get(messageId);
+  rememberHostTag(header.headerMessageId, tag);
   const tags = new Set(header.tags || []);
   tags.add(tag);
   await browser.messages.update(messageId, { tags: Array.from(tags) });
 }
 
-// Resolve a folder path string to a MailFolder, re-resolved per session.
-async function resolveFolder(folderPath) {
-  // A move target is a session-scoped folder path; the extension re-resolves it against the
-  // account tree. The simplest robust form is to pass the path through (Thunderbird accepts a
-  // {accountId, path} or a MailFolder); production wiring caches the account id.
-  return folderPath;
+// Resolve a host-supplied destination folder path to the {accountId, path} descriptor
+// Thunderbird's messages.move() accepts. The host's FolderId carries only the path (the wire
+// drops the account), so the account is taken from the message being moved — moves stay within
+// the message's own account, which is the case for every triage move.
+function resolveFolder(accountId, folderPath) {
+  return { accountId, path: folderPath };
 }
 
 // The host mints internal ids as `msg_tb_<thunderbird_id>`; recover the Thunderbird id.

@@ -1,0 +1,18 @@
+[package]
+name = "mailmate-guard"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The model-free commitments guard: a deterministic scanner that flags the four classes of
+# commitment (dates, prices, payment terms, legal language) a reply draft makes, each cited to
+# the exact span that triggered it. `regex` (RE2, linear-time) backs the patterns. This is a
+# leaf adapter consumed at the host edge — `mailmate-core` never depends on it.
+[dependencies]
+mailmate-common = { path = "../mailmate-common" }
+regex.workspace = true

@@ -17,7 +17,7 @@ pub mod tasks;
 pub mod validation;
 
 pub use drafter::TaskReplyDrafter;
-pub use providers::UnavailableProvider;
+pub use providers::{SwappableProvider, UnavailableProvider};
 pub use registry::ProviderRegistry;
 pub use validation::validate_and_parse;
 

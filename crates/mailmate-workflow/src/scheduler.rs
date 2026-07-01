@@ -331,8 +331,14 @@ fn build_request(item: &PipelineItem, step: &FollowUpStep) -> ReplyDraftRequest 
 
 #[async_trait]
 impl FollowUpScheduler for DefaultFollowUpScheduler {
-    async fn drain_due(&self, now: Timestamp) -> Result<DrainReport, WorkflowError> {
-        let due = self.instances.list_due(now).await?;
+    async fn drain_due(
+        &self,
+        now: Timestamp,
+        batch_cap: usize,
+    ) -> Result<DrainReport, WorkflowError> {
+        // The cap is pushed into the query (LIMIT), so a long-offline backlog loads and fires in
+        // one bounded batch — the soonest-due first — and the remainder drains on the next tick.
+        let due = self.instances.list_due(now, batch_cap).await?;
         let mut report = DrainReport::default();
         for inst in &due {
             self.drain_instance(inst, now, &mut report).await?;

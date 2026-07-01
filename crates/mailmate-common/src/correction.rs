@@ -48,6 +48,30 @@ pub enum UserCorrection {
         /// The label the user says is correct.
         label: String,
     },
+    /// "I (un)tagged this message." A tag add/remove is a first-class category signal: it
+    /// teaches a classification-feedback row whose `human_label` is the tag key, with polarity
+    /// from the direction (add = positive, remove = negative). Like
+    /// [`CorrectLabel`](UserCorrection::CorrectLabel) it is a category signal, never the spam
+    /// axis, so it does not feed the Tier-2 online update.
+    TagChanged {
+        /// The message tagged.
+        message_id: MessageId,
+        /// The tag key added or removed.
+        tag: String,
+        /// `true` if the tag was added, `false` if removed.
+        added: bool,
+    },
+    /// "This reason is wrong." The user rejected one of the verdict's salient signals from the
+    /// per-message panel. It teaches a negative classification-feedback row keyed on the signal
+    /// (the `signal_id` is the feature key or rule id), so a feature the user keeps rejecting
+    /// becomes visible evidence against any rule that would lean on it. A category signal, never
+    /// the spam axis — it does not feed the Tier-2 online update.
+    SignalMarkedWrong {
+        /// The message whose explanation was corrected.
+        message_id: MessageId,
+        /// The id of the rejected signal (a feature key like `auth_fail`, or a rule id).
+        signal_id: String,
+    },
 }
 
 impl UserCorrection {
@@ -58,7 +82,9 @@ impl UserCorrection {
             Self::MarkSpam { message_id }
             | Self::MarkNotSpam { message_id }
             | Self::LearnFiling { message_id, .. }
-            | Self::CorrectLabel { message_id, .. } => message_id,
+            | Self::CorrectLabel { message_id, .. }
+            | Self::TagChanged { message_id, .. }
+            | Self::SignalMarkedWrong { message_id, .. } => message_id,
         }
     }
 
@@ -69,7 +95,10 @@ impl UserCorrection {
         match self {
             Self::MarkSpam { .. } => Some(SPAM_LABEL),
             Self::MarkNotSpam { .. } => Some(HAM_LABEL),
-            Self::LearnFiling { .. } | Self::CorrectLabel { .. } => None,
+            Self::LearnFiling { .. }
+            | Self::CorrectLabel { .. }
+            | Self::TagChanged { .. }
+            | Self::SignalMarkedWrong { .. } => None,
         }
     }
 
@@ -101,6 +130,8 @@ impl UserCorrection {
             Self::MarkNotSpam { .. } => "mark_not_spam",
             Self::LearnFiling { .. } => "learn_filing",
             Self::CorrectLabel { .. } => "correct_label",
+            Self::TagChanged { .. } => "tag_changed",
+            Self::SignalMarkedWrong { .. } => "signal_marked_wrong",
         }
     }
 }
@@ -167,6 +198,26 @@ mod tests {
         assert_eq!(value["correction"], "learn_filing");
         assert_eq!(c.name(), "learn_filing");
         assert_eq!(c.message_id(), &MessageId::from("msg_9"));
+        let back: UserCorrection = serde_json::from_value(value).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn signal_marked_wrong_is_a_category_signal_carrying_the_rejected_signal_id() {
+        let c = UserCorrection::SignalMarkedWrong {
+            message_id: MessageId::from("msg_7"),
+            signal_id: "auth_fail".to_owned(),
+        };
+        // Not a spam-axis or filing signal, and never a Tier-2 spam example.
+        assert_eq!(c.spam_label(), None);
+        assert_eq!(c.filing_target(), None);
+        assert!(c.to_labeled_example(FeatureVector::new()).is_none());
+        assert_eq!(c.name(), "signal_marked_wrong");
+        assert_eq!(c.message_id(), &MessageId::from("msg_7"));
+        // Tagged + round-trips on the wire, carrying the rejected signal's id.
+        let value = serde_json::to_value(&c).unwrap();
+        assert_eq!(value["correction"], "signal_marked_wrong");
+        assert_eq!(value["signal_id"], "auth_fail");
         let back: UserCorrection = serde_json::from_value(value).unwrap();
         assert_eq!(back, c);
     }

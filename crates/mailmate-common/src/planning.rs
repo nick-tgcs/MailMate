@@ -98,6 +98,8 @@ mod tests {
             body_text: None,
             attachments: vec![],
             remote_content_loaded: false,
+            sender_seen_count: None,
+            sender_in_address_book: None,
         }
     }
 
@@ -109,6 +111,9 @@ mod tests {
             phishing_score: 0.0,
             priority: Priority::Normal,
             needs_review: false,
+            confidence: 0.0,
+            salient_signals: Vec::new(),
+            safety_findings: Vec::new(),
             provenance: ClassificationProvenance::tier1(vec![]),
         }
     }

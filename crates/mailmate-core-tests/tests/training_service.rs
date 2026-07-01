@@ -194,6 +194,7 @@ fn a_lora_adapted_provider_cannot_bypass_compatibility_or_the_policy_guard() {
         actions: vec![ProposedAction::SendDraft {
             draft_id: DraftId::from("draft_1"),
         }],
+        authored_by: Vec::new(),
     };
     let guarded = block_on(guard.evaluate_action_plan(PolicyContext::default(), plan)).unwrap();
     assert!(
@@ -222,6 +223,9 @@ fn full_ports() -> Ports {
             phishing_score: 0.0,
             priority: Priority::Normal,
             needs_review: false,
+            confidence: 0.0,
+            salient_signals: Vec::new(),
+            safety_findings: Vec::new(),
             provenance: ClassificationProvenance::tier1(vec![]),
         })),
         action_planner: Arc::new(FakeActionPlanner::returning(vec![])),

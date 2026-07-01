@@ -125,16 +125,22 @@ impl TrainerBackend for ExternalTrainer {
         }
         let spec = Self::spec_for(&job)?;
         let result = self.runner.run(&spec)?;
-        let kind = if job.produce_lora {
-            TrainedArtifactKind::LoraAdapter
+        // A LoRA job yields a real adapter descriptor (the runner's format + a LoRA type); a
+        // small-model job is honestly adapter-less.
+        let (kind, format, adapter_type) = if job.produce_lora {
+            (
+                TrainedArtifactKind::LoraAdapter,
+                Some(result.format),
+                Some(AdapterType::Lora),
+            )
         } else {
-            TrainedArtifactKind::SmallModel
+            (TrainedArtifactKind::SmallModel, None, None)
         };
         Ok(TrainedArtifact {
             kind,
             artifact_path: result.artifact_path,
-            format: result.format,
-            adapter_type: AdapterType::Lora,
+            format,
+            adapter_type,
             base_model_family: job.base_model_family,
             base_model_name: job.base_model_name,
             tokenizer_hash: result.tokenizer_hash,

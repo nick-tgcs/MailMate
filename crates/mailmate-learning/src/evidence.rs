@@ -80,15 +80,6 @@ pub fn evidence_from_followup(row: &FollowUpFeedbackRow) -> RuleEvidence {
     }
 }
 
-/// The sender domain a classification row keys on, read from its salient features.
-#[must_use]
-pub fn classification_sender_domain(row: &ClassificationFeedbackRow) -> Option<String> {
-    match row.salient_features.get("sender_domain") {
-        Some(mailmate_common::features::FeatureValue::Text(domain)) => Some(domain.clone()),
-        _ => None,
-    }
-}
-
 /// A group of filing moves with the same sender domain → same folder.
 #[derive(Clone, Debug)]
 pub struct FilingCluster {
@@ -123,42 +114,10 @@ pub fn cluster_filing(rows: Vec<FilingFeedbackRow>) -> Vec<FilingCluster> {
         .collect()
 }
 
-/// A group of classification corrections with the same corrected label and sender domain.
-#[derive(Clone, Debug)]
-pub struct ClassificationCluster {
-    /// The sender domain the corrections share.
-    pub sender_domain: String,
-    /// The corrected label they all assert.
-    pub label: String,
-    /// The supporting rows.
-    pub rows: Vec<ClassificationFeedbackRow>,
-}
-
-/// Cluster classification **corrections** (negative-polarity rows) by (sender domain,
-/// corrected label). Reinforcements and rows without a sender domain are dropped. Returns
-/// clusters in deterministic (domain, label) order.
-#[must_use]
-pub fn cluster_classification(rows: Vec<ClassificationFeedbackRow>) -> Vec<ClassificationCluster> {
-    let mut groups: BTreeMap<(String, String), Vec<ClassificationFeedbackRow>> = BTreeMap::new();
-    for row in rows {
-        if row.polarity != FeedbackPolarity::Negative {
-            continue;
-        }
-        let Some(domain) = classification_sender_domain(&row) else {
-            continue;
-        };
-        let label = row.human_label.clone();
-        groups.entry((domain, label)).or_default().push(row);
-    }
-    groups
-        .into_iter()
-        .map(|((sender_domain, label), rows)| ClassificationCluster {
-            sender_domain,
-            label,
-            rows,
-        })
-        .collect()
-}
+// Classification corrections are no longer clustered by sender domain here: Phase 7's
+// `induction::cluster_by_effect` clusters them by effect (the corrected label) and *induces* a
+// multi-aspect condition from the features they share. The old single-domain clustering was
+// removed when that path went live, so there is only one way to turn corrections into a rule.
 
 #[cfg(test)]
 mod tests {
@@ -226,27 +185,6 @@ mod tests {
         assert_eq!(clusters[0].folder.as_str(), "Other");
         assert_eq!(clusters[1].folder.as_str(), "Receipts");
         assert_eq!(clusters[1].rows.len(), 2);
-    }
-
-    #[test]
-    fn classification_clusters_only_negative_corrections() {
-        let rows = vec![
-            classification(Some("paypa1.com"), "phishing", FeedbackPolarity::Negative),
-            classification(Some("paypa1.com"), "phishing", FeedbackPolarity::Negative),
-            // A reinforcement (positive) does not feed a correction cluster.
-            classification(Some("paypa1.com"), "phishing", FeedbackPolarity::Positive),
-            // No sender domain → not clusterable.
-            classification(None, "phishing", FeedbackPolarity::Negative),
-        ];
-        let clusters = cluster_classification(rows);
-        assert_eq!(clusters.len(), 1);
-        assert_eq!(clusters[0].label, "phishing");
-        assert_eq!(clusters[0].sender_domain, "paypa1.com");
-        assert_eq!(
-            clusters[0].rows.len(),
-            2,
-            "only the two negative corrections"
-        );
     }
 
     #[test]

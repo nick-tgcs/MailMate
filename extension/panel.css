@@ -313,3 +313,80 @@ button:not(:disabled):hover {
   color: #2e7d32;
   font-size: 12px;
 }
+
+/* Reduced-motion seam: the panel uses no animation today, but any future skeleton/spinner must
+   respect the user's motion preference — established here so it is honoured by construction. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* --- Phase 1b: action-first bar, salient-signal chips, Safety block, cold-start --------- */
+
+.mm-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.mm-pa {
+  flex: 1 1 auto;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--mm-border, #d0d0d0);
+  border-radius: 6px;
+  background: var(--mm-surface, #fff);
+  cursor: pointer;
+}
+.mm-pa:hover { background: var(--mm-hover, #f3f4f6); }
+.mm-pa:disabled { opacity: 0.5; cursor: default; }
+
+.mm-signals-label { margin: 6px 0 2px; font-size: 11px; color: var(--mm-muted, #6b7280); }
+.mm-signals { display: flex; flex-wrap: wrap; gap: 4px; }
+.mm-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 12px;
+  background: var(--mm-chip, #eef2ff);
+  border: 1px solid var(--mm-chip-border, #dbe2ff);
+}
+.mm-signal--rejected { opacity: 0.45; text-decoration: line-through; }
+.mm-signal__wrong {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--mm-muted, #6b7280);
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.mm-signal__wrong:hover { color: var(--mm-danger, #c0392b); }
+
+.mm-safety {
+  margin: 8px 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--mm-safety-bg, #fff8f1);
+  border: 1px solid var(--mm-safety-border, #f3d9bf);
+}
+.mm-safety__title { margin: 0 0 4px; font-weight: 600; font-size: 12px; }
+.mm-safety__item { margin: 4px 0; font-size: 11px; }
+.mm-safety__h { font-weight: 600; }
+.mm-safety__d { margin: 2px 0 0; color: var(--mm-muted, #6b7280); }
+.mm-safety--danger .mm-safety__h { color: var(--mm-danger, #c0392b); }
+.mm-safety--warning .mm-safety__h { color: var(--mm-warn, #b9770e); }
+
+.mm-coldstart {
+  margin: 8px 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--mm-info-bg, #f0f6ff);
+  border: 1px solid var(--mm-info-border, #cfe0ff);
+}
+.mm-coldstart__title { margin: 0 0 4px; font-weight: 600; font-size: 12px; }

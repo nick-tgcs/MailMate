@@ -20,16 +20,17 @@ pub mod migrations;
 pub mod repositories;
 
 pub use backend::{
-    open_and_migrate, open_backend, restore_database, SqliteBackend, StorageConfig, StoragePath,
+    ensure_dir_owner_only, open_and_migrate, open_backend, restore_database, SqliteBackend,
+    StorageConfig, StoragePath,
 };
 pub use repositories::{
     SqliteAdapterRepository, SqliteAuditRepository, SqliteConflictRepository,
-    SqliteDatasetRepository, SqliteDraftRepository, SqliteEvalRunRepository,
-    SqliteFeedbackRepository, SqliteMessageRepository, SqlitePipelineItemRepository,
-    SqliteProposalRepository, SqliteRuleRepository, SqliteSenderRepository,
-    SqliteShadowOutcomeRepository, SqliteThreadRepository, SqliteWorkflowConflictRepository,
-    SqliteWorkflowInstanceRepository, SqliteWorkflowRepository,
-    SqliteWorkflowShadowOutcomeRepository,
+    SqliteDataRightsRepository, SqliteDatasetRepository, SqliteDraftRepository,
+    SqliteEvalRunRepository, SqliteFeedbackRepository, SqliteMessageRepository,
+    SqlitePipelineItemRepository, SqliteProposalRepository, SqliteReminderRepository,
+    SqliteRuleRepository, SqliteSenderRepository, SqliteShadowOutcomeRepository,
+    SqliteThreadRepository, SqliteWorkflowConflictRepository, SqliteWorkflowInstanceRepository,
+    SqliteWorkflowRepository, SqliteWorkflowShadowOutcomeRepository,
 };
 
 /// Returns this crate's package name for smoke tests.

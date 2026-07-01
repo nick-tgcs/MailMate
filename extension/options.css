@@ -135,6 +135,13 @@ button.mm-primary {
 button.mm-danger {
   color: var(--mm-risk);
 }
+button.mm-link {
+  border: none;
+  background: none;
+  color: var(--mm-accent);
+  padding: 6px 4px;
+  text-decoration: underline;
+}
 button:disabled {
   opacity: 0.5;
   cursor: default;
@@ -149,6 +156,21 @@ button:not(:disabled):hover {
   padding: 10px;
   margin: 8px 0;
 }
+/* The Model control: a <select> (or free-text fallback) plus its refresh / type-manually buttons,
+   laid out inline and growing to fill the row like the plain inputs do. */
+.mm-modelfield {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 220px;
+  flex-wrap: wrap;
+}
+.mm-modelfield > select,
+.mm-modelfield > input[type="text"] {
+  flex: 1;
+  min-width: 180px;
+}
 .mm-provider__head {
   display: flex;
   align-items: center;
@@ -157,12 +179,28 @@ button:not(:disabled):hover {
 .mm-provider__name {
   font-weight: 600;
 }
-.mm-locked {
-  font-size: 12px;
-  opacity: 0.7;
-  border-left: 3px solid var(--mm-line);
-  padding-left: 10px;
-  margin-top: 8px;
+
+/* A category-policy row (label + policy select) and tag-mapping row, in the Categories section. */
+.mm-cat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  border-top: 1px solid var(--mm-line);
+}
+.mm-cat-row:first-of-type {
+  border-top: none;
+}
+.mm-cat-row__name {
+  flex: 1;
+  min-width: 0;
+}
+/* The tag→category editor, set off from the policy table above it. */
+.mm-subsection {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--mm-line);
 }
 
 .mm-toast {

@@ -1,0 +1,12 @@
+-- 0007_placement_idempotency (common): make folder-history mining idempotent.
+--
+-- The first-run backfill (`triage_existing_mail`) synthesizes a `basis = 'existing_placement'`
+-- filing-feedback row from each deliberately-filed message, to warm the crystallization clusters
+-- without fresh corrections. Re-running the sweep (a second tap, a host restart mid-run) must NOT
+-- record the same placement twice — duplicate implicit positives would inflate a cluster's support
+-- and back-test count for the SAME underlying message. A message lives in exactly one folder, so
+-- at most one observed placement per message is meaningful.
+--
+-- The uniqueness guarantee is a PARTIAL unique index scoped to mined placements only (it does not
+-- constrain deliberate corrections, which carry a different `basis`), so it lives in the per-engine
+-- overlay. No portable table change is needed here.

@@ -179,6 +179,8 @@ mod tests {
             body_text: None,
             attachments: vec![],
             remote_content_loaded: false,
+            sender_seen_count: None,
+            sender_in_address_book: None,
         }
     }
 

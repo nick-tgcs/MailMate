@@ -76,10 +76,16 @@ impl TrainerBackend for MockTrainer {
             )));
         }
         let tag = stable_hash_hex(&[job.dataset_id.as_str(), job.base_model_name.as_str()]);
-        let kind = if job.produce_lora {
-            TrainedArtifactKind::LoraAdapter
+        // A LoRA job yields a real adapter descriptor; a small-model job is honestly
+        // adapter-less (no format / no adapter_type).
+        let (kind, format, adapter_type) = if job.produce_lora {
+            (
+                TrainedArtifactKind::LoraAdapter,
+                Some(AdapterFormat::Safetensors),
+                Some(AdapterType::Lora),
+            )
         } else {
-            TrainedArtifactKind::SmallModel
+            (TrainedArtifactKind::SmallModel, None, None)
         };
         let mut metrics = BTreeMap::new();
         metrics.insert("examples".to_owned(), job.examples.len() as f64);
@@ -87,8 +93,8 @@ impl TrainerBackend for MockTrainer {
         Ok(TrainedArtifact {
             kind,
             artifact_path: format!("/mock/adapters/{tag}.safetensors"),
-            format: AdapterFormat::Safetensors,
-            adapter_type: AdapterType::Lora,
+            format,
+            adapter_type,
             base_model_family: job.base_model_family.clone(),
             base_model_name: job.base_model_name.clone(),
             tokenizer_hash: Some(format!("tok_{tag}")),

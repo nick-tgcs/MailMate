@@ -45,9 +45,9 @@ impl SqliteBackend {
         // `restore_database` already do for their destinations) so the host starts cleanly.
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    StorageError::Backend(format!("creating database directory: {e}"))
-                })?;
+                // The data directory holds the SQLite database — message bodies, learned weights,
+                // the audit log — so a directory MailMate creates is locked owner-only.
+                ensure_dir_owner_only(parent)?;
             }
         }
         let conn = Connection::open(path).map_err(backend_err)?;
@@ -237,6 +237,57 @@ pub fn open_and_migrate(config: &StorageConfig) -> Result<Arc<SqliteBackend>, St
     Ok(backend)
 }
 
+/// Create `dir` (and any missing ancestors) if absent, and — **only when MailMate itself
+/// creates it** — lock it to owner-only `0700` on Unix. A pre-existing directory (e.g. `/tmp`,
+/// or one the user pointed `database_path` at) is left untouched: it is theirs to own, and
+/// re-`chmod`-ing it would both surprise them and fail when we don't own it. Idempotent.
+///
+/// This is the single home for the "data dir is `0700`" guarantee, called both by
+/// [`SqliteBackend::open`] (for the database's parent) and by the host's `serve` entrypoint
+/// (which must lock the data dir *before* the logger creates `host.log` inside it).
+///
+/// # Errors
+/// [`StorageError::Backend`] if the directory cannot be created or locked.
+pub fn ensure_dir_owner_only(dir: &Path) -> Result<(), StorageError> {
+    if dir.exists() {
+        return Ok(());
+    }
+    // Create any missing ANCESTORS first (at the umask — `~/.local/share` etc. are not ours to
+    // lock), then create the leaf itself **already `0700`** so there is no create-at-umask-then-
+    // chmod window in which the directory is momentarily group/world-readable.
+    if let Some(parent) = dir.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                StorageError::Backend(format!("creating directory {}: {e}", parent.display()))
+            })?;
+        }
+    }
+    create_dir_locked(dir)
+}
+
+/// Create `dir` (its parent must exist) with mode `0700` from the start on Unix — the mode is set
+/// at `mkdir` time, so the directory is never momentarily looser than owner-only. `0700 & ~umask`
+/// can only be `<= 0700`, never wider, so any reasonable umask is safe.
+#[cfg(unix)]
+fn create_dir_locked(dir: &Path) -> Result<(), StorageError> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| {
+            StorageError::Backend(format!(
+                "creating owner-only directory {}: {e}",
+                dir.display()
+            ))
+        })
+}
+
+#[cfg(not(unix))]
+fn create_dir_locked(dir: &Path) -> Result<(), StorageError> {
+    std::fs::create_dir(dir)
+        .map_err(|e| StorageError::Backend(format!("creating directory {}: {e}", dir.display())))
+}
+
 /// Restore the file-backed database at `config`'s path from a `backup` snapshot — an
 /// **offline** operation, run while the host is not serving (the live file is replaced
 /// wholesale).
@@ -353,7 +404,54 @@ mod tests {
         let backend = open_and_migrate(&StorageConfig::sqlite_in_memory()).unwrap();
         assert_eq!(
             backend.applied_migration_versions().unwrap(),
-            vec![1, 2, 3, 4, 5, 6]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_locks_a_freshly_created_data_dir_to_owner_only_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        // The data dir MailMate creates on a fresh machine holds message bodies, learned
+        // weights, and the audit log; it must be `0700` (owner-only), never left
+        // group/world-readable at the process umask. The dir does not exist beforehand, so the
+        // backend owns its creation and locks it.
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("mailmate");
+        assert!(!data_dir.exists());
+
+        let db = data_dir.join("mailmate.db");
+        let _backend = open_and_migrate(&StorageConfig::sqlite_file(&db)).unwrap();
+
+        let mode = std::fs::metadata(&data_dir).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "a backend-created data directory must be owner-only 0700, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_does_not_touch_a_pre_existing_directory_it_does_not_own() {
+        use std::os::unix::fs::PermissionsExt;
+        // A directory the user already owns (here pre-created `0755`, mirroring a DB placed in a
+        // shared dir like `/tmp`) is left exactly as-is — MailMate only locks what it creates.
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("preexisting");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let db = data_dir.join("mailmate.db");
+        let _backend = open_and_migrate(&StorageConfig::sqlite_file(&db)).unwrap();
+
+        let mode = std::fs::metadata(&data_dir).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "a pre-existing user-owned directory must be left untouched, got {:o}",
+            mode & 0o777
         );
     }
 
@@ -372,7 +470,7 @@ mod tests {
         let backend = open_and_migrate(&StorageConfig::sqlite_file(&nested)).unwrap();
         assert_eq!(
             backend.applied_migration_versions().unwrap(),
-            vec![1, 2, 3, 4, 5, 6]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
         assert!(nested.exists(), "the database file was created");
     }
@@ -419,7 +517,7 @@ mod tests {
         let restored = SqliteBackend::open(&snapshot).unwrap();
         assert_eq!(
             restored.applied_migration_versions().unwrap(),
-            vec![1, 2, 3, 4, 5, 6]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
         assert_eq!(read_probe(&restored), 42);
 

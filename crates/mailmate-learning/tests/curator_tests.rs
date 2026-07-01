@@ -390,6 +390,56 @@ fn review_accepting_a_proposal_creates_a_shadow_rule_and_records_acceptance() {
 }
 
 #[test]
+fn review_accept_and_activate_makes_the_rule_active_with_an_activation_audit() {
+    // The golden-path activation (G2): `accept & activate` is the SEPARATE explicit human action
+    // that turns a proposed rule live (curator.rs documents activation as a `ReviewDecision`).
+    // Materialization stays shadow-only; activation is its own audited `rule_activated` transition.
+    let repos = repos();
+    let curator = curator(
+        &repos,
+        proposing_provider("low", "shadow_mode", "stripe.com", "Receipts"),
+        vec![],
+    );
+    let report = block_on(curator.curate(CuratorRequest::just(CuratorOperation::Propose))).unwrap();
+    let proposal_id = report.proposals[0].id.clone();
+
+    let review = review(&repos);
+    let outcome =
+        block_on(review.review(ReviewDecision::accept_and_activate(proposal_id.clone()))).unwrap();
+    assert_eq!(outcome.new_status, ProposalStatus::Accepted);
+    let rule_id = outcome.created_rule_id.clone().expect("a rule is created");
+    // The outcome reports the RULE's mode (active), distinct from the proposal disposition.
+    assert_eq!(outcome.rule_status, Some(RuleStatus::Active));
+
+    // The rule is ACTIVE (it will auto-apply on the next matching mail), not merely shadow.
+    let active = block_on(
+        repos
+            .rules
+            .get_active_rules(RuleKind::Action, RuleScope::Domain),
+    )
+    .unwrap();
+    assert_eq!(
+        active.len(),
+        1,
+        "the activated rule is in the active snapshot"
+    );
+    assert_eq!(active[0].rule_id, rule_id);
+
+    // Activation is its OWN audited transition, separate from materialization.
+    let activated = block_on(repos.audit.query(AuditQuery {
+        event_type: Some(event_type::RULE_ACTIVATED.to_owned()),
+        ..AuditQuery::default()
+    }))
+    .unwrap();
+    assert_eq!(
+        activated.len(),
+        1,
+        "a rule_activated audit entry is written"
+    );
+    assert_eq!(activated[0].actor, Actor::User);
+}
+
+#[test]
 fn review_rejecting_a_proposal_records_negative_feedback_and_creates_no_rule() {
     let repos = repos();
     let curator = curator(
@@ -504,6 +554,8 @@ fn persist_proposal(
         workflow_draft: None,
         target_workflow_id: None,
         evidence_refs: Vec::new(),
+        back_test: None,
+        conflicts: Vec::new(),
         source_provider: "test".to_owned(),
         created_at: Timestamp::now(),
         reviewed_at: None,
@@ -548,6 +600,8 @@ fn persist_workflow_proposal(repos: &Repos) -> ProposalId {
         }),
         target_workflow_id: None,
         evidence_refs: Vec::new(),
+        back_test: None,
+        conflicts: Vec::new(),
         source_provider: "test".to_owned(),
         created_at: Timestamp::now(),
         reviewed_at: None,

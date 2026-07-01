@@ -57,6 +57,12 @@ pub struct ClassifyMessagePayload {
     /// Attachment metadata (never content).
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// How many prior messages from this sender the extension counted (bounded, best-effort).
+    #[serde(default)]
+    pub sender_seen_count: Option<u32>,
+    /// Whether the sender is in the user's address book (a strong not-spam signal).
+    #[serde(default)]
+    pub sender_in_address_book: Option<bool>,
 }
 
 impl ClassifyMessagePayload {
@@ -73,6 +79,8 @@ impl ClassifyMessagePayload {
             body_text: self.body_text,
             attachments: self.attachments,
             remote_content_loaded: self.remote_content_loaded,
+            sender_seen_count: self.sender_seen_count,
+            sender_in_address_book: self.sender_in_address_book,
         }
     }
 }
@@ -123,6 +131,58 @@ impl DraftReplyPayload {
     }
 }
 
+/// The `regenerate_draft` payload: the same reply context as [`DraftReplyPayload`] (flattened in
+/// on the wire), plus the user's steer — free-text "make it …" guidance and/or the quick-steer
+/// chips they tapped. Both are folded into the model guidance, so regeneration reuses the whole
+/// `draft_reply` path unchanged: only the instruction differs.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RegenerateDraftPayload {
+    /// The original reply context (thread/messages/subject/counterparty/excerpt/forbidden list).
+    #[serde(flatten)]
+    pub base: DraftReplyPayload,
+    /// Free-text steer from the Adjust box ("warmer, and ask for the PO number").
+    #[serde(default)]
+    pub steer: Option<String>,
+    /// Quick-steer chip labels the user tapped ("Shorter", "Warmer", "More formal", …).
+    #[serde(default)]
+    pub adjustments: Vec<String>,
+}
+
+impl RegenerateDraftPayload {
+    /// Lower into a [`ReplyDraftRequest`], folding the chips and free-text steer into the user
+    /// instruction (after any instruction the base payload already carried). Each chip becomes a
+    /// "Make it <chip>." clause; blank steer/chips are dropped so the guidance never carries noise.
+    #[must_use]
+    pub fn into_request(self) -> ReplyDraftRequest {
+        let mut request = self.base.into_request();
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(existing) = request.user_instruction.take() {
+            let existing = existing.trim();
+            if !existing.is_empty() {
+                parts.push(existing.to_owned());
+            }
+        }
+        for chip in self.adjustments {
+            let chip = chip.trim();
+            if !chip.is_empty() {
+                parts.push(format!("Make it {}.", chip.to_lowercase()));
+            }
+        }
+        if let Some(steer) = self.steer {
+            let steer = steer.trim();
+            if !steer.is_empty() {
+                parts.push(steer.to_owned());
+            }
+        }
+        request.user_instruction = if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        };
+        request
+    }
+}
+
 /// The `record_user_action` payload — the wire carrier for corrections and observed behavior.
 #[derive(Clone, Debug, Deserialize)]
 pub struct RecordUserActionPayload {
@@ -147,15 +207,24 @@ pub struct RecordUserActionPayload {
     /// The read state set by a `read_changed` event.
     #[serde(default)]
     pub read: Option<bool>,
-    /// The tag added/removed by a `tagged` event.
+    /// The tag added/removed by a `tag_changed` event.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Whether a `tag_changed` event ADDED the tag (`true`) or removed it (`false`).
+    #[serde(default)]
+    pub added: Option<bool>,
     /// Whether the action was user-initiated (vs MailMate-applied).
     #[serde(default)]
     pub user_initiated: bool,
     /// The sender domain, if the extension knows it (improves correction clustering).
     #[serde(default)]
     pub sender_domain: Option<String>,
+    /// The account the corrected message belongs to, if the extension knows it. Folded into a
+    /// classification correction's salient features so multi-aspect induction can scope a learned
+    /// rule per account. Omitted ⇒ the host falls back to its per-message account cache, then to
+    /// account-agnostic (`Global`) induction — degrade, never a false scope.
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// The folder MailMate had suggested (so a move that agrees is positive reinforcement).
     #[serde(default)]
     pub ai_suggested_folder: Option<String>,
@@ -169,9 +238,13 @@ pub struct RecordUserActionPayload {
     #[serde(default)]
     pub corrected_label: Option<String>,
     /// The label MailMate had assigned before the correction (so polarity records the
-    /// override honestly). Carried by `classification_corrected`.
+    /// override honestly). Carried by `classification_corrected` and `signal_marked_wrong`.
     #[serde(default)]
     pub prior_label: Option<String>,
+    /// The id of the salient signal the user rejected (a `signal_marked_wrong` event) — a
+    /// feature key like `auth_fail` or a rule id.
+    #[serde(default)]
+    pub signal_id: Option<String>,
     /// The kind of action an `action_undone` / `suggestion_dismissed` event concerns
     /// (`move` / `mark_junk` / `tag` / `create_draft`). Selects how an undo is routed.
     #[serde(default)]
@@ -184,6 +257,18 @@ pub struct RecordUserActionPayload {
     /// provenance for the ignore/undo-rate signal.
     #[serde(default)]
     pub authored_by: Option<String>,
+    /// The reply draft this event concerns (a `draft_diverged` edit-divergence signal carries the
+    /// `draft_id` the host minted, so the audit row ties back to the draft that was edited).
+    #[serde(default)]
+    pub draft_id: Option<String>,
+    /// The sender address of a `bounce_received` event's NDR message — the host re-confirms it
+    /// looks like an automated bounce agent before exiting the thread's follow-ups.
+    #[serde(default)]
+    pub sender_email: Option<String>,
+    /// The subject line of a `bounce_received` event's NDR message (the other bounce signal the
+    /// host re-confirms).
+    #[serde(default)]
+    pub subject: Option<String>,
 }
 
 impl RecordUserActionPayload {
@@ -194,6 +279,19 @@ impl RecordUserActionPayload {
             .as_deref()
             .map(internal_message_id)
     }
+}
+
+/// The `record_sent_mail` payload: outbound evidence the extension reports after the user sends a
+/// message. The recipients (whose domains the host counts toward a VIP/priority proposal) are the
+/// only required content; the subject is optional context.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SentMailPayload {
+    /// The recipient addresses (To/Cc) of the sent message.
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    /// The sent subject, if the extension included it (context only).
+    #[serde(default)]
+    pub subject: Option<String>,
 }
 
 /// The `explain_decision` request: which message's audit timeline to return. The caller may
@@ -268,6 +366,22 @@ pub struct ReviewRuleProposalPayload {
     /// A reason chip code for a rejection (the curator learns not to re-propose).
     #[serde(default)]
     pub reason_code: Option<String>,
+}
+
+/// The `triage_existing_mail` first-run backfill request: a page of already-present messages the
+/// extension swept from `browser.messages.query`. Each is **classified without applying anything**
+/// (a dry run, so no mail is moved/marked), and — for messages the user has deliberately filed
+/// (i.e. NOT in the inbox) — its current placement is mined as implicit positive evidence to warm
+/// the filing clusters. The extension drives the paging, progress, and pause/cancel; the host
+/// answers one page at a time.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TriageExistingMailPayload {
+    /// The page of messages to triage.
+    pub messages: Vec<ClassifyMessagePayload>,
+    /// Whether to mine deliberate folder placements as implicit-positive filing evidence
+    /// (defaults to true). The inbox is never mined (an un-triaged arrival is not a placement).
+    #[serde(default)]
+    pub record_placements: Option<bool>,
 }
 
 /// The `enroll_pipeline_item` control request: tag a quote/proposal → create a
@@ -514,5 +628,54 @@ mod tests {
         .unwrap();
         assert_eq!(review.resolution(), Some(ReviewResolution::Skip));
         assert_eq!(review.instance_id(), WorkflowInstanceId::from("wfi_1"));
+    }
+
+    #[test]
+    fn regenerate_payload_flattens_the_base_context_and_folds_the_steer() {
+        let payload: RegenerateDraftPayload = serde_json::from_value(serde_json::json!({
+            "subject": "Quote",
+            "counterparty": "buyer@acme.test",
+            "excerpt": "Can you do better on price?",
+            "user_instruction": "Decline the discount.",
+            "forbidden_commitments": ["prices"],
+            "adjustments": ["Shorter", "Warmer"],
+            "steer": "and ask for the PO number"
+        }))
+        .unwrap();
+        // The base context flattened in.
+        assert_eq!(payload.base.subject, "Quote");
+        assert_eq!(
+            payload.base.forbidden_commitments,
+            vec!["prices".to_owned()]
+        );
+
+        let request = payload.into_request();
+        let instruction = request
+            .user_instruction
+            .expect("steer folded into instruction");
+        // Original instruction first, then each chip as a clause, then the free-text steer.
+        assert!(
+            instruction.starts_with("Decline the discount."),
+            "{instruction}"
+        );
+        assert!(instruction.contains("Make it shorter."), "{instruction}");
+        assert!(instruction.contains("Make it warmer."), "{instruction}");
+        assert!(
+            instruction.ends_with("and ask for the PO number"),
+            "{instruction}"
+        );
+        // The base's forbidden list survives lowering.
+        assert_eq!(request.forbidden_commitments, vec!["prices".to_owned()]);
+    }
+
+    #[test]
+    fn regenerate_payload_with_no_steer_has_no_instruction() {
+        let payload: RegenerateDraftPayload = serde_json::from_value(serde_json::json!({
+            "subject": "Quote",
+            "counterparty": "buyer@acme.test",
+            "excerpt": "hi"
+        }))
+        .unwrap();
+        assert!(payload.into_request().user_instruction.is_none());
     }
 }

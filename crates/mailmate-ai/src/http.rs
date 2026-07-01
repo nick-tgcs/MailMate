@@ -2,17 +2,17 @@
 //!
 //! The four remote adapters (Ollama, OpenAI-compatible, LM Studio, llama.cpp) do their
 //! provider-specific request *shaping* and response *parsing* in pure code, and reach the
-//! network only through this tiny [`HttpClient`] port. That keeps `reqwest` out of the
-//! default build entirely: tests drive the adapters with [`CannedHttpClient`], and the
-//! concrete reqwest-backed client is wired in at the edge (the host binary) where real
-//! network I/O belongs. This mirrors how the repositories sit above the `StorageBackend`
-//! seam — the provider logic never touches a socket directly.
+//! network only through this tiny [`HttpClient`] port. That keeps the whole HTTP/TLS stack out
+//! of the default build entirely: tests drive the adapters with [`CannedHttpClient`], and the
+//! concrete `ureq`-backed client is wired in at the edge (the host binary) where real network
+//! I/O belongs. This mirrors how the repositories sit above the `StorageBackend` seam — the
+//! provider logic never touches a socket directly.
 
 use async_trait::async_trait;
 
 use mailmate_common::error::AiError;
 
-/// A minimal HTTP-POST-JSON transport.
+/// A minimal HTTP JSON transport: a POST for structured completions, a GET for catalog reads.
 #[async_trait]
 pub trait HttpClient: Send + Sync {
     /// POST `body` as JSON to `url` with `headers`, returning the parsed JSON response.
@@ -24,6 +24,19 @@ pub trait HttpClient: Send + Sync {
         url: &str,
         headers: Vec<(String, String)>,
         body: serde_json::Value,
+    ) -> Result<serde_json::Value, AiError>;
+
+    /// GET `url` with `headers`, returning the parsed JSON response. Provider *model discovery*
+    /// (listing the models an endpoint serves) reads a catalog endpoint, which is a GET — the
+    /// completions path is the POST above. Provider-specific URLs/shapes live in
+    /// [`providers::discovery`](crate::providers::discovery), not here.
+    ///
+    /// # Errors
+    /// [`AiError::RequestFailed`] on transport failure or a non-JSON response.
+    async fn get_json(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
     ) -> Result<serde_json::Value, AiError>;
 }
 
@@ -74,6 +87,25 @@ impl HttpClient for CannedHttpClient {
         headers: Vec<(String, String)>,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, AiError> {
+        self.record(url, headers, body);
+        Ok(self.response.clone())
+    }
+
+    async fn get_json(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+    ) -> Result<serde_json::Value, AiError> {
+        // A GET carries no body; record `Null` so a test can still assert the url + headers.
+        self.record(url, headers, serde_json::Value::Null);
+        Ok(self.response.clone())
+    }
+}
+
+impl CannedHttpClient {
+    /// Record the last request (shared by [`post_json`](HttpClient::post_json) and
+    /// [`get_json`](HttpClient::get_json)).
+    fn record(&self, url: &str, headers: Vec<(String, String)>, body: serde_json::Value) {
         *self
             .last_request
             .lock()
@@ -82,6 +114,5 @@ impl HttpClient for CannedHttpClient {
             headers,
             body,
         });
-        Ok(self.response.clone())
     }
 }

@@ -39,6 +39,8 @@ fn message(id: Option<&str>) -> MessageData {
         body_text: None,
         attachments: vec![],
         remote_content_loaded: false,
+        sender_seen_count: None,
+        sender_in_address_book: None,
     }
 }
 
@@ -50,6 +52,9 @@ fn classification(labels: &[&str], needs_review: bool) -> Classification {
         phishing_score: 0.0,
         priority: Priority::Normal,
         needs_review,
+        confidence: 0.0,
+        salient_signals: Vec::new(),
+        safety_findings: Vec::new(),
         provenance: ClassificationProvenance::tier2("scripted-v1", false),
     }
 }
@@ -112,6 +117,51 @@ fn an_active_action_rule_produces_a_candidate_plan() {
     ));
     // Every candidate is safely applicable (structural floor beneath the policy guard).
     assert!(plan.actions.iter().all(|a| a.to_planned().is_some()));
+}
+
+#[test]
+fn the_plan_stamps_each_action_with_its_authoring_rule() {
+    // The keystone: provenance threads from the firing rule onto every action it produced, so the
+    // apply path can stamp a rule's real fires. `receipt_rule` (rule_receipts) produces two
+    // actions (tag + move); both carry that rule_id, length-matched with `actions`.
+    let planner =
+        DefaultActionPlanner::new(Arc::new(DeterministicRuleEngine::new(vec![receipt_rule(
+            RuleStatus::Active,
+        )])));
+    let input = ActionPlanningInput::new_mail(
+        message(Some("msg_1")),
+        classification(&["receipt"], false),
+        FeatureVector::new(),
+    );
+    let plan = block_on(planner.plan(input)).unwrap();
+    assert_eq!(plan.actions.len(), 2);
+    assert_eq!(
+        plan.authored_by.len(),
+        plan.actions.len(),
+        "provenance sidecar is length-matched with actions"
+    );
+    assert!(
+        plan.authored_by
+            .iter()
+            .all(|a| a.as_ref() == Some(&RuleId::from("rule_receipts"))),
+        "every action the rule produced is stamped with that rule: {:?}",
+        plan.authored_by
+    );
+}
+
+#[test]
+fn a_synthesized_needs_review_action_has_no_authoring_rule() {
+    // The needs-review fallback is synthesized by the planner, not produced by any rule, so its
+    // provenance is honestly `None` — never a misattributed rule_id.
+    let planner = DefaultActionPlanner::new(Arc::new(DeterministicRuleEngine::new(vec![])));
+    let input = ActionPlanningInput::new_mail(
+        message(Some("msg_1")),
+        classification(&["needs_review"], true),
+        FeatureVector::new(),
+    );
+    let plan = block_on(planner.plan(input)).unwrap();
+    assert_eq!(plan.actions.len(), 1);
+    assert_eq!(plan.authored_by, vec![None]);
 }
 
 #[test]

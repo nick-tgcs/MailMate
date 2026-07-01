@@ -25,7 +25,9 @@ pub use datasets::{build_dataset, DatasetPlan};
 pub use evaluation::{evaluate_adapter, evaluate_promotion};
 pub use lora::{check_compatibility, import_adapter, register_local_adapter, spec_for};
 pub use pipeline::DefaultTrainingPipeline;
-pub use privacy::{assert_ceiling_allowed, detect_safety_flags, enforce_privacy, redact_text};
+pub use privacy::{
+    assert_ceiling_allowed, detect_safety_flags, enforce_privacy, redact_text, scrub_secrets,
+};
 pub use source::{FeedbackTrainingSource, TrainingDataSource};
 pub use trainer::{
     TrainedArtifact, TrainedArtifactKind, TrainerBackend, TrainerCapabilities, TrainingHyperparams,

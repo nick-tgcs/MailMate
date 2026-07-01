@@ -24,6 +24,8 @@ use mailmate_common::error::ClassificationError;
 use mailmate_common::ids::RuleId;
 use mailmate_common::mail::MessageData;
 use mailmate_common::rules::evaluation::RuleEvaluationResult;
+use mailmate_common::safety::assess_safety;
+use mailmate_common::salient::{ai_signal, rule_signal, top_feature_signals};
 use mailmate_ports::ai_provider::AiProvider;
 use mailmate_ports::classification_engine::ClassificationEngine;
 use mailmate_ports::rule_engine::RuleEngine;
@@ -34,6 +36,15 @@ use crate::context::classification_context;
 /// The default snippet budget (bytes) sent to a Tier-3 provider. A versioned prompt-template
 /// parameter, not a hard constant — the egress posture caps content per feature.
 const DEFAULT_SNIPPET_BUDGET: usize = 4096;
+
+/// How many salient signals the cascade surfaces per verdict — the most-decisive few, so the
+/// panel reads as reasons rather than a feature dump.
+const MAX_SIGNALS: usize = 5;
+
+/// The confidence reported for a Tier-3 (LLM) verdict. The provider does not emit a calibrated
+/// probability, so the cascade reports a fixed *medium* band and leans on the honest
+/// "AI assessment" salient signal for provenance — never a fabricated high confidence.
+const TIER3_ASSESSED_CONFIDENCE: f64 = 0.7;
 
 /// The cascade classifier: Pipeline 1's default `ClassificationEngine` adapter.
 pub struct CascadeClassifier {
@@ -81,10 +92,15 @@ impl ClassificationEngine for CascadeClassifier {
     ) -> Result<Classification, ClassificationError> {
         let decision_id = input.decision_id.clone();
 
+        // Inform-only Safety block — derived once from the message + features, independent of
+        // which tier decides the verdict, and attached to whatever classification is returned.
+        let safety = assess_safety(&input.message, &input.features);
+
         // --- Tier 1: deterministic signals + classification rules ---
         let ctx = classification_context(decision_id.clone(), &input.message, &input.features);
         let rule_result = self.classification_rules.evaluate(ctx).await?;
-        if let Some(classification) = tier1_verdict(&decision_id, &rule_result) {
+        if let Some(mut classification) = tier1_verdict(&decision_id, &rule_result) {
+            classification.safety_findings = safety;
             return Ok(classification);
         }
 
@@ -97,6 +113,9 @@ impl ClassificationEngine for CascadeClassifier {
         let confident = confidence >= self.thresholds.tier2_accept;
         let phishing_clear = phishing_score <= self.thresholds.phishing_safe_floor;
         if confident && phishing_clear {
+            // The reasons the panel shows are the top signed contributions that actually produced
+            // this score — correctable, because they are deterministic model features.
+            let salient_signals = top_feature_signals(&scores.contributions, MAX_SIGNALS);
             return Ok(Classification {
                 decision_id,
                 labels: vec![top_label],
@@ -104,6 +123,9 @@ impl ClassificationEngine for CascadeClassifier {
                 phishing_score,
                 priority: Priority::Normal,
                 needs_review: false,
+                confidence,
+                salient_signals,
+                safety_findings: safety,
                 provenance: ClassificationProvenance::tier2(scores.calibration_version, false),
             });
         }
@@ -119,6 +141,8 @@ impl ClassificationEngine for CascadeClassifier {
                 },
             )
             .await?;
+            // An LLM verdict is honestly an "AI assessment" — never dressed as a deterministic
+            // signal, and not correctable as one.
             return Ok(Classification {
                 decision_id,
                 labels: response.labels,
@@ -126,11 +150,17 @@ impl ClassificationEngine for CascadeClassifier {
                 phishing_score: f64::from(response.phishing_score),
                 priority: response.priority,
                 needs_review: false,
+                confidence: TIER3_ASSESSED_CONFIDENCE,
+                salient_signals: vec![ai_signal(provider.id().as_str())],
+                safety_findings: safety,
                 provenance: ClassificationProvenance::tier3(provider.id().to_string()),
             });
         }
 
         // --- No provider: a Tier-3-needed message degrades to review, never auto-cleared. ---
+        // The Tier-2 contributions still explain *what the model saw* even though it abstained —
+        // honest at cold-start ("here's what I can already see") rather than a blank review wall.
+        let salient_signals = top_feature_signals(&scores.contributions, MAX_SIGNALS);
         Ok(Classification {
             decision_id,
             labels: vec!["needs_review".to_owned()],
@@ -138,6 +168,9 @@ impl ClassificationEngine for CascadeClassifier {
             phishing_score,
             priority: Priority::Normal,
             needs_review: true,
+            confidence,
+            salient_signals,
+            safety_findings: safety,
             provenance: ClassificationProvenance::tier2(scores.calibration_version, true),
         })
     }
@@ -183,6 +216,13 @@ fn tier1_verdict(
     let spam_score = f64::from(labels.iter().any(|l| l == "spam"));
     let phishing_score = f64::from(labels.iter().any(|l| l == "phishing"));
 
+    // Each fired rule is a salient signal: the user steers it by editing the rule, so it is
+    // surfaced but not correctable as a one-off signal.
+    let salient_signals = fired_rules
+        .iter()
+        .map(|rule_id| rule_signal(rule_id.as_str()))
+        .collect();
+
     Some(Classification {
         decision_id: decision_id.clone(),
         labels,
@@ -190,6 +230,11 @@ fn tier1_verdict(
         phishing_score,
         priority,
         needs_review: false,
+        // A deterministic rule fired — the verdict is certain.
+        confidence: 1.0,
+        salient_signals,
+        // The caller (`classify`) fills the Safety block; tier1_verdict has no message/features.
+        safety_findings: Vec::new(),
         provenance: ClassificationProvenance::tier1(fired_rules),
     })
 }
@@ -245,6 +290,8 @@ mod tests {
             body_text: body.map(str::to_owned),
             attachments: vec![],
             remote_content_loaded: false,
+            sender_seen_count: None,
+            sender_in_address_book: None,
         }
     }
 

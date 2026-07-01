@@ -91,6 +91,8 @@ impl PlanningService {
         trigger: TriggerKind,
     ) -> Result<PlanningOutcome, MailMateError> {
         let message_id = message.id.clone();
+        // The thread-guard signal, captured before `message` is moved into the plan input.
+        let is_joined_thread = message.is_joined_thread_reply();
 
         // Pipeline 1 — classify. Feature extraction is pure; the cascade sends content to a
         // model only on escalation.
@@ -115,6 +117,7 @@ impl PlanningService {
             categories: classification.policy_categories(),
             is_manual_user_override: false,
             explicit_move_allowance: false,
+            is_joined_thread,
             trigger,
         };
         let guarded_plan = self

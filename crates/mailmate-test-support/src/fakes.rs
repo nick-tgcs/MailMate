@@ -29,7 +29,7 @@ use mailmate_common::feedback::{
     FollowUpFeedback, FollowUpFeedbackQuery, FollowUpFeedbackRow, TaskFeedback,
 };
 use mailmate_common::ids::{
-    AdapterId, AuditId, DraftId, FeedbackId, MessageId, PipelineItemId, WorkflowConflictId,
+    AdapterId, AuditId, DraftId, FeedbackId, MessageId, PipelineItemId, RuleId, WorkflowConflictId,
     WorkflowDefId, WorkflowDefVersionId, WorkflowInstanceId, WorkflowShadowOutcomeId,
 };
 use mailmate_common::mail::{DraftSpec, FetchScope, MailAction, MailEvent, MessageData};
@@ -329,6 +329,7 @@ impl Tier2Classifier for FakeTier2Classifier {
         Ok(CalibratedScores {
             scores,
             calibration_version: "fake-v1".to_owned(),
+            contributions: Vec::new(),
         })
     }
 
@@ -392,15 +393,35 @@ impl ClassificationEngine for FakeClassificationEngine {
 #[derive(Debug)]
 pub struct FakeActionPlanner {
     actions: Vec<ProposedAction>,
+    /// The per-action authoring provenance returned alongside `actions` (length-matched, or empty
+    /// to leave provenance unknown). Lets a test exercise the per-rule fires path the real planner
+    /// stamps from `AppliedEffect::rule_id`.
+    authored_by: Vec<Option<RuleId>>,
     seen: Mutex<Vec<ActionPlanningInput>>,
 }
 
 impl FakeActionPlanner {
-    /// A planner that always proposes `actions`.
+    /// A planner that always proposes `actions` (with no per-action provenance).
     #[must_use]
     pub fn returning(actions: Vec<ProposedAction>) -> Self {
         Self {
             actions,
+            authored_by: Vec::new(),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A planner that proposes `actions`, each authored by the matching `authored_by` rule — the
+    /// provenance the real planner derives from the firing rule, so a test can drive the apply
+    /// path's per-rule fires stamping.
+    #[must_use]
+    pub fn returning_authored(
+        actions: Vec<ProposedAction>,
+        authored_by: Vec<Option<RuleId>>,
+    ) -> Self {
+        Self {
+            actions,
+            authored_by,
             seen: Mutex::new(Vec::new()),
         }
     }
@@ -419,6 +440,7 @@ impl ActionPlanner for FakeActionPlanner {
             decision_id: input.decision_id.clone(),
             message_id: input.message.id.clone(),
             actions: self.actions.clone(),
+            authored_by: self.authored_by.clone(),
         };
         self.seen.lock().unwrap().push(input);
         Ok(plan)
@@ -452,9 +474,11 @@ impl PolicyGuard for FakePolicyGuard {
         plan: ActionPlan,
     ) -> Result<GuardedActionPlan, PolicyError> {
         let mut allowed_actions = Vec::new();
+        let mut allowed_authored_by = Vec::new();
         let mut blocked_actions = Vec::new();
         let mut policy_checks = Vec::new();
-        for action in plan.actions {
+        for (index, action) in plan.actions.into_iter().enumerate() {
+            let authored = plan.authored_by.get(index).cloned().flatten();
             match action.to_planned() {
                 Some(planned) => {
                     policy_checks.push(PolicyCheckResult {
@@ -462,6 +486,7 @@ impl PolicyGuard for FakePolicyGuard {
                         outcome: PolicyOutcome::Allowed,
                     });
                     allowed_actions.push(planned);
+                    allowed_authored_by.push(authored);
                 }
                 None => {
                     policy_checks.push(PolicyCheckResult {
@@ -482,6 +507,7 @@ impl PolicyGuard for FakePolicyGuard {
         Ok(GuardedActionPlan {
             decision_id: plan.decision_id,
             allowed_actions,
+            allowed_authored_by,
             review_required_actions: Vec::new(),
             blocked_actions,
             policy_checks,
@@ -663,6 +689,8 @@ impl ProposalReview for FakeProposalReview {
             proposal_id,
             new_status,
             created_rule_id: None,
+            // This fake never materializes a rule, so there is no rule mode to report.
+            rule_status: None,
             feedback_id: FeedbackId::from("rpffb_fake"),
         })
     }
@@ -1216,7 +1244,11 @@ impl WorkflowInstanceRepository for FakeWorkflowInstanceRepository {
             .cloned())
     }
 
-    async fn list_due(&self, now: Timestamp) -> Result<Vec<WorkflowInstance>, StorageError> {
+    async fn list_due(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<WorkflowInstance>, StorageError> {
         let mut out: Vec<WorkflowInstance> = self
             .instances
             .lock()
@@ -1226,6 +1258,7 @@ impl WorkflowInstanceRepository for FakeWorkflowInstanceRepository {
             .cloned()
             .collect();
         out.sort_by_key(|i| i.next_due_at);
+        out.truncate(limit);
         Ok(out)
     }
 
@@ -1603,6 +1636,9 @@ mod tests {
             phishing_score: 0.0,
             priority: Priority::Normal,
             needs_review: false,
+            confidence: 0.0,
+            salient_signals: Vec::new(),
+            safety_findings: Vec::new(),
             provenance: ClassificationProvenance::tier1(vec![]),
         }
     }
@@ -1657,10 +1693,17 @@ mod tests {
                     message_id: MessageId::from("msg_1"),
                 },
             ],
+            authored_by: vec![Some(RuleId::from("rule_tag")), None],
         };
         let guarded = block_on(guard.evaluate_action_plan(PolicyContext::default(), plan)).unwrap();
         assert_eq!(guarded.allowed_actions.len(), 1);
         assert_eq!(guarded.blocked_actions.len(), 1);
+        // The allowed Tag keeps its authoring rule, length-matched with the single allowed action;
+        // the blocked Delete's slot is dropped (only auto-applied actions need provenance).
+        assert_eq!(
+            guarded.allowed_authored_by,
+            vec![Some(RuleId::from("rule_tag"))]
+        );
     }
 
     #[test]

@@ -65,6 +65,11 @@ pub struct DraftReplyResponse {
     /// Safety notes the review surface should show.
     #[serde(default)]
     pub safety_notes: Vec<String>,
+    /// The model's short "why this draft" explanation, when it gave one. Optional on the wire
+    /// (`#[serde(default)]`) so an older or terser model that omits it still validates — the
+    /// review surface degrades to a generic line rather than inventing a reason.
+    #[serde(default)]
+    pub rationale: String,
 }
 
 impl ValidatedResponse for DraftReplyResponse {

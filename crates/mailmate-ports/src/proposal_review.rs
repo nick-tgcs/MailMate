@@ -2,10 +2,13 @@
 //!
 //! This is where "require human review for activation of risky rules" is enforced as a
 //! capability: a proposal's recommended rule is created **only** through
-//! [`review`](ProposalReview::review) with an accepting decision, and even then the rule
-//! enters its recommended status (`shadow_mode`/`pending_human_review`), never `active`.
-//! The decision is recorded to `rule_proposal_feedback` (so the curator loop is learnable)
-//! and to the audit timeline.
+//! [`review`](ProposalReview::review) with an accepting decision, and *materialization* always
+//! enters the recommended status (`shadow_mode`/`pending_human_review`), never `active`. Going
+//! live is a separate, explicit step: an accepting decision may also carry
+//! [`ReviewDecision::activate`], which performs a distinct `rule_activated` transition to
+//! `active` — so no rule is ever activated as a silent side effect of materialization. The
+//! decision is recorded to `rule_proposal_feedback` (so the curator loop is learnable) and to
+//! the audit timeline.
 //!
 //! The default adapter (`mailmate-learning::DefaultProposalReview`) composes the proposal,
 //! rule, feedback, and audit storage ports; the core names only this trait.

@@ -170,6 +170,14 @@ button {
   padding: 12px 14px;
   margin-bottom: 12px;
 }
+/* Keyboard triage: the focused review card shows a clear focus ring and accent border so a
+   keyboard or screen-reader user always sees which card the j/k/Enter/x shortcuts act on. */
+.mm-card[data-card]:focus,
+.mm-card[data-card]:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: 2px;
+  border-color: var(--mm-accent);
+}
 .mm-card__top {
   display: flex;
   align-items: baseline;
@@ -177,6 +185,10 @@ button {
 }
 .mm-glyph {
   font-size: 14px;
+}
+.mm-glyph--critical {
+  color: var(--mm-risk);
+  font-weight: 700;
 }
 .mm-glyph--high {
   color: var(--mm-risk);
@@ -186,6 +198,32 @@ button {
 }
 .mm-glyph--low {
   opacity: 0.6;
+}
+/* Rules-manager: a group heading and a per-rule lifecycle pill. */
+.mm-band__title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  margin: 16px 0 6px;
+}
+.mm-pill {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.16);
+  text-transform: capitalize;
+}
+.mm-pill--active {
+  color: var(--mm-good, #2e7d32);
+  background: rgba(46, 125, 50, 0.14);
+}
+.mm-pill--shadow_mode {
+  color: var(--mm-accent, #2563eb);
+  background: rgba(37, 99, 235, 0.14);
+}
+.mm-pill--disabled {
+  opacity: 0.7;
 }
 .mm-card__title {
   font-weight: 600;
@@ -210,6 +248,17 @@ button {
   margin: 4px 0 0;
   font-size: 12px;
   opacity: 0.8;
+}
+/* A rule rendered in English (proposal card + Rules-manager tab). Monospace-ish emphasis so the
+   condition→effect reads as the machine-checkable thing it is. */
+.mm-rule-en {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-left: 2px solid var(--mm-accent, #2563eb);
+  background: rgba(128, 128, 128, 0.06);
+  border-radius: 4px;
 }
 
 .mm-rows {
@@ -323,6 +372,52 @@ button.mm-btn:not(:disabled):hover {
   opacity: 0.7;
 }
 
+/* --- First-run backfill ("Triage my existing mail") ---------------------------------- */
+
+.mm-backfill {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--mm-line);
+  border-radius: 8px;
+  background: var(--mm-soft);
+}
+.mm-backfill__hint {
+  flex: 1 1 220px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.mm-backfill__chip {
+  font-weight: 600;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.mm-backfill__chip--done {
+  color: var(--mm-accent);
+}
+.mm-backfill__start {
+  border: 1px solid var(--mm-accent);
+  color: var(--mm-accent);
+  background: ButtonFace;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.mm-backfill__btn {
+  border: 1px solid var(--mm-line);
+  background: ButtonFace;
+  color: ButtonText;
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.mm-backfill__btn--stop {
+  color: var(--mm-risk);
+}
+
 /* --- Empty states --------------------------------------------------------------------- */
 
 .mm-empty {
@@ -381,6 +476,61 @@ button.mm-btn:not(:disabled):hover {
   margin-top: 22px;
 }
 
+/* Inline provider form inside the onboarding card (step 3). */
+.mm-ob__field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+.mm-ob__field > label {
+  min-width: 84px;
+  opacity: 0.85;
+}
+.mm-ob__card input[type="text"],
+.mm-ob__card input[type="password"],
+.mm-ob__card select {
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: Field;
+  color: FieldText;
+  flex: 1;
+  min-width: 0;
+}
+.mm-ob__model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+.mm-ob__model > select,
+.mm-ob__model > input[type="text"] {
+  flex: 1;
+  min-width: 140px;
+}
+.mm-ob__formnav {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+button.mm-btn--icon {
+  width: 32px;
+  text-align: center;
+  padding: 5px 0;
+}
+.mm-linkbtn {
+  border: none;
+  background: none;
+  color: var(--mm-accent);
+  text-decoration: underline;
+  padding: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
 /* --- Toast ---------------------------------------------------------------------------- */
 
 .mm-toast {
@@ -401,6 +551,13 @@ button.mm-btn:not(:disabled):hover {
 
 .mm-muted {
   opacity: 0.7;
+}
+.mm-warn {
+  color: var(--mm-warn);
+  font-weight: 600;
+}
+.mm-card__conflicts {
+  margin: 0.25rem 0;
 }
 [hidden] {
   display: none !important;

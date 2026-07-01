@@ -244,8 +244,12 @@ class NativeHost {
     });
   }
 
-  // Send a request and resolve with its response payload (or reject on host error).
-  request(type, payload) {
+  // Send a request and resolve with its response payload (or reject on host error). An optional
+  // `timeoutMs` rejects (and forgets the pending entry) if the host never answers — without it a
+  // wedged request hangs forever and reaches the caller only as a silent "no response". The timeout
+  // is opt-in so long-running calls (LLM drafting) are unaffected; the fast admin/discovery
+  // round-trips pass one so a stalled host surfaces as a clean, logged error.
+  request(type, payload, timeoutMs) {
     const requestId = nextRequestId(type);
     const frame = {
       protocol_version: PROTOCOL_VERSION,
@@ -256,10 +260,32 @@ class NativeHost {
     };
     return new Promise((resolve, reject) => {
       this.pending.set(requestId, { resolve, reject });
+      let timer = null;
+      if (timeoutMs && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          // Fire only if still pending — a real response or a disconnect may have settled it first.
+          if (this.pending.delete(requestId)) {
+            reject(new Error(`request ${type} timed out after ${timeoutMs}ms`));
+          }
+        }, timeoutMs);
+        // Clear the timer however the request settles (response via _onMessage, or disconnect).
+        const entry = this.pending.get(requestId);
+        entry.resolve = (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        };
+        entry.reject = (e) => {
+          clearTimeout(timer);
+          reject(e);
+        };
+      }
       try {
         this.port.postMessage(frame);
       } catch (e) {
         this.pending.delete(requestId);
+        if (timer) {
+          clearTimeout(timer);
+        }
         reject(e);
       }
     });

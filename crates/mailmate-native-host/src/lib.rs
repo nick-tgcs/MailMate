@@ -34,15 +34,20 @@
 //! [native messaging]: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/Native_messaging
 
 pub mod benchmark;
+pub mod bootstrap;
 pub mod clock;
 pub mod config;
 pub mod convert;
 pub mod dispatch;
+pub mod http_client;
+pub mod logging;
 pub mod manifest;
 pub mod native_stdio;
 pub mod protocol_dto;
+pub mod provider;
 pub mod router;
 pub mod runtime;
 pub mod secret_store;
 pub mod simulation;
 pub mod thunderbird;
+pub mod tier2_training;
