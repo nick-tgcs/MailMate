@@ -81,7 +81,7 @@ rusqlite = { version = "=0.40.1", features = ["bundled"] }
 regex = "=1.12.4"
 # TOML parser for the host's `[storage]`/`[ai]`/`[retention]` config file (Phase 12).
 # Pure Rust, edge-only (the native-host composition root); never reaches the inner hexagon.
-toml = "=1.1.2"
+toml = "=1.1.3"
 # Dev-only: hermetic temp files/dirs for the file-backed-storage and composition-root tests
 # (declared here because Cargo inherits `<dep>.workspace = true` only from this table).
 tempfile = "=3.27.0"
