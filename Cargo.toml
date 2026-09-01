@@ -69,7 +69,7 @@ thiserror = "=2.0.20"
 async-trait = "=0.1.92"
 futures = "=0.3.34"
 time = { version = "=0.3.55", features = ["serde", "macros", "formatting", "parsing"] }
-uuid = { version = "=1.25.0", features = ["v4", "serde"] }
+uuid = { version = "=1.26.0", features = ["v4", "serde"] }
 tokio = { version = "=1.52.3", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync"] }
 cargo_metadata = "=0.23.1"
 # Embedded SQLite driver for the default storage backend. `bundled` statically compiles
