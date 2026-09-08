@@ -75,7 +75,7 @@ cargo_metadata = "=0.23.1"
 # Embedded SQLite driver for the default storage backend. `bundled` statically compiles
 # SQLite (no system library, single binary). Lives ONLY in the mailmate-storage adapter;
 # the no-backend-leakage guard keeps it out of core/ports/common.
-rusqlite = { version = "=0.40.1", features = ["bundled"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # RE2-style (linear-time, no ReDoS) regex backing the `matches_regex` rule operator. Pure
 # Rust; lives in the mailmate-rules adapter, not the inner hexagon.
 regex = "=1.13.1"
