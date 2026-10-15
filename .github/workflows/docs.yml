@@ -16,7 +16,7 @@ jobs:
     name: markdown link check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check internal Markdown links resolve
         run: |
           set -euo pipefail
@@ -44,7 +44,7 @@ jobs:
     name: architecture safety invariants present
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Assert required safety/policy constraints are documented
         run: |
           set -euo pipefail
